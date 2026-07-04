@@ -67,6 +67,11 @@ dist\MarkdownSidekick\MarkdownSidekick.exe --selftest   # writes a JSON report t
 The `--selftest` flag verifies the bundled pipeline (markitdown, OCR, cleanup)
 and exits 0 on success — useful before shipping a build to someone.
 
+> **Run the exe from `dist\`, not `build\`.** PyInstaller's `build\` folder is
+> intermediate scratch — the exe it leaves there has no runtime next to it and
+> fails with "Failed to load Python DLL". Only `dist\MarkdownSidekick\` is the
+> complete, shippable app.
+
 ### Option B — Install with pip / pipx (Python 3.10+, any OS)
 
 ```powershell
