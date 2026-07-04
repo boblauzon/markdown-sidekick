@@ -1,0 +1,19 @@
+# Markdown Sidekick dependencies
+markitdown[all]>=0.1.0
+tkinterdnd2>=0.4.0
+
+# OCR pipeline (Phase 3): local, offline, permissively licensed.
+# RapidOCR bundles ONNX models in the wheel (no download, CPU-friendly).
+# pypdfium2 (Apache/BSD) is used for PDF page triage + rendering instead of
+# PyMuPDF, which is AGPL-licensed.
+rapidocr-onnxruntime>=1.2.0
+pypdfium2>=4.0.0
+
+# Audio transcription (Phase 2): faster-whisper bundles FFmpeg via PyAV wheels,
+# so MP3/M4A/WAV/FLAC decode with no system ffmpeg on PATH. The Whisper model
+# downloads once on first use to %LOCALAPPDATA%\MarkdownSidekick\models.
+faster-whisper>=1.0.0
+
+# MCP server (Phase 5): exposes the conversion pipeline as a tool for
+# Claude Desktop / Cursor / VS Code over stdio.
+fastmcp>=3.0.0

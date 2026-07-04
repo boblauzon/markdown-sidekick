@@ -1,0 +1,219 @@
+"""Conversion engine wrapping Microsoft's markitdown library.
+
+Keeps all markitdown-specific logic in one place so the UI never has to know
+how conversion actually happens.
+"""
+
+from __future__ import annotations
+
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Callable, Iterable
+
+try:
+    from markitdown import MarkItDown
+except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
+    raise ImportError(
+        "The 'markitdown' package is not installed. Activate the project "
+        "virtual environment or run: pip install \"markitdown[all]\""
+    ) from exc
+
+from . import audio, mineru, ocr
+
+
+# File extensions markitdown can meaningfully handle. Used to build the file
+# picker filter and to give friendly warnings; markitdown still sniffs content
+# at conversion time, so this list is a guide, not a hard gate.
+SUPPORTED_EXTENSIONS: tuple[str, ...] = (
+    ".pdf",
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".xls",
+    ".html",
+    ".htm",
+    ".csv",
+    ".json",
+    ".xml",
+    ".txt",
+    ".md",
+    ".epub",
+    ".zip",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".gif",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".webp",
+    ".mp3",
+    ".wav",
+    ".m4a",
+    ".flac",
+    ".ogg",
+)
+
+
+@dataclass
+class ConversionResult:
+    """Outcome of converting a single source file."""
+
+    source: Path
+    markdown: str = ""
+    error: str | None = None
+    output_path: Path | None = None
+    engine: str = "markitdown"  # which pipeline produced the markdown
+
+    @property
+    def ok(self) -> bool:
+        return self.error is None
+
+    @property
+    def title(self) -> str:
+        return self.source.name
+
+
+@dataclass
+class ConversionEngine:
+    """Reusable wrapper around markitdown with an optional local OCR fallback.
+
+    Routing per file:
+      * image file + OCR enabled  -> RapidOCR
+      * scanned/mixed PDF + OCR   -> render scanned pages + OCR, keep text pages
+      * everything else           -> markitdown (best for clean digital docs)
+    """
+
+    enable_plugins: bool = False
+    enable_ocr: bool = True
+    enable_audio: bool = True
+    whisper_model: str = "base"
+    mineru_endpoint: str = ""  # blank = disabled
+    _md: MarkItDown = field(init=False, repr=False)
+    _ocr: "ocr.OcrEngine | None" = field(init=False, default=None, repr=False)
+    _audio: "audio.AudioTranscriber | None" = field(init=False, default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self._md = MarkItDown(enable_plugins=self.enable_plugins)
+
+    def _ocr_engine(self) -> "ocr.OcrEngine":
+        if self._ocr is None:
+            self._ocr = ocr.OcrEngine()
+        return self._ocr
+
+    def _audio_engine(self) -> "audio.AudioTranscriber":
+        # Rebuild if the model size changed so the right model is loaded.
+        if self._audio is None or self._audio.model_size != self.whisper_model:
+            self._audio = audio.AudioTranscriber(model_size=self.whisper_model)
+        return self._audio
+
+    def convert_file(
+        self,
+        path: str | os.PathLike[str],
+        on_subprogress: Callable[[Path, float, float, str], None] | None = None,
+    ) -> ConversionResult:
+        """Convert a single file, never raising; errors are captured on the result.
+
+        ``on_subprogress(source, current, total, unit)`` is invoked during slow
+        within-file work (OCR pages, audio seconds) so the UI can show progress.
+        ``unit`` is "page" or "sec". It must be thread-safe.
+        """
+        source = Path(path)
+        if not source.exists():
+            return ConversionResult(source=source, error="File does not exist.")
+        if source.is_dir():
+            return ConversionResult(source=source, error="Path is a directory, not a file.")
+        ext = source.suffix.lower()
+        try:
+            # Specialised routes are attempted defensively: on any failure
+            # (corrupt/encrypted file, render error, missing/undownloadable model)
+            # fall through to markitdown rather than failing the file outright.
+            if self.enable_ocr and ocr.ocr_available() and ext in ocr.OCR_IMAGE_EXTENSIONS:
+                try:
+                    md = self._ocr_engine().image_to_markdown(source)
+                    return ConversionResult(source=source, markdown=md, engine="ocr")
+                except Exception:
+                    pass  # fall back to markitdown
+
+            # High-fidelity MinerU (opt-in via a configured endpoint) gets first
+            # crack at PDFs; on any failure we fall through to local OCR/markitdown.
+            if ext == ".pdf" and mineru.mineru_configured(self.mineru_endpoint):
+                try:
+                    md = mineru.convert_via_mineru(source, self.mineru_endpoint)
+                    if md and md.strip():
+                        return ConversionResult(source=source, markdown=md, engine="mineru")
+                except Exception:
+                    pass  # fall back to local OCR / markitdown
+
+            if self.enable_ocr and ocr.pdf_ocr_available() and ext == ".pdf":
+                try:
+                    analysis = ocr.analyze_pdf(source)
+                    if analysis is not None and analysis.needs_ocr:
+                        inner = (
+                            (lambda p, t: on_subprogress(source, p, t, "page"))
+                            if on_subprogress is not None
+                            else None
+                        )
+                        md = self._ocr_engine().pdf_to_markdown(
+                            source, analysis, on_page=inner
+                        )
+                        return ConversionResult(
+                            source=source, markdown=md, engine="ocr+text"
+                        )
+                except Exception:
+                    pass  # fall back to markitdown
+
+            if self.enable_audio and audio.audio_available() and ext in audio.AUDIO_EXTENSIONS:
+                try:
+                    inner = (
+                        (lambda c, t: on_subprogress(source, c, t, "sec"))
+                        if on_subprogress is not None
+                        else None
+                    )
+                    md = self._audio_engine().transcribe_to_markdown(
+                        source, on_progress=inner
+                    )
+                    return ConversionResult(source=source, markdown=md, engine="whisper")
+                except Exception:
+                    pass  # fall back to markitdown
+
+            result = self._md.convert(str(source))
+            return ConversionResult(
+                source=source, markdown=result.text_content or "", engine="markitdown"
+            )
+        except Exception as exc:  # markitdown raises a variety of types
+            return ConversionResult(source=source, error=f"{type(exc).__name__}: {exc}")
+
+    def convert_many(
+        self,
+        paths: Iterable[str | os.PathLike[str]],
+        on_progress: Callable[[int, int, ConversionResult], None] | None = None,
+        on_subprogress: Callable[[Path, float, float, str], None] | None = None,
+    ) -> list[ConversionResult]:
+        """Convert several files, reporting progress after each one.
+
+        ``on_progress`` receives ``(index, total, result)`` with ``index`` being
+        1-based. ``on_subprogress`` is forwarded to per-file OCR/audio progress.
+        Both must be safe to call from a worker thread.
+        """
+        items = [Path(p) for p in paths]
+        total = len(items)
+        results: list[ConversionResult] = []
+        for index, item in enumerate(items, start=1):
+            result = self.convert_file(item, on_subprogress=on_subprogress)
+            results.append(result)
+            if on_progress is not None:
+                on_progress(index, total, result)
+        return results
+
+
+def default_output_path(source: Path, out_dir: Path | None = None) -> Path:
+    """Suggested ``.md`` destination next to the source (or in ``out_dir``)."""
+    target_dir = out_dir if out_dir is not None else source.parent
+    return target_dir / f"{source.stem}.md"
+
+
+def write_markdown(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")

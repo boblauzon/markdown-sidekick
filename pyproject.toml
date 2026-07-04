@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "markdown-sidekick"
+version = "1.0.0"
+description = "Desktop app that converts documents, images, scanned PDFs and audio to Markdown — markitdown + local OCR + local transcription."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Rob Lauzon" }]
+keywords = ["markdown", "converter", "ocr", "transcription", "markitdown", "pdf"]
+classifiers = [
+    "Environment :: Win32 (MS Windows)",
+    "Environment :: X11 Applications",
+    "Intended Audience :: End Users/Desktop",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup :: Markdown",
+]
+
+dependencies = [
+    "markitdown[all]>=0.1.0",
+    "tkinterdnd2>=0.4.0",
+    "rapidocr-onnxruntime>=1.2.0",
+    "pypdfium2>=4.0.0",
+    "faster-whisper>=1.0.0",
+]
+
+[project.optional-dependencies]
+# The MCP server for Claude Desktop / Cursor / VS Code is opt-in.
+mcp = ["fastmcp>=3.0.0"]
+
+[project.gui-scripts]
+markdown-sidekick = "markdown_sidekick.ui:run"
+
+[project.scripts]
+markdown-sidekick-mcp = "markdown_sidekick.mcp_server:main"
+
+[project.urls]
+Repository = "https://github.com/roblauzon/markdown-sidekick"
+
+[tool.setuptools.packages.find]
+where = ["src"]
