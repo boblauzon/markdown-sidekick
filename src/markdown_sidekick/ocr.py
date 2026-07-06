@@ -68,6 +68,12 @@ def pdf_ocr_available() -> bool:
     return _RAPIDOCR_AVAILABLE and _PDFIUM_AVAILABLE
 
 
+def pdfium_available() -> bool:
+    """True if pypdfium2 alone is importable (page-anchor text extraction
+    and figure extraction need no OCR engine)."""
+    return _PDFIUM_AVAILABLE
+
+
 @dataclass
 class PdfAnalysis:
     """Per-page triage of a PDF used to decide on the conversion route."""
@@ -171,6 +177,39 @@ class OcrEngine:
         if not body:
             body = "_(No text detected in image.)_"
         return f"# OCR: {source.name}\n\n{body}\n"
+
+    def pdf_text_to_markdown(
+        self,
+        path: str | Path,
+        on_page: Callable[[int, int], None] | None = None,
+    ) -> str:
+        """Extract a digital PDF's text layer page by page with page anchors.
+
+        Used when the user wants ``<!-- page N -->`` markers for citation
+        grounding: markitdown flattens pages away, so the per-page extraction
+        has to happen here. Output quality matches markitdown's PDF path
+        (both are plain text layers).
+        """
+        pdf = pdfium.PdfDocument(str(path))
+        parts: list[str] = []
+        try:
+            total = len(pdf)
+            for i in range(total):
+                page = pdf[i]
+                try:
+                    textpage = page.get_textpage()
+                    try:
+                        text = textpage.get_text_range().strip()
+                    finally:
+                        textpage.close()
+                finally:
+                    page.close()
+                parts.append(f"<!-- page {i + 1} -->\n\n{text}")
+                if on_page is not None:
+                    on_page(i + 1, total)
+        finally:
+            pdf.close()
+        return "\n\n".join(parts).strip() + "\n"
 
     def pdf_to_markdown(
         self,

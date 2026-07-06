@@ -37,6 +37,7 @@ markdown-sidekick = "markdown_sidekick.ui:run"
 
 [project.scripts]
 markdown-sidekick-mcp = "markdown_sidekick.mcp_server:main"
+markdown-sidekick-cli = "markdown_sidekick.cli:main"
 
 [project.urls]
 Repository = "https://github.com/roblauzon/markdown-sidekick"

@@ -17,11 +17,12 @@ from .converter import (
     ConversionEngine,
     ConversionResult,
     default_output_path,
-    write_markdown,
 )
+from . import export as md_export
 from .guide import KOFI_URL, build_mcp_setup_prompt, load_user_guide
 from .mdrender import MarkdownRenderer
 from .ocr import ocr_available
+from .quality import assess_markdown
 from .settings import WHISPER_MODELS, Settings
 
 # Optional drag-and-drop support. The app degrades gracefully without it.
@@ -75,6 +76,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             enable_audio=self.settings.enable_audio,
             whisper_model=self.settings.whisper_model,
             mineru_endpoint=self.settings.mineru_endpoint,
+            page_anchors=self.settings.page_anchors,
         )
         # Ordered mapping of source path -> result (None until converted).
         self.files: dict[Path, ConversionResult | None] = {}
@@ -397,6 +399,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         model_v = tk.StringVar(dlg, value=self.settings.whisper_model)
         endpoint_v = tk.StringVar(dlg, value=self.settings.mineru_endpoint)
         outdir_v = tk.StringVar(dlg, value=self.settings.default_output_dir)
+        front_v = tk.BooleanVar(dlg, value=self.settings.export_front_matter)
+        split_v = tk.BooleanVar(dlg, value=self.settings.split_chapters)
+        anchors_v = tk.BooleanVar(dlg, value=self.settings.page_anchors)
+        images_v = tk.BooleanVar(dlg, value=self.settings.extract_images)
+        ollama_v = tk.StringVar(dlg, value=self.settings.ollama_endpoint)
+        polish_v = tk.StringVar(dlg, value=self.settings.polish_model)
+        caption_v = tk.StringVar(dlg, value=self.settings.caption_model)
 
         def section(text: str, row: int) -> None:
             ttk.Label(dlg, text=text, style="Panel.TLabel", font=FONT_BOLD).grid(
@@ -449,18 +458,44 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         check("Clean output", clean_v, 11)
         check("Rendered preview", rendered_v, 12)
 
-        section("AI integration (MCP)", 13)
+        section("AI-friendly export", 13)
+        check("YAML front matter on saved files", front_v, 14)
+        check("Save all: split books into chapter folders", split_v, 15)
+        check("Page anchors (<!-- page N -->) in PDF conversions", anchors_v, 16)
+        check("Extract PDF figures to assets/ on save", images_v, 17)
+
+        section("Local LLM extras (optional, via Ollama)", 18)
+        ttk.Label(dlg, text="Ollama endpoint", style="Panel.TLabel").grid(
+            row=19, column=0, sticky="w", **pad
+        )
+        ttk.Entry(dlg, textvariable=ollama_v, width=38).grid(
+            row=19, column=1, columnspan=2, sticky="w"
+        )
+        ttk.Label(dlg, text="Polish model / caption model", style="Panel.TLabel").grid(
+            row=20, column=0, sticky="w", **pad
+        )
+        ttk.Entry(dlg, textvariable=polish_v, width=14).grid(row=20, column=1, sticky="w")
+        ttk.Entry(dlg, textvariable=caption_v, width=14).grid(
+            row=20, column=2, sticky="w", padx=6
+        )
+        ttk.Label(
+            dlg,
+            text="e.g. http://localhost:11434 with llama3.2 / llava  (blank = off)",
+            style="PanelMuted.TLabel",
+        ).grid(row=21, column=1, columnspan=2, sticky="w")
+
+        section("AI integration (MCP)", 22)
         ttk.Button(
             dlg,
             text="📋  Copy AI setup prompt",
             command=lambda: self.copy_mcp_prompt(parent=dlg),
-        ).grid(row=14, column=0, sticky="w", padx=16)
+        ).grid(row=23, column=0, sticky="w", padx=16)
         ttk.Label(
             dlg,
             text="Paste it into Claude, Cursor, or any AI assistant\nto connect Markdown Sidekick as a converter tool.",
             style="PanelMuted.TLabel",
             justify="left",
-        ).grid(row=14, column=1, columnspan=2, sticky="w", padx=(8, 16))
+        ).grid(row=23, column=1, columnspan=2, sticky="w", padx=(8, 16))
 
         def save() -> None:
             self.settings.enable_ocr = ocr_v.get()
@@ -470,12 +505,19 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.settings.default_output_dir = outdir_v.get()
             self.settings.clean_output = clean_v.get()
             self.settings.rendered_preview = rendered_v.get()
+            self.settings.export_front_matter = front_v.get()
+            self.settings.split_chapters = split_v.get()
+            self.settings.page_anchors = anchors_v.get()
+            self.settings.extract_images = images_v.get()
+            self.settings.ollama_endpoint = ollama_v.get()
+            self.settings.polish_model = polish_v.get()
+            self.settings.caption_model = caption_v.get()
             self.settings.save()
             self._apply_settings()
             dlg.destroy()
 
         btns = ttk.Frame(dlg, style="Panel.TFrame")
-        btns.grid(row=15, column=0, columnspan=3, sticky="e", pady=16, padx=16)
+        btns.grid(row=24, column=0, columnspan=3, sticky="e", pady=16, padx=16)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right")
 
@@ -495,6 +537,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.engine.enable_audio = s.enable_audio
         self.engine.whisper_model = s.whisper_model
         self.engine.mineru_endpoint = s.mineru_endpoint
+        self.engine.page_anchors = s.page_anchors
         self.ocr_var.set(s.enable_ocr and ocr_available())
         self.clean_var.set(s.clean_output)
         self.rendered_var.set(s.rendered_preview)
@@ -650,10 +693,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 self._renderer.render(text)
             else:
                 self._show_plain(path.name, text, store=False)
+            status_bits = []
             if self.clean_var.get() and path in self._clean_stats:
                 stats = self._clean_stats[path]
                 if getattr(stats, "changed", False):
-                    self.status_var.set(stats.summary())
+                    status_bits.append(stats.summary())
+            status_bits.append(assess_markdown(text).summary())
+            self.status_var.set("   ·   ".join(status_bits))
 
     def _show_plain(self, name: str, content: str, store: bool = True) -> None:
         """Drop the raw text into the preview with no Markdown styling."""
@@ -819,7 +865,14 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         )
         if not dest:
             return
-        write_markdown(Path(dest), text)
+        result = self.files.get(path)
+        md_export.export_single(
+            text,
+            Path(dest),
+            source=path.name,
+            engine=result.engine if result else "",
+            front_matter=self.settings.export_front_matter,
+        )
         self.status_var.set(f"Saved {Path(dest).name}.")
 
     def save_all(self) -> None:
@@ -842,6 +895,26 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             text = self._export_text_for(path)
             if text is None:
                 continue
+            result = self.files.get(path)
+            engine = result.engine if result else ""
+            # Optional AI-friendly extras (all controlled from Settings).
+            if self.settings.extract_images and path.suffix.lower() == ".pdf":
+                from . import figures
+
+                book_dir = out / path.stem if self.settings.split_chapters else out
+                figs = figures.extract_pdf_figures(path, book_dir / "assets")
+                if figs:
+                    text = figures.insert_figure_links(text, figs)
+            if self.settings.split_chapters:
+                res = md_export.export_book(
+                    text,
+                    out / path.stem,
+                    source=path.name,
+                    engine=engine,
+                    front_matter=self.settings.export_front_matter,
+                )
+                saved += len(res.paths)
+                continue
             dest = default_output_path(path, out)
             # Disambiguate same-stem files from different folders so we never
             # silently overwrite one output with another.
@@ -851,7 +924,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     n += 1
                 dest = candidate
             used_names.add(dest.name)
-            write_markdown(dest, text)
+            md_export.export_single(
+                text,
+                dest,
+                source=path.name,
+                engine=engine,
+                front_matter=self.settings.export_front_matter,
+            )
             saved += 1
         mode = "cleaned" if self.clean_var.get() else "raw"
         self.status_var.set(f"Saved {saved} {mode} Markdown file(s) to {out.name}.")

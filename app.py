@@ -54,6 +54,18 @@ def _selftest() -> int:
             cleaned, _ = clean_markdown("import os\nx = 1\n")
             report["checks"]["cleanup"] = "```python" in cleaned
 
+            # AI-friendly export + quality assessment round-trip.
+            from markdown_sidekick.export import export_book
+            from markdown_sidekick.quality import assess_markdown
+
+            book = export_book(
+                "# One\n\nalpha\n\n# Two\n\nbeta\n", Path(td) / "book", source="s.pdf"
+            )
+            report["checks"]["export_split"] = (
+                len(book.paths) == 2 and book.manifest_path is not None
+            )
+            report["checks"]["quality"] = assess_markdown("# T\n\nbody\n").score > 0
+
         from markdown_sidekick.guide import load_user_guide
 
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
@@ -94,6 +106,12 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
+    if "--cli" in sys.argv:
+        # Headless conversion: `MarkdownSidekick.exe --cli convert file.pdf ...`
+        from markdown_sidekick.cli import main as cli_main
+
+        args = sys.argv[sys.argv.index("--cli") + 1 :]
+        sys.exit(cli_main(args))
     from markdown_sidekick.ui import run
 
     run()

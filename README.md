@@ -23,10 +23,17 @@ available inside the app via the **❓ User Guide** button.
   styles headings, bold/italic, lists, tables, links and fenced code — or switch to
   raw Markdown
 - **Clean output** pass (on by default) that tidies the raw markitdown text:
-  - strips leaked page numbers and recurring running-headers from PDFs
-  - removes scrambled multi-column Table-of-Contents / index tables (while
-    preserving real data tables)
-  - auto-fences detected code listings as ```` ```python ```` blocks
+  - normalizes PDF ligatures (ﬁ→fi), soft hyphens, and replacement-char runs
+  - strips leaked page numbers (arabic + roman) and recurring running-headers
+  - removes Table-of-Contents / index blocks in *any* form — scrambled tables,
+    dot-leader lines, "Section • 26" entries — while preserving real data tables
+  - promotes book chapter titles to real `# Chapter N: …` headings
+  - removes publisher boilerplate blocks repeated throughout a document
+  - auto-fences detected code listings with a **guessed language** (python, go,
+    csharp, cpp, ruby, kotlin, java, javascript), merges fragmented fences and
+    tightens double-spaced listings
+  - converts "•" bullets to Markdown lists and repairs sheared bullet lists
+  - joins hard-wrapped prose lines and rejoins hyphen-split words
   - collapses excessive blank lines
 - **Local audio transcription** (on by default) for MP3/WAV/M4A/FLAC/OGG:
   - timestamped Markdown transcript with detected language
@@ -46,6 +53,24 @@ available inside the app via the **❓ User Guide** button.
 - **MinerU high-fidelity mode** (optional): point the app at a local MinerU server
   and PDFs route to it for layout-aware Markdown, with automatic fallback to the
   built-in OCR / markitdown pipeline if it's unreachable
+- **AI-friendly export** (Settings → *AI-friendly export*):
+  - **YAML front matter** on saved files (title, source, date, token estimate)
+  - **Chapter splitting** — *Save all* can write each book as a folder of
+    per-chapter files plus `index.md` and a machine-readable `manifest.json`,
+    sized for AI context windows and RAG chunkers
+  - **Page anchors** — optional `<!-- page N -->` markers in PDF conversions so
+    AI answers can cite the printed page
+  - **Figure extraction** — pull embedded PDF images into an `assets/` folder
+    with `![Figure]` links (de-duplicated, icons filtered out)
+  - **Quality score** in the status bar (structure, artifacts, ~token count)
+- **Video transcription** — MP4/MKV/MOV/WEBM/AVI route through the same local
+  Whisper pipeline (PyAV decodes the audio track); transcripts are grouped into
+  timestamped paragraphs
+- **Headless CLI** — `markdown-sidekick-cli convert *.pdf --split-chapters
+  --quality` (or `MarkdownSidekick.exe --cli convert …`) for scripts and CI
+- **Optional local-LLM extras** (point Settings at an Ollama endpoint; off by
+  default, fully offline): artifact **polish** pass with a size guardrail, and
+  vision-model **alt-text captions** for extracted figures
 - **Copy** the Markdown to the clipboard, **Save as…** a single file, or **Save all…**
   to a folder (Copy/Save respect the Clean-output setting)
 - **Per-file status** (done / error) with the error message shown inline in the preview
@@ -119,6 +144,18 @@ You can also run it as a module:
 .venv\Scripts\python.exe -m markdown_sidekick
 ```
 
+### Command line (headless)
+
+```powershell
+.venv\Scripts\python.exe -m markdown_sidekick.cli convert book.pdf --split-chapters --quality
+.venv\Scripts\python.exe -m markdown_sidekick.cli convert docs\*.docx --out md\ --json
+.venv\Scripts\python.exe -m markdown_sidekick.cli capabilities
+```
+
+(or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick.exe --cli convert …`
+from the standalone build). Flags: `--split-chapters`, `--quality`, `--anchors`,
+`--images`, `--polish`, `--no-clean`, `--no-front-matter`, `--json`, `--out DIR`.
+
 ## How to use
 
 1. Add files (drag & drop or **Add files…**).
@@ -178,9 +215,17 @@ it can be reused from scripts or tests independently of Tkinter.
 Markdown Sidekick ships an [MCP](https://modelcontextprotocol.io) server so agent
 tools (Claude Desktop, Cursor, VS Code) can convert local files mid-conversation
 using the **full** pipeline — markitdown + OCR + audio transcription + cleanup, not
-just plain markitdown. It exposes two tools:
+just plain markitdown. Tools:
 
-- `convert_local_file(file_path, clean=true)` — returns Markdown for any supported file
+- `convert_local_file(file_path, clean, save_to, max_chars)` — returns Markdown;
+  large outputs are truncated with a notice, or written to `save_to` with only a
+  quality summary returned (saves the AI's context window)
+- `convert_outline(file_path)` — converts once (cached) and returns the structure:
+  title, quality report, and per-section token estimates — no content
+- `convert_section(file_path, section_index)` — returns one chapter/section from
+  the cached conversion
+- `convert_url(url)` — downloads (http/https, 50 MB cap) and converts a web page,
+  PDF, or image with the same local pipeline
 - `list_capabilities()` — reports which local engines are available
 
 **One-click setup:** in the app, open **⚙ Settings → 📋 Copy AI setup prompt**

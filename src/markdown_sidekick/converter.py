@@ -7,6 +7,7 @@ how conversion actually happens.
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
@@ -53,6 +54,12 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
     ".m4a",
     ".flac",
     ".ogg",
+    ".mp4",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".webm",
+    ".avi",
 )
 
 
@@ -90,6 +97,7 @@ class ConversionEngine:
     enable_audio: bool = True
     whisper_model: str = "base"
     mineru_endpoint: str = ""  # blank = disabled
+    page_anchors: bool = False  # emit <!-- page N --> markers for PDFs
     _md: MarkItDown = field(init=False, repr=False)
     _ocr: "ocr.OcrEngine | None" = field(init=False, default=None, repr=False)
     _audio: "audio.AudioTranscriber | None" = field(init=False, default=None, repr=False)
@@ -164,7 +172,27 @@ class ConversionEngine:
                 except Exception:
                     pass  # fall back to markitdown
 
-            if self.enable_audio and audio.audio_available() and ext in audio.AUDIO_EXTENSIONS:
+            # Digital PDFs normally go to markitdown, but page anchors need
+            # per-page extraction — markitdown flattens page boundaries away.
+            if self.page_anchors and ext == ".pdf" and ocr.pdfium_available():
+                try:
+                    inner = (
+                        (lambda p, t: on_subprogress(source, p, t, "page"))
+                        if on_subprogress is not None
+                        else None
+                    )
+                    md = self._ocr_engine().pdf_text_to_markdown(source, on_page=inner)
+                    # A scanned PDF with OCR off yields only empty anchors —
+                    # let markitdown have a go instead of returning husks.
+                    body = re.sub(r"<!-- page \d+ -->", "", md)
+                    if len(body.strip()) >= 50:
+                        return ConversionResult(
+                            source=source, markdown=md, engine="pdftext"
+                        )
+                except Exception:
+                    pass  # fall back to markitdown
+
+            if self.enable_audio and audio.audio_available() and ext in audio.MEDIA_EXTENSIONS:
                 try:
                     inner = (
                         (lambda c, t: on_subprogress(source, c, t, "sec"))

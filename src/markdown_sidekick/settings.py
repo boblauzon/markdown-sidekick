@@ -39,8 +39,21 @@ class Settings:
     default_output_dir: str = ""  # blank = ask each time
     clean_output: bool = True
     rendered_preview: bool = True
+    # -- AI-friendly export --------------------------------------------------
+    export_front_matter: bool = True  # YAML front matter on saved files
+    split_chapters: bool = False  # "Save all" writes book folders per # heading
+    page_anchors: bool = False  # <!-- p.N --> comments on PDF conversions
+    extract_images: bool = False  # extract PDF figures to an assets/ folder
+    # -- optional local-LLM extras (blank endpoint = disabled) ----------------
+    ollama_endpoint: str = ""  # e.g. http://localhost:11434
+    polish_model: str = ""  # e.g. llama3.2 — repairs residual artifacts
+    caption_model: str = ""  # e.g. llava — alt-text for extracted figures
 
     # -- persistence ---------------------------------------------------------
+    @classmethod
+    def config_path(cls) -> Path:
+        return _config_path()
+
     @classmethod
     def load(cls) -> "Settings":
         """Load settings, tolerating a missing, corrupt, or wrong-typed file."""
@@ -73,3 +86,10 @@ class Settings:
             self.whisper_model = "base"
         self.mineru_endpoint = str(self.mineru_endpoint or "").strip()
         self.default_output_dir = str(self.default_output_dir or "").strip()
+        self.export_front_matter = bool(self.export_front_matter)
+        self.split_chapters = bool(self.split_chapters)
+        self.page_anchors = bool(self.page_anchors)
+        self.extract_images = bool(self.extract_images)
+        self.ollama_endpoint = str(self.ollama_endpoint or "").strip().rstrip("/")
+        self.polish_model = str(self.polish_model or "").strip()
+        self.caption_model = str(self.caption_model or "").strip()

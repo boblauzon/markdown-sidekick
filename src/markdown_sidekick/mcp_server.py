@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 import threading
+from pathlib import Path
 
 # Keep startup quiet and offline-safe: no banner, no pypi update check. Must be
 # set before importing fastmcp, which reads these at import time.
@@ -28,8 +29,10 @@ os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")  # Literal: stable|pre
 
 from fastmcp import FastMCP
 
-from .converter import ConversionEngine
+from . import export
 from .cleanup import clean_markdown
+from .converter import ConversionEngine
+from .quality import assess_markdown
 from .settings import Settings
 
 logging.basicConfig(
@@ -67,44 +70,190 @@ def _get_engine() -> ConversionEngine:
             enable_audio=s.enable_audio,
             whisper_model=s.whisper_model,
             mineru_endpoint=s.mineru_endpoint,
+            page_anchors=s.page_anchors,
         )
     return _engine
 
 
-@mcp.tool
-def convert_local_file(file_path: str, clean: bool = True) -> str:
-    """Convert a local file to Markdown and return the Markdown text.
+# Conversions are expensive (OCR can take minutes); outline + section reads of
+# the same document must not re-convert. Tiny keyed cache, newest-4.
+_CACHE_MAX = 4
+_convert_cache: "dict[tuple[str, float, bool], str]" = {}
 
-    Handles PDFs (incl. scanned/vector via OCR), Office docs, HTML, CSV/JSON,
-    images (OCR), and audio (transcription) — all locally.
 
-    Args:
-        file_path: Absolute path to the local file to convert.
-        clean: Tidy the output (strip page-number/header noise, fence code,
-            remove scrambled table-of-contents tables). Defaults to true.
-    """
-    resolved = os.path.abspath(os.path.expanduser(file_path))
-    if not os.path.exists(resolved):
-        return f"Error: local file not found at '{resolved}'"
-    if os.path.isdir(resolved):
-        return f"Error: '{resolved}' is a directory, not a file"
-
-    logger.info("Converting %s", resolved)
-    # Serialise the whole conversion: only one thread may hold the global stdout
-    # redirect and touch the shared model singletons at a time.
+def _convert_cached(resolved: str, clean: bool) -> tuple[str | None, str | None]:
+    """Return (markdown, error). Caches by (path, mtime, clean)."""
+    try:
+        mtime = os.path.getmtime(resolved)
+    except OSError:
+        mtime = 0.0
+    key = (resolved, mtime, clean)
+    if key in _convert_cache:
+        return _convert_cache[key], None
     with _lock:
         with contextlib.redirect_stdout(sys.stderr):
             result = _get_engine().convert_file(resolved)
-            if result.ok and clean:
-                result_md, _stats = clean_markdown(result.markdown)
-            else:
-                result_md = result.markdown
+            if not result.ok:
+                return None, result.error
+            markdown = result.markdown
+            if clean:
+                markdown, _stats = clean_markdown(markdown)
+    while len(_convert_cache) >= _CACHE_MAX:
+        _convert_cache.pop(next(iter(_convert_cache)))
+    _convert_cache[key] = markdown
+    return markdown, None
 
+
+def _resolve(file_path: str) -> tuple[str | None, str | None]:
+    resolved = os.path.abspath(os.path.expanduser(file_path))
+    if not os.path.exists(resolved):
+        return None, f"Error: local file not found at '{resolved}'"
+    if os.path.isdir(resolved):
+        return None, f"Error: '{resolved}' is a directory, not a file"
+    return resolved, None
+
+
+@mcp.tool
+def convert_local_file(
+    file_path: str,
+    clean: bool = True,
+    save_to: str = "",
+    max_chars: int = 150_000,
+) -> str:
+    """Convert a local file to Markdown and return the Markdown text.
+
+    Handles PDFs (incl. scanned/vector via OCR), Office docs, HTML, CSV/JSON,
+    images (OCR), and audio/video (transcription) — all locally.
+
+    For LARGE documents (books, long reports), prefer convert_outline +
+    convert_section so the result fits your context, or pass save_to to write
+    the Markdown to disk and receive only a short confirmation.
+
+    Args:
+        file_path: Absolute path to the local file to convert.
+        clean: Tidy the output (strip page noise/TOC junk, restore chapter
+            headings, fence code with guessed languages). Defaults to true.
+        save_to: Optional absolute path to write the Markdown to instead of
+            returning it (a quality summary is returned in its place).
+        max_chars: Truncate the returned text beyond this size (a note is
+            appended). Ignored when save_to is set.
+    """
+    resolved, err = _resolve(file_path)
+    if err:
+        return err
+    logger.info("Converting %s", resolved)
+    markdown, conv_err = _convert_cached(resolved, clean)
+    if conv_err is not None:
+        logger.warning("Conversion failed: %s", conv_err)
+        return f"Error converting '{os.path.basename(resolved)}': {conv_err}"
+    assert markdown is not None
+    logger.info("Converted (%d chars)", len(markdown))
+
+    if save_to:
+        out_path = os.path.abspath(os.path.expanduser(save_to))
+        export.export_single(
+            markdown,
+            Path(out_path),
+            source=os.path.basename(resolved),
+            front_matter=Settings.load().export_front_matter,
+        )
+        report = assess_markdown(markdown)
+        return f"Saved Markdown to {out_path}. {report.summary()}"
+
+    if len(markdown) > max_chars:
+        return (
+            markdown[:max_chars]
+            + f"\n\n---\n\n_(Truncated at {max_chars:,} of {len(markdown):,} characters. "
+            "Use convert_outline + convert_section to read the rest, or save_to "
+            "to write the full file to disk.)_"
+        )
+    return markdown
+
+
+@mcp.tool
+def convert_outline(file_path: str, clean: bool = True) -> dict:
+    """Convert a file and return its structure WITHOUT the content — title,
+    quality report, and a numbered list of sections (split on # headings) with
+    token estimates. Follow up with convert_section to read parts that fit
+    your context. The conversion is cached, so outline + section reads don't
+    re-convert.
+    """
+    resolved, err = _resolve(file_path)
+    if err:
+        return {"error": err}
+    markdown, conv_err = _convert_cached(resolved, clean)
+    if conv_err is not None:
+        return {"error": conv_err}
+    assert markdown is not None
+    sections = export.split_chapters(markdown)
+    return {
+        "title": export.document_title(markdown, os.path.basename(resolved)),
+        "est_tokens": export.estimate_tokens(markdown),
+        "quality": assess_markdown(markdown).as_dict(),
+        "sections": [
+            {"index": i, "title": s.title or "(document)", "est_tokens": s.est_tokens}
+            for i, s in enumerate(sections)
+        ],
+    }
+
+
+@mcp.tool
+def convert_section(file_path: str, section_index: int, clean: bool = True) -> str:
+    """Return one section of a converted document (see convert_outline for
+    the section list). Uses the cached conversion when available.
+    """
+    resolved, err = _resolve(file_path)
+    if err:
+        return err
+    markdown, conv_err = _convert_cached(resolved, clean)
+    if conv_err is not None:
+        return f"Error converting '{os.path.basename(resolved)}': {conv_err}"
+    assert markdown is not None
+    sections = export.split_chapters(markdown)
+    if not 0 <= section_index < len(sections):
+        return f"Error: section_index must be 0..{len(sections) - 1}"
+    return sections[section_index].markdown
+
+
+_URL_MAX_BYTES = 50 * 1024 * 1024
+
+
+@mcp.tool
+def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
+    """Download a document (web page, PDF, image, …) and convert it to
+    Markdown with the same local pipeline. http/https only, 50 MB cap.
+    """
+    import tempfile
+    import urllib.parse
+    import urllib.request
+
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return "Error: only http/https URLs are supported."
+    suffix = Path(parsed.path).suffix.lower() or ".html"
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "MarkdownSidekick/1.0"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = resp.read(_URL_MAX_BYTES + 1)
+        if len(data) > _URL_MAX_BYTES:
+            return "Error: download exceeds the 50 MB limit."
+    except Exception as exc:
+        return f"Error downloading '{url}': {type(exc).__name__}: {exc}"
+
+    with tempfile.TemporaryDirectory() as td:
+        tmp = Path(td) / f"download{suffix}"
+        tmp.write_bytes(data)
+        with _lock:
+            with contextlib.redirect_stdout(sys.stderr):
+                result = _get_engine().convert_file(tmp)
+                markdown = result.markdown
+                if result.ok and clean:
+                    markdown, _stats = clean_markdown(markdown)
     if not result.ok:
-        logger.warning("Conversion failed: %s", result.error)
-        return f"Error converting '{os.path.basename(resolved)}': {result.error}"
-    logger.info("Converted via %s (%d chars)", result.engine, len(result_md))
-    return result_md
+        return f"Error converting '{url}': {result.error}"
+    if len(markdown) > max_chars:
+        markdown = markdown[:max_chars] + f"\n\n_(Truncated at {max_chars:,} characters.)_"
+    return markdown
 
 
 @mcp.tool

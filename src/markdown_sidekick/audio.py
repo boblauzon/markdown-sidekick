@@ -20,7 +20,7 @@ from .settings import app_data_dir
 
 _FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
 
-# Audio/video container formats PyAV can decode.
+# Audio container formats PyAV can decode.
 AUDIO_EXTENSIONS: tuple[str, ...] = (
     ".mp3",
     ".wav",
@@ -32,7 +32,59 @@ AUDIO_EXTENSIONS: tuple[str, ...] = (
     ".wma",
 )
 
+# Video containers: PyAV decodes their audio track the same way, so
+# faster-whisper transcribes them directly — no extraction step needed.
+VIDEO_EXTENSIONS: tuple[str, ...] = (
+    ".mp4",
+    ".m4v",
+    ".mkv",
+    ".mov",
+    ".webm",
+    ".avi",
+    ".mpg",
+    ".mpeg",
+)
+
+# Everything the transcription route accepts.
+MEDIA_EXTENSIONS: tuple[str, ...] = AUDIO_EXTENSIONS + VIDEO_EXTENSIONS
+
 _DEFAULT_MODEL_SIZE = "base"
+
+# Transcript paragraphs break on a speech gap or when they grow too long —
+# a wall of one-line segments reads poorly to humans and AI models alike.
+_PARAGRAPH_GAP_S = 2.0
+_PARAGRAPH_MAX_CHARS = 700
+
+
+def group_paragraphs(
+    segments: list[tuple[float, float, str]],
+) -> list[tuple[float, str]]:
+    """Group (start, end, text) segments into (start, paragraph_text) blocks."""
+    paragraphs: list[tuple[float, list[str]]] = []
+    last_end: float | None = None
+    for start, end, text in segments:
+        text = text.strip()
+        if not text:
+            continue
+        new_para = (
+            not paragraphs
+            or (last_end is not None and start - last_end > _PARAGRAPH_GAP_S)
+            or sum(len(t) + 1 for t in paragraphs[-1][1]) > _PARAGRAPH_MAX_CHARS
+        )
+        if new_para:
+            paragraphs.append((start, [text]))
+        else:
+            paragraphs[-1][1].append(text)
+        last_end = end
+    return [(start, " ".join(texts)) for start, texts in paragraphs]
+
+
+def _short_stamp(seconds: float) -> str:
+    seconds = max(0.0, seconds)
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    return f"{h:02d}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
 
 
 def audio_available() -> bool:
@@ -48,15 +100,6 @@ def _model_cache_dir() -> str:
 
 # Files a complete faster-whisper model snapshot must contain.
 _MODEL_FILES = ("model.bin", "config.json", "tokenizer.json", "vocabulary.txt")
-
-
-def _format_timestamp(seconds: float) -> str:
-    seconds = max(0.0, seconds)
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = int(seconds % 60)
-    ms = int((seconds - int(seconds)) * 1000)
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
 
 
 class AudioTranscriber:
@@ -137,27 +180,25 @@ class AudioTranscriber:
             else f"**Detected language:** {language}"
         )
         header = [
-            f"# Audio Transcription: {source.name}",
+            f"# Transcript: {source.name}",
             "",
             lang_line,
             f"**Engine:** faster-whisper ({self.model_size}, {self._device}/{self._compute_type})",
             "",
             "---",
             "",
-            "## Transcript",
-            "",
         ]
-        body: list[str] = []
+        collected: list[tuple[float, float, str]] = []
         for seg in segments:
-            text = seg.text.strip()
-            if not text:
-                continue
-            stamp = f"[{_format_timestamp(seg.start)} --> {_format_timestamp(seg.end)}]"
-            body.append(f"`{stamp}` {text}")
+            collected.append((float(seg.start), float(seg.end), seg.text))
             if on_progress is not None:
                 # VAD can make info.duration < the last segment end; keep the
                 # reported total >= current so progress never exceeds 100%.
                 on_progress(float(seg.end), max(duration, float(seg.end)))
+        body: list[str] = []
+        for start, paragraph in group_paragraphs(collected):
+            body.append(f"**[{_short_stamp(start)}]** {paragraph}")
+            body.append("")
         if not body:
             body.append("_(No speech detected.)_")
-        return "\n".join(header + body) + "\n"
+        return "\n".join(header + body).rstrip() + "\n"

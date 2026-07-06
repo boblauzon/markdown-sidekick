@@ -71,13 +71,28 @@ That's the whole workflow. Everything below is detail you can read when you need
 
 When **Clean output** is on (the default), the raw conversion is tidied:
 
-- **Page noise removed** — leaked page numbers and repeating running headers
-  from PDFs are stripped (conservatively: a lone year in prose is kept)
-- **Scrambled contents tables removed** — multi-column Table-of-Contents and
-  index pages that arrive as broken tables are dropped; *real* data tables are
-  detected and preserved
-- **Code listings fenced** — detected code is wrapped in ```` ```python ````
-  blocks so AI tools and editors treat it as code
+- **Characters normalized** — PDF ligatures (ﬁ → fi, ﬂ → fl) are decomposed so
+  text is searchable; soft hyphens and no-break spaces are fixed; runs of the
+  � replacement character are scrubbed
+- **Page noise removed** — leaked page numbers (arabic *and* roman), footers,
+  and repeating running headers from PDFs are stripped (conservatively: a lone
+  year in prose is kept)
+- **Contents tables removed** — Table-of-Contents / index pages are dropped
+  whether they arrive as broken tables, dot-leader lines ("Title ..... 26"), or
+  "Section • 26" entries; *real* data tables are detected and preserved
+- **Chapter headings restored** — book chapter titles harvested from the TOC
+  become proper `# Chapter N: Title` headings, and their per-page running
+  headers are deleted
+- **Publisher boilerplate removed** — blocks repeated verbatim throughout the
+  document (e.g. per-chapter QR-code / "unlock your book" ads) are dropped
+- **Code listings fenced** — detected code is wrapped in fenced blocks with the
+  language guessed from the content (python, go, csharp, cpp, ruby, kotlin,
+  java, javascript — or a plain fence when ambiguous); fragmented fences are
+  merged, double-spaced listings tightened, and wrong labels re-guessed
+- **Bullets normalized** — "•" bullets become Markdown "- " lists, and lists
+  the PDF sheared apart (lone "•" lines separated from their text) are re-paired
+- **Hard-wrapped prose joined** — lines the PDF broke mid-sentence are joined
+  back into paragraphs, and words split with a line-end hyphen are rejoined
 - **Blank-line runs collapsed**
 
 The status bar reports what was changed, e.g.
@@ -108,11 +123,13 @@ Notes:
 
 ## Audio Transcription
 
-Drop in an MP3, WAV, M4A, FLAC or OGG file and convert. You get a timestamped
-transcript with the detected language:
+Drop in an MP3, WAV, M4A, FLAC or OGG file — or a **video** (MP4, MKV, MOV,
+WEBM, AVI; the audio track is transcribed) — and convert. You get a transcript
+grouped into timestamped paragraphs with the detected language:
 
 ```
-[00:00:00.000 --> 00:00:05.339] Hello, this is a test...
+**[00:00]** Hello, this is a test. The transcript flows in readable
+paragraphs, with a new timestamp at each pause in speech...
 ```
 
 Notes:
@@ -132,11 +149,23 @@ Notes:
 | Setting | What it does |
 | ------- | ------------ |
 | OCR images & scanned PDFs | Master switch for the OCR engine |
-| Transcribe audio files | Master switch for audio transcription |
+| Transcribe audio files | Master switch for audio/video transcription |
 | Whisper model | Speech model size (see above) |
 | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
 | Default output folder | Save all… writes here without asking |
 | Clean output / Rendered preview | Default states for the preview toggles |
+| YAML front matter | Saved files start with title/source/date/token metadata |
+| Split books into chapter folders | Save all… writes one file per chapter plus index.md + manifest.json |
+| Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
+| Extract PDF figures | Embedded images land in an assets/ folder with links |
+| Ollama endpoint + models | Optional local-LLM polish pass and figure captions (blank = off) |
+
+**AI-friendly export, in short:** big single files overflow AI context windows.
+With *Split books into chapter folders* on, a 500-page book becomes a folder of
+chapter files (each with front matter saying which book and part it is), an
+`index.md`, and a `manifest.json` — ready for Claude, ChatGPT, Gemini, or any
+RAG pipeline. The status bar shows a **quality score** and estimated token
+count for every converted file.
 
 Settings persist between sessions in `settings.json` (see *Where files live*).
 
@@ -178,8 +207,20 @@ exact launch command — the assistant does the configuration for you.
 
 Tools exposed:
 
-- `convert_local_file(file_path, clean=true)` — returns the Markdown
+- `convert_local_file(file_path, clean, save_to, max_chars)` — returns the
+  Markdown (or writes it to `save_to` and returns a short quality summary)
+- `convert_outline(file_path)` — document structure + per-section token counts,
+  without the content (the conversion is cached for follow-up reads)
+- `convert_section(file_path, section_index)` — one chapter at a time
+- `convert_url(url)` — download and convert a web page or remote PDF
 - `list_capabilities()` — reports which engines are available
+
+There is also a **command line** for scripts and automation:
+
+```
+markdown-sidekick-cli convert book.pdf --split-chapters --quality
+MarkdownSidekick.exe --cli convert book.pdf --split-chapters   (standalone app)
+```
 
 ---
 
