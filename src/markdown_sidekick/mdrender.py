@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 import tkinter as tk
+import webbrowser
 
 # Inline spans, matched left-to-right. Underscore emphasis is intentionally
 # omitted — snake_case identifiers are everywhere in technical text and would
@@ -50,6 +51,8 @@ class MarkdownRenderer:
         base_size: int = 10,
     ) -> None:
         self.w = widget
+        # url-per-link-tag map; rebuilt on every render().
+        self._links: dict[str, str] = {}
         self._configure_tags(fg, muted, accent, code_bg, base_family, mono_family, base_size)
 
     def _configure_tags(self, fg, muted, accent, code_bg, base, mono, size) -> None:
@@ -77,11 +80,27 @@ class MarkdownRenderer:
         w.tag_configure("hr", foreground=muted, justify="center", spacing1=4, spacing3=6)
         w.tag_configure("muted", foreground=muted)
 
+    # -- links ----------------------------------------------------------------
+    def _open_link(self, tag: str) -> None:
+        url = self._links.get(tag, "")
+        if url.startswith(("http://", "https://")):  # never shell out to odd schemes
+            webbrowser.open(url)
+
+    def _add_link(self, text: str, url: str, base_tags: tuple[str, ...]) -> None:
+        w = self.w
+        tag = f"href{len(self._links)}"
+        self._links[tag] = url
+        w.insert("end", text, base_tags + ("link", tag))
+        w.tag_bind(tag, "<Button-1>", lambda _e, t=tag: self._open_link(t))
+        w.tag_bind(tag, "<Enter>", lambda _e: w.configure(cursor="hand2"))
+        w.tag_bind(tag, "<Leave>", lambda _e: w.configure(cursor=""))
+
     # -- rendering -----------------------------------------------------------
     def render(self, markdown: str) -> None:
         w = self.w
         w.configure(state="normal")
         w.delete("1.0", "end")
+        self._links.clear()
         in_code = False
         fence_len = 0
         for line in markdown.split("\n"):
@@ -155,7 +174,10 @@ class MarkdownRenderer:
                 w.insert("end", tok[1:-1], base_tags + ("code_inline",))
             elif tok.startswith("["):
                 link = _LINK.match(tok)
-                w.insert("end", link.group(1) if link else tok, base_tags + ("link",))
+                if link:
+                    self._add_link(link.group(1), link.group(2), base_tags)
+                else:
+                    w.insert("end", tok, base_tags + ("link",))
             else:  # *italic*
                 w.insert("end", tok[1:-1], base_tags + ("italic",))
             pos = m.end()

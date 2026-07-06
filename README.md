@@ -4,7 +4,15 @@ A simple Windows desktop app that converts files into Markdown using Microsoft's
 [markitdown](https://github.com/microsoft/markitdown) engine. Drop in PDFs, Office
 documents, images, audio, HTML and more — get clean Markdown out.
 
+Markdown Sidekick is **freeware** by VibeProSoft. If it saves you time, you can
+support development:
+
+<a href='https://ko-fi.com/O6K81ZYB9P' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
+
 ![Markdown Sidekick](docs/screenshot.png)
+
+📖 **New here? Read the [User Guide](src/markdown_sidekick/USERGUIDE.md)** — also
+available inside the app via the **❓ User Guide** button.
 
 ## Features
 
@@ -200,9 +208,18 @@ Run it over stdio:
 > The server logs to **stderr** and keeps **stdout** clean for JSON-RPC (stray
 > library output is redirected), so the connection stays stable.
 
+## Support the project ☕
+
+Markdown Sidekick is free software. If it's useful to you, a coffee keeps
+development going: **[ko-fi.com/roblauzon](https://ko-fi.com/roblauzon)** —
+or use the ☕ Support button in the app. Bug reports and feature ideas are
+just as valuable.
+
 ## Credits
 
 - Document/office/web conversion: [Microsoft markitdown](https://github.com/microsoft/markitdown)
 - OCR: [RapidOCR](https://github.com/RapidAI/RapidOCR) (ONNX) · PDF rendering: [pypdfium2](https://github.com/pypdfium2-team/pypdfium2)
+- Audio: [faster-whisper](https://github.com/SYSTRAN/faster-whisper) + [PyAV](https://github.com/PyAV-Org/PyAV)
 
-Markdown Sidekick is the desktop front-end around these engines.
+Markdown Sidekick is the desktop front-end around these engines — a
+**VibeProSoft** freeware project.

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import webbrowser
 from pathlib import Path
 
 import tkinter as tk
@@ -18,6 +19,7 @@ from .converter import (
     default_output_path,
     write_markdown,
 )
+from .guide import KOFI_URL, load_user_guide
 from .mdrender import MarkdownRenderer
 from .ocr import ocr_available
 from .settings import WHISPER_MODELS, Settings
@@ -84,6 +86,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._current_export_text = ""
         # OCR toggle reflects the saved setting (and dep availability).
         self.ocr_var = tk.BooleanVar(value=self.settings.enable_ocr and ocr_available())
+        self._help_win: tk.Toplevel | None = None
 
         self._build_style()
         self._build_layout()
@@ -204,6 +207,12 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ).pack(side="left", padx=(14, 0), pady=(6, 0))
         ttk.Button(header, text="⚙  Settings", command=self.open_settings).pack(
             side="right", pady=(2, 0)
+        )
+        ttk.Button(header, text="☕  Support", command=self.open_kofi).pack(
+            side="right", padx=(0, 8), pady=(2, 0)
+        )
+        ttk.Button(header, text="❓  User Guide", command=self.open_help).pack(
+            side="right", padx=(0, 8), pady=(2, 0)
         )
 
         # Footer is packed at the BOTTOM before the body so it always reserves its
@@ -479,6 +488,59 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._clean_cache.clear()
         self._clean_stats.clear()
         self._on_select_file()
+
+    # -- help / support --------------------------------------------------------
+    def open_kofi(self) -> None:
+        webbrowser.open(KOFI_URL)
+        self.status_var.set("Thank you for supporting Markdown Sidekick! ☕")
+
+    def open_help(self) -> None:
+        # Singleton: if the guide is already open, just bring it forward.
+        if self._help_win is not None and self._help_win.winfo_exists():
+            self._help_win.deiconify()
+            self._help_win.lift()
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Markdown Sidekick — User Guide")
+        win.geometry("880x720")
+        win.minsize(600, 400)
+        win.configure(bg=BG_PANEL)
+        self._help_win = win
+
+        body = ttk.Frame(win, style="Panel.TFrame", padding=12)
+        body.pack(fill="both", expand=True)
+        body.rowconfigure(0, weight=1)
+        body.columnconfigure(0, weight=1)
+
+        text = tk.Text(
+            win,
+            wrap="word",
+            bg=BG_INPUT,
+            fg=FG,
+            relief="flat",
+            font=FONT,
+            padx=18,
+            pady=14,
+            spacing1=1,
+            spacing3=2,
+        )
+        text.grid(in_=body, row=0, column=0, sticky="nsew")
+        scroll = ttk.Scrollbar(body, orient="vertical", command=text.yview)
+        scroll.grid(row=0, column=1, sticky="ns")
+        text.configure(yscrollcommand=scroll.set)
+
+        renderer = MarkdownRenderer(
+            text, fg=FG, muted=FG_MUTED, accent=ACCENT, code_bg="#15161e"
+        )
+        renderer.render(load_user_guide())
+
+        bar = ttk.Frame(body, style="Panel.TFrame")
+        bar.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(10, 0))
+        ttk.Button(
+            bar, text="☕  Support on Ko-fi", style="Accent.TButton", command=self.open_kofi
+        ).pack(side="left")
+        ttk.Button(bar, text="Close", command=win.destroy).pack(side="right")
 
     # -- file management -----------------------------------------------------
     def add_files(self) -> None:

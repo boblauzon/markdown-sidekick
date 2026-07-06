@@ -43,3 +43,6 @@ Repository = "https://github.com/roblauzon/markdown-sidekick"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+markdown_sidekick = ["USERGUIDE.md"]

@@ -52,6 +52,10 @@ def _selftest() -> int:
             cleaned, _ = clean_markdown("import os\nx = 1\n")
             report["checks"]["cleanup"] = "```python" in cleaned
 
+        from markdown_sidekick.guide import load_user_guide
+
+        report["checks"]["user_guide"] = len(load_user_guide()) > 2000
+
         report["ok"] = all(v for v in report["checks"].values() if isinstance(v, bool))
     except Exception as exc:  # the report must always be written
         report["error"] = f"{type(exc).__name__}: {exc}"

@@ -26,6 +26,9 @@ for pkg in (
     binaries += b
     hiddenimports += h
 
+# Bundled user guide (package data, loaded via importlib.resources).
+datas += [("src/markdown_sidekick/USERGUIDE.md", "markdown_sidekick")]
+
 a = Analysis(
     ["app.py"],
     pathex=["src"],
