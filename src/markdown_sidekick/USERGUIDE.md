@@ -13,7 +13,10 @@ support development at [ko-fi.com/roblauzon](https://ko-fi.com/roblauzon) ☕
 1. **Add files** — drag & drop them onto the file list, or click *Add files…*
    Conversion starts **automatically**; each row shows which engine handled it.
 2. **Click a file** to see its Markdown in the preview pane.
-3. **💾 Save Markdown…** — one file gets a save dialog, several get a folder.
+3. Pick an **Output** shape next to the Save button — *One Markdown file*,
+   *Chapter files (book folder)*, or *AI-sized sections* (with an **Optimize
+   for** picker: Claude, ChatGPT, Gemini, Local LLM).
+4. **💾 Save Markdown…** — one file gets a save dialog, several get a folder.
    (Or **Copy** the previewed file straight to the clipboard.)
 
 That's the whole workflow: drop, then save. Everything below is detail you
@@ -52,9 +55,16 @@ can read when you need it.
 
 - Progress bar and status line (per-page OCR progress, per-second transcription
   progress, cleanup summaries, quality score)
-- **💾 Save Markdown…** is the one save button: with a single converted file it
-  asks where to save it; with several it asks for a folder (or writes straight
-  to your default output folder if you set one in Settings)
+- The **export bar** sits next to the Save button:
+  - **Output** — *One Markdown file* (one .md per source), *Chapter files*
+    (each book becomes a folder of per-chapter files + index.md +
+    manifest.json), or *AI-sized sections* (parts guaranteed to fit an AI's
+    context window, even for documents with no headings)
+  - **Optimize for** — sizes AI sections for Claude (~30k tokens), ChatGPT
+    (~12k), Gemini (~60k), or a small Local LLM (~4k)
+  - **💾 Save Markdown…** — a single file gets a save dialog; batches and
+    split modes ask for a folder (pre-filled with your default output folder)
+    and offer to open it afterwards
 
 Changing **Settings** offers to re-convert the files you already loaded, so
 results always match the current configuration.
@@ -158,16 +168,16 @@ Notes:
 | Transcribe audio files | Master switch for audio/video transcription |
 | Whisper model | Speech model size (see above) |
 | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
-| Default output folder | Save Markdown… writes batches here without asking |
+| Default output folder | Pre-selected in every save dialog |
 | Clean output / Rendered preview | Default states for the preview toggles |
 | YAML front matter | Saved files start with title/source/date/token metadata |
-| Split books into chapter folders | Save Markdown… writes one file per chapter plus index.md + manifest.json |
 | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Extract PDF figures | Embedded images land in an assets/ folder with links |
 | Ollama endpoint + models | Optional local-LLM polish pass and figure captions (blank = off) |
 
 **AI-friendly export, in short:** big single files overflow AI context windows.
-With *Split books into chapter folders* on, a 500-page book becomes a folder of
+With *Chapter files* or *AI-sized sections* selected in the export bar, a
+500-page book becomes a folder of
 chapter files (each with front matter saying which book and part it is), an
 `index.md`, and a `manifest.json` — ready for Claude, ChatGPT, Gemini, or any
 RAG pipeline. The status bar shows a **quality score** and estimated token

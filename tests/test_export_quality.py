@@ -54,6 +54,41 @@ class TestSplit:
         assert document_title("plain first line\n# Later", "fb") == "fb"
 
 
+class TestSplitForAi:
+    def test_headingless_document_still_splits_to_budget(self):
+        from markdown_sidekick.export import split_for_ai
+
+        text = "\n\n".join("Paragraph %d. %s" % (i, "word " * 200) for i in range(40))
+        secs = split_for_ai(text, max_tokens=2000)
+        assert len(secs) > 1
+        assert all(s.est_tokens <= 2600 for s in secs)  # budget + one paragraph slop
+        assert secs[0].title.endswith("(part 1)")
+        # Nothing lost: total content round-trips (modulo whitespace).
+        joined = "".join(s.markdown for s in secs)
+        assert "Paragraph 39" in joined and "Paragraph 0" in joined
+
+    def test_never_splits_inside_fence(self):
+        from markdown_sidekick.export import split_for_ai
+
+        fenced = "```python\n" + ("x = 1\n" * 300) + "```\n"
+        text = ("prose\n\n" * 5) + fenced + ("after\n\n" * 5)
+        secs = split_for_ai(text, max_tokens=200)
+        for s in secs:
+            assert s.markdown.count("```") % 2 == 0
+
+    def test_chaptered_book_uses_chapters(self):
+        from markdown_sidekick.export import split_for_ai
+
+        secs = split_for_ai(_BOOK, max_tokens=30_000)
+        assert [s.title for s in secs][:2] == ["Front matter", "Chapter 1: Getting Started"]
+
+    def test_ai_targets_defined(self):
+        from markdown_sidekick.export import AI_TARGETS
+
+        assert set(AI_TARGETS) >= {"Claude", "ChatGPT", "Gemini", "Local LLM"}
+        assert all(v > 0 for v in AI_TARGETS.values())
+
+
 class TestFrontMatter:
     def test_quoting(self):
         fm = build_front_matter({"title": "A: B", "n": 3, "skip": ""})

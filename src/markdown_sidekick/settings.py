@@ -41,7 +41,12 @@ class Settings:
     rendered_preview: bool = True
     # -- AI-friendly export --------------------------------------------------
     export_front_matter: bool = True  # YAML front matter on saved files
-    split_chapters: bool = False  # "Save all" writes book folders per # heading
+    # How "Save Markdown" writes output — chosen in the main window's export
+    # bar and remembered here: "single" (one .md per source), "chapters"
+    # (book folder split on chapter headings), "ai" (sections sized for an AI
+    # platform's context window).
+    export_style: str = "single"
+    ai_target: str = "Claude"  # which platform "ai" sections are sized for
     page_anchors: bool = False  # <!-- p.N --> comments on PDF conversions
     extract_images: bool = False  # extract PDF figures to an assets/ folder
     # -- optional local-LLM extras (blank endpoint = disabled) ----------------
@@ -87,7 +92,9 @@ class Settings:
         self.mineru_endpoint = str(self.mineru_endpoint or "").strip()
         self.default_output_dir = str(self.default_output_dir or "").strip()
         self.export_front_matter = bool(self.export_front_matter)
-        self.split_chapters = bool(self.split_chapters)
+        if self.export_style not in ("single", "chapters", "ai"):
+            self.export_style = "single"
+        self.ai_target = str(self.ai_target or "Claude")
         self.page_anchors = bool(self.page_anchors)
         self.extract_images = bool(self.extract_images)
         self.ollama_endpoint = str(self.ollama_endpoint or "").strip().rstrip("/")

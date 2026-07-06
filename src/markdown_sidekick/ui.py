@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import queue
 import threading
 import webbrowser
@@ -202,20 +203,22 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         header = ttk.Frame(self, style="TFrame")
         header.pack(fill="x", padx=20, pady=(16, 8))
         ttk.Label(header, text="Markdown Sidekick", style="Title.TLabel").pack(side="left")
-        ttk.Label(
-            header,
-            text="Convert documents, images & audio to Markdown — powered by Microsoft markitdown",
-            style="Muted.TLabel",
-        ).pack(side="left", padx=(14, 0), pady=(6, 0))
+        # Right-side buttons pack FIRST so a long subtitle can never push them
+        # out of the window; the subtitle then takes whatever space remains.
         ttk.Button(header, text="⚙  Settings", command=self.open_settings).pack(
             side="right", pady=(2, 0)
         )
         ttk.Button(header, text="☕  Support", command=self.open_kofi).pack(
             side="right", padx=(0, 8), pady=(2, 0)
         )
-        ttk.Button(header, text="❓  User Guide", command=self.open_help).pack(
+        ttk.Button(header, text="❓  Help", command=self.open_help).pack(
             side="right", padx=(0, 8), pady=(2, 0)
         )
+        ttk.Label(
+            header,
+            text="Drop files in — get clean Markdown out",
+            style="Muted.TLabel",
+        ).pack(side="left", padx=(14, 0), pady=(6, 0))
 
         # Footer is packed at the BOTTOM before the body so it always reserves its
         # space; otherwise the expanding body pushes it off the bottom edge.
@@ -255,8 +258,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         )
         tree.heading("#0", text="File")
         tree.heading("status", text="Engine")
-        tree.column("#0", width=196, anchor="w")
-        tree.column("status", width=104, anchor="center", stretch=False)
+        tree.column("#0", width=240, anchor="w", stretch=True)
+        tree.column("status", width=88, anchor="center", stretch=False)
         tree.grid(row=2, column=0, sticky="nsew")
         tree.tag_configure("ok", foreground=OK_COLOR)
         tree.tag_configure("err", foreground=ERR_COLOR)
@@ -355,6 +358,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="Copy", command=self.copy_preview).pack(side="left")
 
+    # Combobox labels for the export style, mapped to the persisted keys.
+    _STYLE_LABELS = (
+        ("single", "One Markdown file"),
+        ("chapters", "Chapter files (book folder)"),
+        ("ai", "AI-sized sections"),
+    )
+
     def _build_footer(self) -> None:
         footer = ttk.Frame(self, style="TFrame")
         footer.pack(side="bottom", fill="x", padx=20, pady=(0, 16))
@@ -362,20 +372,66 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.progress = ttk.Progressbar(
             footer, style="Horizontal.TProgressbar", mode="determinate"
         )
-        self.progress.pack(fill="x", pady=(0, 10))
+        self.progress.pack(fill="x", pady=(0, 8))
 
+        self.status_var = tk.StringVar(value="Ready — drop files anywhere to convert.")
+        ttk.Label(footer, textvariable=self.status_var, style="Muted.TLabel").pack(
+            fill="x", pady=(0, 8)
+        )
+
+        # The export bar: the output-shape decision lives right next to the
+        # Save button, where the decision is actually made.
         row = ttk.Frame(footer, style="TFrame")
         row.pack(fill="x")
-
-        self.status_var = tk.StringVar(value="Ready.")
-        ttk.Label(row, textvariable=self.status_var, style="Muted.TLabel").pack(side="left")
-
-        # One primary action: files convert automatically when added, so the
-        # only decision left is where the Markdown goes.
+        # The button packs FIRST (rightmost) so nothing can push it off-screen.
         self.save_btn = ttk.Button(
             row, text="💾  Save Markdown…", style="Accent.TButton", command=self.save_markdown
         )
         self.save_btn.pack(side="right")
+
+        ttk.Label(row, text="Output:", style="Muted.TLabel").pack(side="left")
+        style_labels = [label for _key, label in self._STYLE_LABELS]
+        current_label = dict(self._STYLE_LABELS).get(self.settings.export_style, style_labels[0])
+        self.style_var = tk.StringVar(value=current_label)
+        style_box = ttk.Combobox(
+            row,
+            textvariable=self.style_var,
+            values=style_labels,
+            state="readonly",
+            width=24,
+        )
+        style_box.pack(side="left", padx=(8, 16))
+        style_box.bind("<<ComboboxSelected>>", self._on_export_style_change)
+
+        ttk.Label(row, text="Optimize for:", style="Muted.TLabel").pack(side="left")
+        self.target_var = tk.StringVar(
+            value=self.settings.ai_target if self.settings.ai_target in md_export.AI_TARGETS else "Claude"
+        )
+        self.target_box = ttk.Combobox(
+            row,
+            textvariable=self.target_var,
+            values=list(md_export.AI_TARGETS),
+            state="readonly",
+            width=11,
+        )
+        self.target_box.pack(side="left", padx=(8, 0))
+        self.target_box.bind("<<ComboboxSelected>>", self._on_export_style_change)
+        self._sync_target_state()
+
+    def _export_style_key(self) -> str:
+        label_to_key = {label: key for key, label in self._STYLE_LABELS}
+        return label_to_key.get(self.style_var.get(), "single")
+
+    def _sync_target_state(self) -> None:
+        """The AI-target picker only matters for AI-sized sections."""
+        state = "readonly" if self._export_style_key() == "ai" else "disabled"
+        self.target_box.configure(state=state)
+
+    def _on_export_style_change(self, _event=None) -> None:
+        self._sync_target_state()
+        self.settings.export_style = self._export_style_key()
+        self.settings.ai_target = self.target_var.get()
+        self.settings.save()
 
     # -- settings ------------------------------------------------------------
     def open_settings(self) -> None:
@@ -399,7 +455,6 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         endpoint_v = tk.StringVar(dlg, value=self.settings.mineru_endpoint)
         outdir_v = tk.StringVar(dlg, value=self.settings.default_output_dir)
         front_v = tk.BooleanVar(dlg, value=self.settings.export_front_matter)
-        split_v = tk.BooleanVar(dlg, value=self.settings.split_chapters)
         anchors_v = tk.BooleanVar(dlg, value=self.settings.page_anchors)
         images_v = tk.BooleanVar(dlg, value=self.settings.extract_images)
         ollama_v = tk.StringVar(dlg, value=self.settings.ollama_endpoint)
@@ -457,9 +512,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         check("Clean output", clean_v, 11)
         check("Rendered preview", rendered_v, 12)
 
+        # (Chapter/AI splitting moved to the main window's export bar, next to
+        # the Save button, where the output decision is actually made.)
         section("AI-friendly export", 13)
         check("YAML front matter on saved files", front_v, 14)
-        check("Save all: split books into chapter folders", split_v, 15)
         check("Page anchors (<!-- page N -->) in PDF conversions", anchors_v, 16)
         check("Extract PDF figures to assets/ on save", images_v, 17)
 
@@ -505,7 +561,6 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.settings.clean_output = clean_v.get()
             self.settings.rendered_preview = rendered_v.get()
             self.settings.export_front_matter = front_v.get()
-            self.settings.split_chapters = split_v.get()
             self.settings.page_anchors = anchors_v.get()
             self.settings.extract_images = images_v.get()
             self.settings.ollama_endpoint = ollama_v.get()
@@ -707,12 +762,17 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 self._renderer.render(text)
             else:
                 self._show_plain(path.name, text, store=False)
+            # Keep the status line scannable — one short line, not a stats dump.
             status_bits = []
             if self.clean_var.get() and path in self._clean_stats:
                 stats = self._clean_stats[path]
                 if getattr(stats, "changed", False):
-                    status_bits.append(stats.summary())
-            status_bits.append(assess_markdown(text).summary())
+                    status_bits.append(f"Cleaned ({stats.total_fixes:,} fixes)")
+            report = assess_markdown(text)
+            status_bits.append(f"Quality {report.score}/100")
+            status_bits.append(f"~{report.est_tokens:,} tokens")
+            if report.headings:
+                status_bits.append(f"{report.headings} headings")
             self.status_var.set("   ·   ".join(status_bits))
 
     def _show_plain(self, name: str, content: str, store: bool = True) -> None:
@@ -880,15 +940,15 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
     # -- saving --------------------------------------------------------------
     def save_markdown(self) -> None:
-        """The one save action: a file dialog for a single conversion, a
-        folder for a batch. No decisions to make up front."""
+        """The one save action. Output shape comes from the export bar:
+        single .md file(s), chapter folders, or AI-sized section folders."""
         converted = [p for p, r in self.files.items() if r and r.ok]
         if not converted:
             messagebox.showinfo(
                 __app_name__, "Nothing to save yet — drop in a file and it converts automatically."
             )
             return
-        if len(converted) == 1 and not self.settings.split_chapters:
+        if len(converted) == 1 and self._export_style_key() == "single":
             self._save_single(converted[0])
         else:
             self._save_batch(converted)
@@ -920,15 +980,18 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.status_var.set(f"Saved {Path(dest).name}.")
 
     def _save_batch(self, converted: list[Path]) -> None:
-        # Use the configured default folder if it still exists; otherwise ask.
-        default_dir = self.settings.default_output_dir
-        if default_dir and Path(default_dir).is_dir():
-            out_dir = default_dir
-        else:
-            out_dir = filedialog.askdirectory(title="Choose output folder")
+        # Always show the dialog (pre-filled with the default folder) — silent
+        # writes leave the user guessing where their files went.
+        out_dir = filedialog.askdirectory(
+            title="Choose output folder",
+            initialdir=self.settings.default_output_dir or None,
+        )
         if not out_dir:
             return
         out = Path(out_dir)
+        style = self._export_style_key()
+        split = style in ("chapters", "ai")
+        max_tokens = md_export.AI_TARGETS.get(self.target_var.get(), md_export.DEFAULT_MAX_TOKENS)
         saved = 0
         used_names: set[str] = set()
         for path in converted:
@@ -937,21 +1000,23 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 continue
             result = self.files.get(path)
             engine = result.engine if result else ""
-            # Optional AI-friendly extras (all controlled from Settings).
+            # Optional AI-friendly extras (controlled from Settings).
             if self.settings.extract_images and path.suffix.lower() == ".pdf":
                 from . import figures
 
-                book_dir = out / path.stem if self.settings.split_chapters else out
+                book_dir = out / path.stem if split else out
                 figs = figures.extract_pdf_figures(path, book_dir / "assets")
                 if figs:
                     text = figures.insert_figure_links(text, figs)
-            if self.settings.split_chapters:
+            if split:
                 res = md_export.export_book(
                     text,
                     out / path.stem,
                     source=path.name,
                     engine=engine,
                     front_matter=self.settings.export_front_matter,
+                    max_tokens=max_tokens if style == "ai" else md_export.DEFAULT_MAX_TOKENS,
+                    ai_sections=style == "ai",
                 )
                 saved += len(res.paths)
                 continue
@@ -972,9 +1037,11 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 front_matter=self.settings.export_front_matter,
             )
             saved += 1
-        mode = "cleaned" if self.clean_var.get() else "raw"
-        self.status_var.set(f"Saved {saved} {mode} Markdown file(s) to {out.name}.")
-        messagebox.showinfo(__app_name__, f"Saved {saved} file(s) to:\n{out}")
+        self.status_var.set(f"Saved {saved} Markdown file(s) to {out}.")
+        if messagebox.askyesno(
+            __app_name__, f"Saved {saved} file(s) to:\n{out}\n\nOpen the folder?"
+        ):
+            os.startfile(out)  # noqa: S606 - opening the user's chosen folder
 
 
 def run() -> None:

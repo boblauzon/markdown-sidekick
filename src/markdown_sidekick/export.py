@@ -26,6 +26,16 @@ from pathlib import Path
 _CHARS_PER_TOKEN = 4
 DEFAULT_MAX_TOKENS = 30_000
 
+# Per-platform section budgets (est. tokens). Sized so several sections fit
+# in the platform's context window with room for the conversation itself.
+AI_TARGETS: dict[str, int] = {
+    "Claude": 30_000,
+    "ChatGPT": 12_000,
+    "Gemini": 60_000,
+    "Local LLM": 4_000,
+    "General": 24_000,
+}
+
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
@@ -142,6 +152,43 @@ def split_chapters(markdown: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> list[
     return result
 
 
+def split_for_ai(markdown: str, max_tokens: int) -> list[Section]:
+    """Split into sections that each fit an AI platform's token budget.
+
+    Chapter structure is used when present (via :func:`split_chapters`, which
+    already sub-splits oversized chapters at ``##``). Anything still over
+    budget — including documents with no headings at all — is hard-split at
+    blank-line boundaries (never inside a code fence) into "(part N)" pieces,
+    so the guarantee holds for every input.
+    """
+    max_chars = max_tokens * _CHARS_PER_TOKEN
+    result: list[Section] = []
+    for sec in split_chapters(markdown, max_tokens=max_tokens):
+        if sec.est_tokens <= max_tokens:
+            result.append(sec)
+            continue
+        pieces: list[list[str]] = [[]]
+        size = 0
+        in_fence = False
+        for line in sec.markdown.split("\n"):
+            if _FENCE_RE.match(line):
+                in_fence = not in_fence
+            pieces[-1].append(line)
+            size += len(line) + 1
+            if size >= max_chars and not in_fence and not line.strip():
+                pieces.append([])
+                size = 0
+        chunks = ["\n".join(p).strip() for p in pieces]
+        chunks = [c for c in chunks if c]
+        base = sec.title or "Document"
+        if len(chunks) == 1:
+            result.append(sec)
+            continue
+        for n, chunk in enumerate(chunks, start=1):
+            result.append(Section(f"{base} (part {n})", chunk + "\n"))
+    return result
+
+
 def document_title(markdown: str, fallback: str) -> str:
     for line in markdown.split("\n"):
         m = _H1_RE.match(line)
@@ -185,15 +232,21 @@ def export_book(
     engine: str = "",
     front_matter: bool = True,
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    ai_sections: bool = False,
 ) -> ExportResult:
-    """Write a book folder (split chapters + index.md + manifest.json).
+    """Write a book folder (split parts + index.md + manifest.json).
 
-    Falls back to a single decorated file inside ``out_dir`` when the document
-    has no usable chapter structure.
+    ``ai_sections=True`` guarantees every part fits ``max_tokens`` even for
+    heading-less documents (see :func:`split_for_ai`); otherwise splitting
+    follows chapter structure only. Falls back to a single decorated file
+    inside ``out_dir`` when there is nothing to split.
     """
     stem = Path(source).stem
     title = document_title(markdown, stem)
-    sections = split_chapters(markdown, max_tokens=max_tokens)
+    if ai_sections:
+        sections = split_for_ai(markdown, max_tokens)
+    else:
+        sections = split_chapters(markdown, max_tokens=max_tokens)
     out_dir.mkdir(parents=True, exist_ok=True)
     if len(sections) < 2:
         return export_single(

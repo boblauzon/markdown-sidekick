@@ -55,9 +55,10 @@ available inside the app via the **❓ User Guide** button.
   built-in OCR / markitdown pipeline if it's unreachable
 - **AI-friendly export** (Settings → *AI-friendly export*):
   - **YAML front matter** on saved files (title, source, date, token estimate)
-  - **Chapter splitting** — *Save Markdown* can write each book as a folder of
-    per-chapter files plus `index.md` and a machine-readable `manifest.json`,
-    sized for AI context windows and RAG chunkers
+  - **Export bar** in the main window: choose *One Markdown file*, *Chapter
+    files* (book folder with `index.md` + `manifest.json`), or **AI-sized
+    sections** with an *Optimize for* picker (Claude / ChatGPT / Gemini /
+    Local LLM) that guarantees every part fits that platform's context window
   - **Page anchors** — optional `<!-- page N -->` markers in PDF conversions so
     AI answers can cite the printed page
   - **Figure extraction** — pull embedded PDF images into an `assets/` folder
@@ -164,8 +165,9 @@ from the standalone build). Flags: `--split-chapters`, `--quality`, `--anchors`,
 2. Click a file in the list to see its Markdown in the preview. Use **Rendered** to
    see styled output or untick it for raw Markdown; **Clean output** toggles the
    tidy-up pass.
-3. **💾 Save Markdown…** (one file → save dialog; several → folder), or **Copy** the
-   previewed file. Both use whatever the **Clean output** toggle is set to.
+3. Pick the **Output** shape (single file / chapter files / AI-sized sections
+   with a Claude-ChatGPT-Gemini-Local picker), then **💾 Save Markdown…** — or
+   **Copy** the previewed file. Both use whatever **Clean output** is set to.
 
 ## Project layout
 

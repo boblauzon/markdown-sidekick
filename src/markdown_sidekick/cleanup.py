@@ -47,6 +47,21 @@ class CleanupStats:
     fences_merged: int = 0
 
     @property
+    def total_fixes(self) -> int:
+        return (
+            self.removed_noise_lines
+            + self.toc_lines_removed
+            + self.code_blocks_fenced
+            + self.blank_runs_collapsed
+            + self.chars_normalized
+            + self.headings_promoted
+            + self.boilerplate_lines_removed
+            + self.bullets_normalized
+            + self.lines_joined
+            + self.fences_merged
+        )
+
+    @property
     def changed(self) -> bool:
         return bool(
             self.removed_noise_lines
