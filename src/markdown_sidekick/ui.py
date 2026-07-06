@@ -19,7 +19,7 @@ from .converter import (
     default_output_path,
     write_markdown,
 )
-from .guide import KOFI_URL, load_user_guide
+from .guide import KOFI_URL, build_mcp_setup_prompt, load_user_guide
 from .mdrender import MarkdownRenderer
 from .ocr import ocr_available
 from .settings import WHISPER_MODELS, Settings
@@ -449,6 +449,19 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         check("Clean output", clean_v, 11)
         check("Rendered preview", rendered_v, 12)
 
+        section("AI integration (MCP)", 13)
+        ttk.Button(
+            dlg,
+            text="📋  Copy AI setup prompt",
+            command=lambda: self.copy_mcp_prompt(parent=dlg),
+        ).grid(row=14, column=0, sticky="w", padx=16)
+        ttk.Label(
+            dlg,
+            text="Paste it into Claude, Cursor, or any AI assistant\nto connect Markdown Sidekick as a converter tool.",
+            style="PanelMuted.TLabel",
+            justify="left",
+        ).grid(row=14, column=1, columnspan=2, sticky="w", padx=(8, 16))
+
         def save() -> None:
             self.settings.enable_ocr = ocr_v.get()
             self.settings.enable_audio = audio_v.get()
@@ -462,7 +475,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             dlg.destroy()
 
         btns = ttk.Frame(dlg, style="Panel.TFrame")
-        btns.grid(row=13, column=0, columnspan=3, sticky="e", pady=16, padx=16)
+        btns.grid(row=15, column=0, columnspan=3, sticky="e", pady=16, padx=16)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right")
 
@@ -493,6 +506,18 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
     def open_kofi(self) -> None:
         webbrowser.open(KOFI_URL)
         self.status_var.set("Thank you for supporting Markdown Sidekick! ☕")
+
+    def copy_mcp_prompt(self, parent: tk.Misc | None = None) -> None:
+        """Copy a paste-into-any-AI prompt that sets up this install's MCP server."""
+        self.clipboard_clear()
+        self.clipboard_append(build_mcp_setup_prompt())
+        self.status_var.set("AI setup prompt copied to clipboard.")
+        messagebox.showinfo(
+            __app_name__,
+            "Setup prompt copied!\n\nPaste it into Claude, Cursor, or any AI "
+            "assistant and it will connect Markdown Sidekick as a converter tool.",
+            parent=parent or self,
+        )
 
     def open_help(self) -> None:
         # Singleton: if the guide is already open, just bring it forward.

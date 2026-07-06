@@ -183,10 +183,15 @@ just plain markitdown. It exposes two tools:
 - `convert_local_file(file_path, clean=true)` — returns Markdown for any supported file
 - `list_capabilities()` — reports which local engines are available
 
-Run it over stdio:
+**One-click setup:** in the app, open **⚙ Settings → 📋 Copy AI setup prompt**
+and paste it into Claude, Cursor, or any AI assistant — the prompt carries your
+install's exact launch command, and the assistant does the configuration.
+
+Run it over stdio manually:
 
 ```powershell
-.venv\Scripts\python.exe run_mcp.py
+.venv\Scripts\python.exe run_mcp.py          # source checkout
+dist\MarkdownSidekick\MarkdownSidekick.exe --mcp   # standalone build
 ```
 
 **Claude Desktop** — add to `%APPDATA%\Claude\claude_desktop_config.json`:

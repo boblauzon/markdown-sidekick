@@ -153,6 +153,13 @@ falls back to its built-in pipeline automatically.
 The app includes an MCP server so Claude Desktop, Cursor and VS Code can
 convert local files mid-conversation using this same pipeline.
 
+**The easy way:** open **⚙ Settings → 📋 Copy AI setup prompt**, then paste it
+into Claude, Cursor, or any AI assistant. The prompt contains this install's
+exact launch command — the assistant does the configuration for you.
+
+**Manual setup** (if you prefer): the standalone app serves MCP via
+`MarkdownSidekick.exe --mcp`; a source checkout uses the commands below.
+
 **Claude Desktop** — add to `%APPDATA%\Claude\claude_desktop_config.json`:
 
 ```

@@ -2,11 +2,13 @@
 
 Usage:
     python app.py             # launch the GUI
+    python app.py --mcp       # run the MCP server over stdio (for AI clients)
     python app.py --selftest  # verify the conversion pipeline, write a JSON
                               # report next to this file (used to validate
                               # frozen/PyInstaller builds), exit 0/1.
 """
 
+import os
 import sys
 from pathlib import Path
 
@@ -56,6 +58,14 @@ def _selftest() -> int:
 
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
 
+        # The MCP server (and fastmcp) must be present so `--mcp` works.
+        try:
+            import markdown_sidekick.mcp_server  # noqa: F401
+
+            report["checks"]["mcp_server"] = True
+        except Exception:
+            report["checks"]["mcp_server"] = False
+
         report["ok"] = all(v for v in report["checks"].values() if isinstance(v, bool))
     except Exception as exc:  # the report must always be written
         report["error"] = f"{type(exc).__name__}: {exc}"
@@ -63,7 +73,25 @@ def _selftest() -> int:
     return 0 if report["ok"] else 1
 
 
+def _run_mcp() -> None:
+    """Host the MCP server over stdio (how AI clients launch the frozen exe).
+
+    In a windowed (no-console) build the unpiped std streams are None; an MCP
+    client always provides pipes, so valid stdin/stdout mean we can serve.
+    """
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+    if sys.stdin is None or sys.stdout is None:
+        sys.exit("The MCP server must be launched by an MCP client over stdio.")
+    from markdown_sidekick.mcp_server import main as mcp_main
+
+    mcp_main()
+
+
 if __name__ == "__main__":
+    if "--mcp" in sys.argv:
+        _run_mcp()
+        sys.exit(0)
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
     from markdown_sidekick.ui import run

@@ -20,6 +20,7 @@ for pkg in (
     "faster_whisper",
     "av",
     "markitdown",
+    "fastmcp",  # the exe hosts the MCP server via `MarkdownSidekick.exe --mcp`
 ):
     d, b, h = collect_all(pkg)
     datas += d
@@ -36,8 +37,6 @@ a = Analysis(
     datas=datas,
     hiddenimports=hiddenimports,
     excludes=[
-        # The GUI never imports the MCP server; keep the web stack out.
-        "fastmcp", "uvicorn", "starlette", "websockets",
         # Not used by the app.
         "IPython", "matplotlib", "pytest", "setuptools._distutils",
     ],
