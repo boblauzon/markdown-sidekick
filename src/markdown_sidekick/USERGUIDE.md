@@ -11,11 +11,13 @@ support development at [ko-fi.com/roblauzon](https://ko-fi.com/roblauzon) ☕
 ## Quick Start
 
 1. **Add files** — drag & drop them onto the file list, or click *Add files…*
-2. **Click Convert all** — each file's row shows which engine handled it
-3. **Click a file** to see its Markdown in the preview pane
-4. **Copy** it to the clipboard, or **Save as…** / **Save all…** to `.md` files
+   Conversion starts **automatically**; each row shows which engine handled it.
+2. **Click a file** to see its Markdown in the preview pane.
+3. **💾 Save Markdown…** — one file gets a save dialog, several get a folder.
+   (Or **Copy** the previewed file straight to the clipboard.)
 
-That's the whole workflow. Everything below is detail you can read when you need it.
+That's the whole workflow: drop, then save. Everything below is detail you
+can read when you need it.
 
 ---
 
@@ -23,7 +25,8 @@ That's the whole workflow. Everything below is detail you can read when you need
 
 **Files panel (left)**
 
-- *Add files…* / *Remove* / *Clear* manage the conversion list
+- *Add files…* / *Remove* / *Clear* manage the conversion list — added files
+  convert immediately, and you can keep dropping more while a batch runs
 - The **Engine** column shows how each file was converted:
 
 | Badge | Meaning |
@@ -43,15 +46,18 @@ That's the whole workflow. Everything below is detail you can read when you need
   Untick it to see the raw Markdown text exactly as it will be saved.
 - **Clean output** — applies the cleanup pass (see below). Copy and Save always
   match whatever this toggle is set to.
-- **Copy** / **Save as…** act on the currently selected file.
+- **Copy** puts the currently selected file's Markdown on the clipboard.
 
 **Footer**
 
 - Progress bar and status line (per-page OCR progress, per-second transcription
-  progress, cleanup summaries)
-- **Save all…** writes every converted file to a folder of your choice —
-  or straight to your default output folder if you set one in Settings
-- **Convert all** starts the batch
+  progress, cleanup summaries, quality score)
+- **💾 Save Markdown…** is the one save button: with a single converted file it
+  asks where to save it; with several it asks for a folder (or writes straight
+  to your default output folder if you set one in Settings)
+
+Changing **Settings** offers to re-convert the files you already loaded, so
+results always match the current configuration.
 
 ---
 
@@ -152,10 +158,10 @@ Notes:
 | Transcribe audio files | Master switch for audio/video transcription |
 | Whisper model | Speech model size (see above) |
 | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
-| Default output folder | Save all… writes here without asking |
+| Default output folder | Save Markdown… writes batches here without asking |
 | Clean output / Rendered preview | Default states for the preview toggles |
 | YAML front matter | Saved files start with title/source/date/token metadata |
-| Split books into chapter folders | Save all… writes one file per chapter plus index.md + manifest.json |
+| Split books into chapter folders | Save Markdown… writes one file per chapter plus index.md + manifest.json |
 | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Extract PDF figures | Embedded images land in an assets/ folder with links |
 | Ollama endpoint + models | Optional local-LLM polish pass and figure captions (blank = off) |

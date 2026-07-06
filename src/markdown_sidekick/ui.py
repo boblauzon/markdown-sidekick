@@ -268,7 +268,11 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         scroll.grid(row=2, column=1, sticky="ns")
         tree.configure(yscrollcommand=scroll.set)
 
-        hint = "Drag & drop files here" if _DND_AVAILABLE else "Use “Add files…” to begin"
+        hint = (
+            "Drag & drop files — they convert automatically"
+            if _DND_AVAILABLE
+            else "Use “Add files…” — they convert automatically"
+        )
         self.drop_hint = ttk.Label(panel, text=hint, style="PanelMuted.TLabel")
         self.drop_hint.grid(row=3, column=0, sticky="w", pady=(8, 2))
 
@@ -350,9 +354,6 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         actions = ttk.Frame(panel, style="Panel.TFrame")
         actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="Copy", command=self.copy_preview).pack(side="left")
-        ttk.Button(actions, text="Save as…", command=self.save_selected).pack(
-            side="left", padx=6
-        )
 
     def _build_footer(self) -> None:
         footer = ttk.Frame(self, style="TFrame")
@@ -369,14 +370,12 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.status_var = tk.StringVar(value="Ready.")
         ttk.Label(row, textvariable=self.status_var, style="Muted.TLabel").pack(side="left")
 
-        self.convert_btn = ttk.Button(
-            row, text="Convert all", style="Accent.TButton", command=self.convert_all
+        # One primary action: files convert automatically when added, so the
+        # only decision left is where the Markdown goes.
+        self.save_btn = ttk.Button(
+            row, text="💾  Save Markdown…", style="Accent.TButton", command=self.save_markdown
         )
-        self.convert_btn.pack(side="right")
-        self.save_all_btn = ttk.Button(
-            row, text="Save all…", command=self.save_all
-        )
-        self.save_all_btn.pack(side="right", padx=(0, 8))
+        self.save_btn.pack(side="right")
 
     # -- settings ------------------------------------------------------------
     def open_settings(self) -> None:
@@ -515,6 +514,14 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.settings.save()
             self._apply_settings()
             dlg.destroy()
+            # Existing results were produced with the old configuration —
+            # offer to redo them (this replaces the old "Convert all" button).
+            if any(r is not None for r in self.files.values()):
+                if messagebox.askyesno(
+                    __app_name__,
+                    f"Re-convert the {len(self.files)} loaded file(s) with the new settings?",
+                ):
+                    self.reconvert_all()
 
         btns = ttk.Frame(dlg, style="Panel.TFrame")
         btns.grid(row=24, column=0, columnspan=3, sticky="e", pady=16, padx=16)
@@ -631,7 +638,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             )
             added += 1
         if added:
-            self.status_var.set(f"Added {added} file(s). {len(self.files)} ready to convert.")
+            self.status_var.set(f"Added {added} file(s).")
+            # Conversion starts by itself — if a batch is already running, the
+            # new files wait as "pending" and are picked up when it finishes.
+            self._convert_pending()
 
     def remove_selected(self) -> None:
         for iid in self.tree.selection():
@@ -681,7 +691,11 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         result = self.files.get(path)
         if result is None:
             self._current_export_text = ""  # nothing real to copy/save
-            self._show_plain(path.name, "Not converted yet — click “Convert all”.", store=False)
+            self._show_plain(
+                path.name,
+                "Converting… the preview appears when this file finishes.",
+                store=False,
+            )
         elif not result.ok:
             self._current_export_text = ""
             self._show_plain(path.name, f"⚠ Conversion failed:\n\n{result.error}", store=False)
@@ -736,23 +750,41 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.status_var.set("Markdown copied to clipboard.")
 
     # -- conversion ----------------------------------------------------------
-    def convert_all(self) -> None:
+    def _convert_pending(self) -> None:
+        """Convert every file that hasn't been converted yet.
+
+        Called automatically when files are added. If a batch is already
+        running, this is a no-op — the batch's completion handler calls back
+        here to pick up whatever queued in the meantime.
+        """
         if self._busy:
             return
-        if not self.files:
-            messagebox.showinfo(__app_name__, "Add some files first.")
+        targets = [p for p, r in self.files.items() if r is None]
+        if not targets:
             return
         self._set_busy(True)
-        self._clean_cache.clear()
-        self._clean_stats.clear()
         # Apply the OCR toggle on the main thread before the worker starts.
         self.engine.enable_ocr = self.ocr_var.get()
-        targets = list(self.files.keys())
         self.progress.configure(maximum=len(targets), value=0)
         self.status_var.set("Converting…")
 
         thread = threading.Thread(target=self._worker_convert, args=(targets,), daemon=True)
         thread.start()
+
+    def reconvert_all(self) -> None:
+        """Reset every loaded file to pending and convert again (used after a
+        settings change so results reflect the new configuration)."""
+        if self._busy or not self.files:
+            return
+        for path in self.files:
+            self.files[path] = None
+            iid = str(path)
+            if self.tree.exists(iid):
+                self.tree.item(iid, values=("pending",), tags=("pending",))
+        self._clean_cache.clear()
+        self._clean_stats.clear()
+        self._clear_preview()
+        self._convert_pending()
 
     def _worker_convert(self, targets: list[Path]) -> None:
         def on_progress(index: int, total: int, result: ConversionResult) -> None:
@@ -830,27 +862,38 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 children = self.tree.get_children()
                 if children:
                     self.tree.selection_set(children[0])
+            # Files dropped while this batch ran are still pending — chain.
+            self._convert_pending()
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
         state = "disabled" if busy else "normal"
-        # Lock file-list mutation while a conversion is in flight, so a worker
-        # result can't resurrect a removed/cleared file.
+        # Removing/clearing is locked while a conversion is in flight so a
+        # worker result can't resurrect a removed/cleared file. ADDING stays
+        # enabled — new files queue as pending and convert when the batch ends.
         for widget in (
-            self.convert_btn,
-            self.save_all_btn,
-            self.add_btn,
+            self.save_btn,
             self.remove_btn,
             self.clear_btn,
         ):
             widget.configure(state=state)
 
     # -- saving --------------------------------------------------------------
-    def save_selected(self) -> None:
-        path = self._selected_path()
-        if path is None:
-            messagebox.showinfo(__app_name__, "Select a file in the list first.")
+    def save_markdown(self) -> None:
+        """The one save action: a file dialog for a single conversion, a
+        folder for a batch. No decisions to make up front."""
+        converted = [p for p, r in self.files.items() if r and r.ok]
+        if not converted:
+            messagebox.showinfo(
+                __app_name__, "Nothing to save yet — drop in a file and it converts automatically."
+            )
             return
+        if len(converted) == 1 and not self.settings.split_chapters:
+            self._save_single(converted[0])
+        else:
+            self._save_batch(converted)
+
+    def _save_single(self, path: Path) -> None:
         text = self._export_text_for(path)
         if text is None:
             messagebox.showwarning(
@@ -861,6 +904,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             title="Save Markdown",
             defaultextension=".md",
             initialfile=f"{path.stem}.md",
+            initialdir=self.settings.default_output_dir or None,
             filetypes=[("Markdown", "*.md"), ("All files", "*.*")],
         )
         if not dest:
@@ -875,11 +919,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         )
         self.status_var.set(f"Saved {Path(dest).name}.")
 
-    def save_all(self) -> None:
-        converted = [p for p, r in self.files.items() if r and r.ok]
-        if not converted:
-            messagebox.showinfo(__app_name__, "Nothing converted yet.")
-            return
+    def _save_batch(self, converted: list[Path]) -> None:
         # Use the configured default folder if it still exists; otherwise ask.
         default_dir = self.settings.default_output_dir
         if default_dir and Path(default_dir).is_dir():

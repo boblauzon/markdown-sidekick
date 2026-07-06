@@ -55,7 +55,7 @@ available inside the app via the **❓ User Guide** button.
   built-in OCR / markitdown pipeline if it's unreachable
 - **AI-friendly export** (Settings → *AI-friendly export*):
   - **YAML front matter** on saved files (title, source, date, token estimate)
-  - **Chapter splitting** — *Save all* can write each book as a folder of
+  - **Chapter splitting** — *Save Markdown* can write each book as a folder of
     per-chapter files plus `index.md` and a machine-readable `manifest.json`,
     sized for AI context windows and RAG chunkers
   - **Page anchors** — optional `<!-- page N -->` markers in PDF conversions so
@@ -71,8 +71,9 @@ available inside the app via the **❓ User Guide** button.
 - **Optional local-LLM extras** (point Settings at an Ollama endpoint; off by
   default, fully offline): artifact **polish** pass with a size guardrail, and
   vision-model **alt-text captions** for extracted figures
-- **Copy** the Markdown to the clipboard, **Save as…** a single file, or **Save all…**
-  to a folder (Copy/Save respect the Clean-output setting)
+- **Copy** the Markdown to the clipboard, or hit the single **💾 Save Markdown…**
+  button — one file gets a save dialog, a batch gets a folder (Copy/Save respect
+  the Clean-output setting)
 - **Per-file status** (done / error) with the error message shown inline in the preview
 - Powered by `markitdown[all]`, so it understands a wide range of formats:
 
@@ -158,13 +159,13 @@ from the standalone build). Flags: `--split-chapters`, `--quality`, `--anchors`,
 
 ## How to use
 
-1. Add files (drag & drop or **Add files…**).
-2. Click **Convert all**. Each file's status updates to *done* or *error*.
-3. Click a file in the list to see its Markdown in the preview. Use **Rendered** to
+1. Add files (drag & drop or **Add files…**) — conversion starts automatically
+   and each file's status updates to its engine or *error*.
+2. Click a file in the list to see its Markdown in the preview. Use **Rendered** to
    see styled output or untick it for raw Markdown; **Clean output** toggles the
-   tidy-up pass (page-number/header removal + code fencing).
-4. **Copy**, **Save as…** (single file), or **Save all…** (whole batch to a folder).
-   Copy and Save use whatever the **Clean output** toggle is set to.
+   tidy-up pass.
+3. **💾 Save Markdown…** (one file → save dialog; several → folder), or **Copy** the
+   previewed file. Both use whatever the **Clean output** toggle is set to.
 
 ## Project layout
 
