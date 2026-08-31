@@ -276,3 +276,8 @@ just as valuable.
 
 Markdown Sidekick is the desktop front-end around these engines — a
 **VibeProSoft** freeware project.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The bundled conversion engines keep their own
+licenses (all permissive; the project deliberately avoids GPL/AGPL dependencies).
