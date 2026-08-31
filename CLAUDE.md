@@ -47,7 +47,7 @@ The output shape is chosen in the GUI's export bar and persisted as `Settings.ex
 
 The passes were tuned against a real 25-book PDF-conversion corpus; `tests/test_cleanup.py` encodes those artifact shapes — run it after any cleanup change. Fence language labels come from `_guess_language` (content scoring; returns `""` plain fence when ambiguous — an honest plain fence beats a wrong label). `CleanupStats` fields must all be non-negative int counters: `total_fixes`/`changed` derive from `dataclasses.fields`, so a new pass's counter is picked up automatically but a non-counter field would poison the sum.
 
-**Threading**: the GUI runs conversion on a worker thread; progress callbacks (`on_progress`, `on_subprogress`) must stay thread-safe. The MCP server serializes conversions with a lock because the OCR/whisper model singletons and the stdout redirect are not thread-safe.
+**Threading**: the GUI runs conversion on a worker thread; progress callbacks (`on_progress`, `on_subprogress`) must stay thread-safe. Cleanup + quality assessment are precomputed per file inside the worker's `on_progress` (selecting a big book must never stall the Tk thread — misses show a watch cursor); Tk variables (Clean/OCR toggles) are read on the main thread *before* the worker starts and passed in, never read from the worker. The MCP server serializes conversions with a lock because the OCR/whisper model singletons and the stdout redirect are not thread-safe.
 
 **MCP server** (`mcp_server.py`): stdout is reserved for JSON-RPC — logging goes to stderr and conversion runs inside `redirect_stdout(sys.stderr)`. The `FASTMCP_*` env vars are set **before** importing fastmcp (`FASTMCP_CHECK_FOR_UPDATES` must be `off`, not `false` — it's a Literal and `false` crashes the import).
 
@@ -55,7 +55,7 @@ The passes were tuned against a real 25-book PDF-conversion corpus; `tests/test_
 
 **Startup time**: RapidOCR, faster-whisper, and fastmcp are lazy-imported. Don't add module-level imports of heavy libraries to anything `ui.py` pulls in at startup.
 
-**Preview** (`mdrender.py`): a deliberate CommonMark *subset* renderer for the Tk Text widget — underscore emphasis is intentionally unsupported (snake_case would misrender), and links inside `**bold**` are not parsed. Raw Markdown remains the source of truth for copy/save.
+**Preview** (`mdrender.py`): a deliberate CommonMark *subset* renderer for the Tk Text widget — underscore emphasis is intentionally unsupported (snake_case would misrender), and links inside `**bold**` are not parsed. Raw Markdown remains the source of truth for copy/save. The preview *displays* at most `ui.PREVIEW_MAX_CHARS` (rendering costs ~250ms/MB on messy text); copy/save always use the full document.
 
 ## Packaging touchpoints
 

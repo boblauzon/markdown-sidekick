@@ -56,6 +56,11 @@ FONT_BOLD = ("Segoe UI", 10, "bold")
 FONT_TITLE = ("Segoe UI Semibold", 16)
 FONT_MONO = ("Cascadia Code", 10) if True else ("Consolas", 10)
 
+# Rendering a multi-MB document into the Tk Text widget costs ~250ms/MB on
+# messy real-world text; cap what the PREVIEW shows so clicking a huge file
+# stays instant. Copy/Save always use the full text.
+PREVIEW_MAX_CHARS = 400_000
+
 
 def _fmt_mmss(seconds: float) -> str:
     seconds = int(max(0, seconds))
@@ -90,6 +95,9 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         # Cleaned-output cache + the text currently shown (for copy/save).
         self._clean_cache: dict[Path, str] = {}
         self._clean_stats: dict[Path, object] = {}
+        # QualityReport per (path, clean-toggle) — assessing a 500-page book
+        # costs ~0.2s, too slow to redo on every list click.
+        self._quality_cache: dict[tuple[Path, bool], object] = {}
         self._current_export_text = ""
         # OCR toggle reflects the saved setting (and dep availability).
         self.ocr_var = tk.BooleanVar(value=self.settings.enable_ocr and ocr_available())
@@ -620,6 +628,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.rendered_var.set(s.rendered_preview)
         self._clean_cache.clear()
         self._clean_stats.clear()
+        self._quality_cache.clear()
         self._on_select_file()
 
     # -- help / support --------------------------------------------------------
@@ -714,14 +723,20 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             # new files wait as "pending" and are picked up when it finishes.
             self._convert_pending()
 
+    def _evict_caches(self, path: Path) -> None:
+        """Drop every cache derived from a path's conversion result."""
+        self._clean_cache.pop(path, None)
+        self._clean_stats.pop(path, None)
+        self._quality_cache.pop((path, True), None)
+        self._quality_cache.pop((path, False), None)
+
     def remove_selected(self) -> None:
         if self._busy:  # keyboard route; the button is disabled while busy
             return
         for iid in self.tree.selection():
             path = Path(iid)
             self.files.pop(path, None)
-            self._clean_cache.pop(path, None)
-            self._clean_stats.pop(path, None)
+            self._evict_caches(path)
             self.tree.delete(iid)
         self._clear_preview()
 
@@ -739,6 +754,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.files.clear()
         self._clean_cache.clear()
         self._clean_stats.clear()
+        self._quality_cache.clear()
         self.tree.delete(*self.tree.get_children())
         self._clear_preview()
         self.progress["value"] = 0
@@ -785,25 +801,53 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self._current_export_text = ""
             self._show_plain(path.name, f"⚠ Conversion failed:\n\n{result.error}", store=False)
         else:
-            text = self._export_text_for(path) or "(Empty output.)"
-            self._current_export_text = text
-            self.preview_name.configure(text=f"{path.name}   ·   {result.engine}")
-            if self.rendered_var.get():
-                self._renderer.render(text)
-            else:
-                self._show_plain(path.name, text, store=False)
-            # One short line beside the preview — not a stats dump.
-            bits = []
-            if self.clean_var.get() and path in self._clean_stats:
-                stats = self._clean_stats[path]
-                if stats.changed:
-                    bits.append(stats.brief())
-            report = assess_markdown(text)
-            bits.append(f"Quality {report.score}/100")
-            bits.append(f"~{report.est_tokens:,} tokens")
-            if report.headings:
-                bits.append(f"{report.headings} headings")
-            self.quality_label.configure(text="   ·   ".join(bits))
+            # Cleanup + quality are normally precomputed on the worker; a miss
+            # here (e.g. the Clean toggle flipped after conversion) can cost
+            # seconds on a big book, so show a busy cursor while it runs.
+            clean_on = bool(self.clean_var.get())
+            key = (path, clean_on)
+            miss = (clean_on and path not in self._clean_cache) or key not in self._quality_cache
+            if miss:
+                self.configure(cursor="watch")
+                self.update_idletasks()
+            try:
+                text = self._export_text_for(path) or "(Empty output.)"
+                self._current_export_text = text
+                self.preview_name.configure(text=f"{path.name}   ·   {result.engine}")
+                display = text
+                if len(display) > PREVIEW_MAX_CHARS:
+                    cut = display.rfind("\n", 0, PREVIEW_MAX_CHARS)
+                    display = display[: cut if cut > 0 else PREVIEW_MAX_CHARS]
+                    notice = (
+                        f"Preview shows the first {PREVIEW_MAX_CHARS // 1000}k "
+                        "characters — Copy and Save always use the full document."
+                    )
+                    if self.rendered_var.get():
+                        display = f"*{notice}*\n\n{display}"
+                    else:
+                        display = f"{notice}\n\n{display}"
+                if self.rendered_var.get():
+                    self._renderer.render(display)
+                else:
+                    self._show_plain(path.name, display, store=False)
+                # One short line beside the preview — not a stats dump.
+                bits = []
+                if clean_on and path in self._clean_stats:
+                    stats = self._clean_stats[path]
+                    if stats.changed:
+                        bits.append(stats.brief())
+                report = self._quality_cache.get(key)
+                if report is None:
+                    report = assess_markdown(text)
+                    self._quality_cache[key] = report
+                bits.append(f"Quality {report.score}/100")
+                bits.append(f"~{report.est_tokens:,} tokens")
+                if report.headings:
+                    bits.append(f"{report.headings} headings")
+                self.quality_label.configure(text="   ·   ".join(bits))
+            finally:
+                if miss:
+                    self.configure(cursor="")
 
     def _show_plain(self, name: str, content: str, store: bool = True) -> None:
         """Drop the raw text into the preview with no Markdown styling."""
@@ -854,12 +898,17 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         if not targets:
             return
         self._set_busy(True)
-        # Apply the OCR toggle on the main thread before the worker starts.
+        # Read Tk state on the main thread before the worker starts — the OCR
+        # toggle for the engine, the Clean toggle for the precompute pass
+        # (Tk variables are not safe to read from the worker).
         self.engine.enable_ocr = self.ocr_var.get()
+        clean_flag = bool(self.clean_var.get())
         self.progress.configure(maximum=len(targets), value=0)
         self.status_var.set("Converting…")
 
-        thread = threading.Thread(target=self._worker_convert, args=(targets,), daemon=True)
+        thread = threading.Thread(
+            target=self._worker_convert, args=(targets, clean_flag), daemon=True
+        )
         thread.start()
 
     def reconvert_all(self) -> None:
@@ -874,12 +923,25 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 self.tree.item(iid, values=("pending",), tags=("pending",))
         self._clean_cache.clear()
         self._clean_stats.clear()
+        self._quality_cache.clear()
         self._clear_preview()
         self._convert_pending()
 
-    def _worker_convert(self, targets: list[Path]) -> None:
+    def _worker_convert(self, targets: list[Path], clean_flag: bool) -> None:
         def on_progress(index: int, total: int, result: ConversionResult) -> None:
-            self._events.put(("progress", index, total, result))
+            # Precompute the first-click work (cleanup + quality) here on the
+            # worker so selecting a big book never freezes the UI thread.
+            pack = None
+            if result.ok and result.markdown:
+                try:
+                    if clean_flag:
+                        cleaned, stats = clean_markdown(result.markdown)
+                        pack = (cleaned, stats, assess_markdown(cleaned))
+                    else:
+                        pack = (None, None, assess_markdown(result.markdown))
+                except Exception:  # precompute is an optimisation, never fatal
+                    pack = None
+            self._events.put(("progress", index, total, result, clean_flag, pack))
 
         def on_subprogress(source: Path, current: float, total: float, unit: str) -> None:
             self._events.put(("subprogress", source, current, total, unit))
@@ -901,12 +963,20 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
     def _handle_event(self, event: tuple) -> None:
         kind = event[0]
         if kind == "progress":
-            _, index, total, result = event
+            _, index, total, result, clean_flag, pack = event
             # Ignore a late result for a file removed/cleared mid-run.
             if result.source not in self.files:
                 self.progress["value"] = index
                 return
             self.files[result.source] = result
+            # A fresh result invalidates anything derived from the old one.
+            self._evict_caches(result.source)
+            if pack is not None:
+                cleaned, stats, report = pack
+                if cleaned is not None:
+                    self._clean_cache[result.source] = cleaned
+                    self._clean_stats[result.source] = stats
+                self._quality_cache[(result.source, clean_flag)] = report
             tag = "ok" if result.ok else "err"
             status = result.engine if result.ok else "error"
             iid = str(result.source)

@@ -50,6 +50,8 @@ can read when you need it.
 - **Clean output** — applies the cleanup pass (see below). Copy and Save always
   match whatever this toggle is set to.
 - **Copy** puts the currently selected file's Markdown on the clipboard.
+- Very large documents preview their beginning (a notice says so) to keep the
+  app instant — **Copy and Save always use the complete document**.
 
 **Footer**
 

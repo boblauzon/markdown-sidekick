@@ -990,6 +990,10 @@ def normalize_bullets(text: str, stats: CleanupStats) -> str:
 # floor. Hyphenated wraps rejoin the split word, keeping the hyphen only for
 # real compounds ("parents-in-" + "law", but "Ag-" + "ile" -> "Agile").
 _WRAP_MIN_LEN = 65
+# Stop joining once the accumulated line is this long: no real paragraph is
+# 4k chars of unpunctuated prose (degenerate OCR/transcript input is), and
+# capping it keeps the repeated join-copies linear instead of quadratic.
+_JOIN_MAX_LEN = 4000
 _HYPHEN_WRAP_RE = re.compile(r"([A-Za-z][A-Za-z']*)-$")
 # Code that escaped fencing must never be folded into prose: refuse to join
 # any line that ends in a statement terminator/brace, starts like a code
@@ -1027,20 +1031,39 @@ def join_wrapped_lines(text: str, stats: CleanupStats) -> str:
             out.append(line)
             continue
         prev = out[-1]
+        # Predicates on prev must NOT scan the whole accumulated line: when
+        # thousands of consecutive lines join (hard-wrapped OCR output with no
+        # sentence punctuation), prev grows unboundedly and full-string regex
+        # scans turn this pass quadratic — minutes on one bad document. Every
+        # prev predicate is head- or end-anchored, so a bounded window is
+        # exact for any real line (< 400 chars) and merely conservative — a
+        # skipped join, never a wrong one — for degenerate accumulations.
+        if len(prev) <= 400:
+            prev_stripped = prev.strip()
+            prev_windows = (prev_stripped,)
+            prev_end = prev.rstrip()
+            prev_head = prev
+            prev_long_enough = len(prev_stripped) >= _WRAP_MIN_LEN
+        else:
+            prev_windows = (prev[:200].strip(), prev[-200:].strip())
+            prev_end = prev[-220:].rstrip()
+            prev_head = prev[:200]
+            prev_long_enough = True
         if (
             line.strip()
+            and len(prev) <= _JOIN_MAX_LEN
             and not line[:1].isspace()
             and not _is_structural(line)
-            and not _is_structural(prev)
-            and not _fence_line(prev)
-            and prev.strip()
+            and not _is_structural(prev_head)
+            and not _fence_line(prev_head)
+            and prev_windows[0]
             and not _JOIN_UNSAFE_RE.search(line.strip())
-            and not _JOIN_UNSAFE_RE.search(prev.strip())
+            and not any(_JOIN_UNSAFE_RE.search(w) for w in prev_windows)
         ):
-            hyphen = _HYPHEN_WRAP_RE.search(prev.rstrip())
+            hyphen = _HYPHEN_WRAP_RE.search(prev_end)
             if hyphen and line[:1].islower():
                 fragment = hyphen.group(1)
-                before = prev.rstrip()[: -len(fragment) - 1][-1:]
+                before = prev_end[: -len(fragment) - 1][-1:]
                 # "Ag-" + "ile" -> "Agile"; but "parents-in-" + "law" is a real
                 # compound (a hyphen precedes the fragment), so keep the hyphen.
                 if before == "-":
@@ -1049,10 +1072,7 @@ def join_wrapped_lines(text: str, stats: CleanupStats) -> str:
                     out[-1] = prev.rstrip()[:-1] + line.lstrip()
                 stats.lines_joined += 1
                 continue
-            if (
-                len(prev.strip()) >= _WRAP_MIN_LEN
-                and not prev.rstrip().endswith(_SENTENCE_END)
-            ):
+            if prev_long_enough and not prev_end.endswith(_SENTENCE_END):
                 out[-1] = prev.rstrip() + " " + line.lstrip()
                 stats.lines_joined += 1
                 continue

@@ -485,3 +485,45 @@ class TestEndToEnd:
         )
         assert out == text
         assert not stats.changed
+
+
+class TestJoinScaling:
+    def test_pathological_wrap_join_stays_fast(self):
+        """10k hard-wrapped unpunctuated lines (bad-OCR shape) must clean in
+        seconds, not minutes — the join pass was quadratic in both regex
+        scanning and string copies before the window/cap fix."""
+        import time
+
+        # Lines must stay unique even with digits stripped: repeated shapes
+        # look like running headers/footers to the noise pass and would be
+        # removed before ever reaching the join pass.
+        import random
+
+        rng = random.Random(7)
+        vocab = (
+            "pipeline contract freshness idempotence partition schema replay "
+            "backfill retry publish validate transform ingest observability "
+            "ledger quorum shard beacon anchor drift"
+        ).split()
+        text = "\n".join(
+            " ".join(rng.sample(vocab, 11)) + " continues onward and"
+            for _ in range(10_000)
+        )
+        t = time.perf_counter()
+        out, stats = clean_markdown(text)
+        elapsed = time.perf_counter() - t
+        assert elapsed < 10.0, f"cleanup took {elapsed:.1f}s on pathological input"
+        assert stats.lines_joined > 5_000  # the pass still actually joins
+        # The cap breaks the accumulation into paragraphs; no content is lost.
+        assert len(out) > len(text) * 0.9  # nothing was stripped as noise
+
+    def test_join_cap_bounds_line_length(self):
+        # Same uniqueness requirement as above, at a smaller scale.
+        text = "\n".join(
+            f"filler{i} " + " ".join(f"w{i}x{j} pad" for j in range(8))
+            for i in range(2_000)
+        )
+        out, _ = clean_markdown(text)
+        longest = max(len(ln) for ln in out.split("\n"))
+        # _JOIN_MAX_LEN (4000) + one more joined line of slack
+        assert longest < 4200
