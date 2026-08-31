@@ -491,7 +491,7 @@ class TestJoinScaling:
     def test_pathological_wrap_join_stays_fast(self):
         """10k hard-wrapped unpunctuated lines (bad-OCR shape) must clean in
         seconds, not minutes — the join pass was quadratic in both regex
-        scanning and string copies before the window/cap fix."""
+        scanning and string copies before the _JOIN_MAX_LEN cap."""
         import time
 
         # Lines must stay unique even with digits stripped: repeated shapes

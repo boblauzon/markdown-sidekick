@@ -18,6 +18,7 @@ from .converter import (
     ConversionEngine,
     ConversionResult,
     default_output_path,
+    explain_error,
 )
 from . import export as md_export
 from .guide import KOFI_URL, build_mcp_setup_prompt, load_user_guide
@@ -106,10 +107,17 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._build_style()
         self._build_layout()
         # Keyboard path — mirrors the buttons. Handlers re-check _busy
-        # because key bindings bypass disabled-widget protection.
-        self.bind("<Control-o>", lambda _e: self.add_files())
-        self.bind("<Control-s>", lambda _e: self.save_markdown())
-        self.bind("<Control-C>", lambda _e: self.copy_preview())  # Ctrl+Shift+C
+        # because key bindings bypass disabled-widget protection. Each accel
+        # binds BOTH letter cases: Tk keysyms follow the effective case, so
+        # CapsLock turns "o" into "O" and a single-case binding goes dead.
+        # Copy requires an explicit Shift so plain Ctrl+C (the Text widget's
+        # own selection copy) can never trigger the whole-document copy.
+        for seq in ("<Control-o>", "<Control-O>"):
+            self.bind(seq, lambda _e: self.add_files())
+        for seq in ("<Control-s>", "<Control-S>"):
+            self.bind(seq, lambda _e: self.save_markdown())
+        for seq in ("<Control-Shift-c>", "<Control-Shift-C>"):
+            self.bind(seq, lambda _e: self.copy_preview())
         self.tree.bind("<Delete>", lambda _e: self.remove_selected())
         self._poll_events()
 
@@ -312,6 +320,17 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             ocr_chk.configure(state="disabled")
         ocr_chk.grid(row=4, column=0, sticky="w")
 
+        # Right-click: retry/re-convert or remove the row under the cursor.
+        self._tree_menu = tk.Menu(
+            tree,
+            tearoff=0,
+            bg=BG_PANEL,
+            fg=FG,
+            activebackground=ACCENT_FILL,
+            activeforeground="#ffffff",
+        )
+        tree.bind("<Button-3>", self._on_tree_menu)
+
         if _DND_AVAILABLE:
             tree.drop_target_register(DND_FILES)
             tree.dnd_bind("<<Drop>>", self._on_drop)
@@ -376,6 +395,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         actions = ttk.Frame(panel, style="Panel.TFrame")
         actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="Copy", command=self.copy_preview).pack(side="left")
+        # Retry appears only while a failed conversion is selected.
+        self.retry_btn = ttk.Button(actions, text="↻  Retry", command=self.retry_selected)
         # Selection-scoped info (cleanup/quality) lives with the preview so
         # selecting a file never evicts batch progress from the status line.
         self.quality_label = ttk.Label(actions, text="", style="PanelMuted.TLabel")
@@ -626,9 +647,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.ocr_var.set(s.enable_ocr and ocr_available())
         self.clean_var.set(s.clean_output)
         self.rendered_var.set(s.rendered_preview)
-        self._clean_cache.clear()
-        self._clean_stats.clear()
-        self._quality_cache.clear()
+        self._evict_all_caches()
         self._on_select_file()
 
     # -- help / support --------------------------------------------------------
@@ -730,6 +749,19 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._quality_cache.pop((path, True), None)
         self._quality_cache.pop((path, False), None)
 
+    def _evict_all_caches(self) -> None:
+        """Wholesale version of :meth:`_evict_caches` — one owner for the
+        cache set, so a new derived cache can't be missed at a clear site."""
+        self._evict_all_caches()
+
+    def _reset_to_pending(self, path: Path) -> None:
+        """Return a file to the un-converted state (shared by retry/reconvert)."""
+        self.files[path] = None
+        self._evict_caches(path)
+        iid = str(path)
+        if self.tree.exists(iid):
+            self.tree.item(iid, values=("pending",), tags=("pending",))
+
     def remove_selected(self) -> None:
         if self._busy:  # keyboard route; the button is disabled while busy
             return
@@ -743,7 +775,9 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
     def clear_files(self) -> None:
         if self._busy:
             return
-        converted = sum(1 for r in self.files.values() if r is not None)
+        # Only successful conversions are worth a confirmation — a list of
+        # failures (or pending files) clears without ceremony.
+        converted = sum(1 for r in self.files.values() if r is not None and r.ok)
         if converted and not messagebox.askyesno(
             __app_name__,
             f"Discard {converted} converted result(s)?\n\n"
@@ -752,9 +786,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ):
             return
         self.files.clear()
-        self._clean_cache.clear()
-        self._clean_stats.clear()
-        self._quality_cache.clear()
+        self._evict_all_caches()
         self.tree.delete(*self.tree.get_children())
         self._clear_preview()
         self.progress["value"] = 0
@@ -764,6 +796,35 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         # tkinterdnd2 returns a brace-wrapped, space-joined string of paths.
         paths = self.tk.splitlist(event.data)
         self._add_paths(paths)
+
+    def retry_selected(self) -> None:
+        """Re-run conversion for the selected file (Retry button / context menu)."""
+        if self._busy:
+            return
+        path = self._selected_path()
+        if path is None or path not in self.files:
+            return
+        self._reset_to_pending(path)
+        self._on_select_file()  # swaps the preview to the converting state
+        self._convert_pending()
+
+    def _on_tree_menu(self, event) -> None:
+        iid = self.tree.identify_row(event.y)
+        if not iid:
+            return
+        self.tree.selection_set(iid)
+        menu = self._tree_menu
+        menu.delete(0, "end")
+        result = self.files.get(Path(iid))
+        label = "Retry conversion" if result is not None and not result.ok else "Re-convert"
+        state = "disabled" if self._busy or result is None else "normal"
+        menu.add_command(label=label, command=self.retry_selected, state=state)
+        menu.add_command(
+            label="Remove",
+            command=self.remove_selected,
+            state="disabled" if self._busy else "normal",
+        )
+        menu.tk_popup(event.x_root, event.y_root)
 
     # -- selection / preview -------------------------------------------------
     def _selected_path(self) -> Path | None:
@@ -784,12 +845,16 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         return self._clean_cache[path]
 
     def _on_select_file(self, _event=None) -> None:
+        # Selection-scoped widgets reset unconditionally FIRST — an empty
+        # selection (Ctrl+click deselect) must not leave a stale Retry
+        # button or quality text hovering over a dead preview.
+        self.retry_btn.pack_forget()
+        self.quality_label.configure(text="")
         path = self._selected_path()
         if path is None:
             return
         result = self.files.get(path)
         if result is None:
-            self.quality_label.configure(text="")
             self._current_export_text = ""  # nothing real to copy/save
             self._show_plain(
                 path.name,
@@ -797,9 +862,14 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 store=False,
             )
         elif not result.ok:
-            self.quality_label.configure(text="")
             self._current_export_text = ""
-            self._show_plain(path.name, f"⚠ Conversion failed:\n\n{result.error}", store=False)
+            what, fix = explain_error(result.error or "")
+            self._show_plain(
+                path.name,
+                f"⚠  {what}\n\n→  {fix}\n\n\nTechnical details\n{result.error}",
+                store=False,
+            )
+            self.retry_btn.pack(side="left", padx=(8, 0))
         else:
             # Cleanup + quality are normally precomputed on the worker; a miss
             # here (e.g. the Clean toggle flipped after conversion) can cost
@@ -869,6 +939,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._on_select_file()
 
     def _clear_preview(self) -> None:
+        self.retry_btn.pack_forget()
         self.quality_label.configure(text="")
         self._current_export_text = ""
         self.preview_name.configure(text="")
@@ -917,31 +988,29 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         if self._busy or not self.files:
             return
         for path in self.files:
-            self.files[path] = None
-            iid = str(path)
-            if self.tree.exists(iid):
-                self.tree.item(iid, values=("pending",), tags=("pending",))
-        self._clean_cache.clear()
-        self._clean_stats.clear()
-        self._quality_cache.clear()
+            self._reset_to_pending(path)
         self._clear_preview()
         self._convert_pending()
 
     def _worker_convert(self, targets: list[Path], clean_flag: bool) -> None:
         def on_progress(index: int, total: int, result: ConversionResult) -> None:
-            # Precompute the first-click work (cleanup + quality) here on the
-            # worker so selecting a big book never freezes the UI thread.
-            pack = None
-            if result.ok and result.markdown:
-                try:
-                    if clean_flag:
-                        cleaned, stats = clean_markdown(result.markdown)
-                        pack = (cleaned, stats, assess_markdown(cleaned))
-                    else:
-                        pack = (None, None, assess_markdown(result.markdown))
-                except Exception:  # precompute is an optimisation, never fatal
-                    pack = None
-            self._events.put(("progress", index, total, result, clean_flag, pack))
+            # Post the progress event FIRST so the row/progress bar update the
+            # moment conversion finishes, then precompute the first-click work
+            # (cleanup + quality) and ship it as a separate "pack" event —
+            # selecting a big book never freezes the UI thread, and the UI
+            # never shows a converted file as still pending.
+            self._events.put(("progress", index, total, result))
+            if not (result.ok and result.markdown):
+                return
+            try:
+                if clean_flag:
+                    cleaned, stats = clean_markdown(result.markdown)
+                    pack = (cleaned, stats, assess_markdown(cleaned))
+                else:
+                    pack = (None, None, assess_markdown(result.markdown))
+            except Exception:  # precompute is an optimisation, never fatal
+                return
+            self._events.put(("pack", result.source, clean_flag, pack))
 
         def on_subprogress(source: Path, current: float, total: float, unit: str) -> None:
             self._events.put(("subprogress", source, current, total, unit))
@@ -952,18 +1021,23 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._events.put(("done",))
 
     def _poll_events(self) -> None:
+        # The re-arm lives in a finally: if a handler raises (Tk prints the
+        # traceback but the callback dies), the pump must keep running —
+        # otherwise pending progress/done events are lost and the app stays
+        # locked busy forever.
         try:
             while True:
                 event = self._events.get_nowait()
                 self._handle_event(event)
         except queue.Empty:
             pass
-        self.after(60, self._poll_events)
+        finally:
+            self.after(60, self._poll_events)
 
     def _handle_event(self, event: tuple) -> None:
         kind = event[0]
         if kind == "progress":
-            _, index, total, result, clean_flag, pack = event
+            _, index, total, result = event
             # Ignore a late result for a file removed/cleared mid-run.
             if result.source not in self.files:
                 self.progress["value"] = index
@@ -971,12 +1045,6 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.files[result.source] = result
             # A fresh result invalidates anything derived from the old one.
             self._evict_caches(result.source)
-            if pack is not None:
-                cleaned, stats, report = pack
-                if cleaned is not None:
-                    self._clean_cache[result.source] = cleaned
-                    self._clean_stats[result.source] = stats
-                self._quality_cache[(result.source, clean_flag)] = report
             tag = "ok" if result.ok else "err"
             status = result.engine if result.ok else "error"
             iid = str(result.source)
@@ -985,6 +1053,20 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.progress["value"] = index
             self.status_var.set(f"Converting… {index}/{total}  ({result.title})")
             if self.tree.selection() and self.tree.selection()[0] == iid:
+                self._on_select_file()
+        elif kind == "pack":
+            # Precomputed cleanup/quality arriving after its progress event.
+            _, source, clean_flag, pack = event
+            if source not in self.files:  # removed/cleared mid-run
+                return
+            cleaned, stats, report = pack
+            if cleaned is not None:
+                self._clean_cache[source] = cleaned
+                self._clean_stats[source] = stats
+            self._quality_cache[(source, clean_flag)] = report
+            # If the user already selected this file, refresh so the preview
+            # and quality line pick up the cleaned text without another click.
+            if self.tree.selection() and self.tree.selection()[0] == str(source):
                 self._on_select_file()
         elif kind == "subprogress":
             _, source, current, total, unit = event
@@ -1036,6 +1118,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.save_btn,
             self.remove_btn,
             self.clear_btn,
+            self.retry_btn,
         ):
             widget.configure(state=state)
 

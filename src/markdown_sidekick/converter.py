@@ -245,3 +245,82 @@ def default_output_path(source: Path, out_dir: Path | None = None) -> Path:
 def write_markdown(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# Plain-language explanations for conversion failures
+# ---------------------------------------------------------------------------
+# Matched against the raw error string (which includes the exception type
+# name, e.g. "PDFPasswordIncorrect: ..."); first hit wins, so more specific
+# patterns come first. Every entry is (pattern, what happened, what to try).
+# Patterns are compiled at import time so a malformed addition fails loudly
+# in tests/selftest instead of inside the GUI's error-display path.
+_ERROR_HINTS: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
+    (re.compile(pattern, re.IGNORECASE), what, fix)
+    for pattern, what, fix in (
+    (
+        r"password|encrypt|decrypt",
+        "This document is password-protected or encrypted.",
+        "Remove the protection (open it and print/export to a new file), then retry.",
+    ),
+    (
+        r"WinError 32|being used by another process|Errno 13|Permission denied|PermissionError",
+        "The file is locked or in use by another program.",
+        "Close the program that has it open (often a PDF reader or Office), then retry.",
+    ),
+    (
+        r"File does not exist|FileNotFoundError|No such file|cannot find the (?:file|path)",
+        "The file can't be found — it may have been moved, renamed, or deleted.",
+        "Re-add the file from its current location.",
+    ),
+    (
+        r"Path is a directory",
+        "That's a folder, not a file.",
+        "Add the files inside it instead.",
+    ),
+    (
+        r"UnsupportedFormatException|[Uu]nsupported format|no converter",
+        "No conversion engine understands this file type.",
+        "Export the content as PDF, DOCX, HTML, or another supported format, then retry.",
+    ),
+    (
+        # Includes the shapes pdfminer raises through markitdown's wrapper
+        # ("PdfConverter threw PSEOF/PDFSyntaxError with message ...").
+        r"BadZipFile|not a zip file|corrupt|damaged|truncated|EOFError|"
+        r"Unexpected EOF|PSEOF|PSSyntaxError|PDFSyntaxError|No /Root object|"
+        r"invalid.{0,20}header",
+        "The file appears to be corrupt or incomplete.",
+        "Re-download or re-export the file, then retry.",
+    ),
+    (
+        r"MemoryError",
+        "The file is too large to convert with the memory available.",
+        "Close other programs, or split the document into parts, then retry.",
+    ),
+    (
+        r"codec|moov atom|InvalidDataError|DecoderNotFound",
+        "The audio/video stream couldn't be decoded.",
+        "Convert it to a common format (MP3, WAV, or MP4), then retry.",
+    ),
+    )
+)
+
+# Exception messages embed the file path in quotes; its words must not steer
+# the diagnosis (a locked "passwords-export.xlsx" is not an encryption error).
+_QUOTED_RE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def explain_error(error: str) -> tuple[str, str]:
+    """Plain-language (what happened, what to try) for a raw conversion error.
+
+    Falls back to a generic explanation — the raw error is still shown to the
+    user as technical details, so an unmatched class loses nothing.
+    """
+    scrubbed = _QUOTED_RE.sub("", error)
+    for pattern, what, fix in _ERROR_HINTS:
+        if pattern.search(scrubbed):
+            return what, fix
+    return (
+        "The conversion engine reported an unexpected error.",
+        "Retry the file; if it keeps failing, the technical details say why.",
+    )

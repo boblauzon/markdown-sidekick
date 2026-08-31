@@ -21,7 +21,7 @@ from pathlib import Path
 
 from . import export
 from .cleanup import clean_markdown
-from .converter import ConversionEngine, default_output_path
+from .converter import ConversionEngine, default_output_path, explain_error
 from .quality import assess_markdown
 from .settings import Settings
 
@@ -105,10 +105,13 @@ def _convert(args: argparse.Namespace) -> int:
         if not result.ok:
             failures += 1
             record["error"] = result.error
+            what, fix = explain_error(result.error or "")
+            record["error_hint"] = f"{what} {fix}"
             if args.json:
                 print(json.dumps(record, ensure_ascii=False))
             else:
                 print(f"ERROR  {path} — {result.error}")
+                print(f"       {what} {fix}")
             continue
 
         markdown = result.markdown

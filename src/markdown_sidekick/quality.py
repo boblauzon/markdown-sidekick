@@ -2,7 +2,7 @@
 
 Scans a document for the residual artifact signatures the cleanup pipeline
 targets and reports a compact, human- and machine-readable summary. Used by
-the UI status bar, the CLI (``--quality``), and the MCP server so an AI client
+the GUI's preview info line, the CLI (``--quality``), and the MCP server so an AI client
 can tell whether a file is ready to consume or should be re-converted via a
 higher-fidelity path (e.g. MinerU).
 """

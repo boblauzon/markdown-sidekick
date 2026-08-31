@@ -57,7 +57,7 @@ class CleanupStats:
         return self.total_fixes > 0
 
     def brief(self) -> str:
-        """One scannable fragment for the status bar. Character normalizations
+        """One scannable fragment for the preview's info line. Character normalizations
         (ligatures, soft hyphens — routinely thousands per book) are counted
         apart from line/block fixes so they can't inflate the fix count."""
         structural = self.total_fixes - self.chars_normalized
@@ -1031,39 +1031,26 @@ def join_wrapped_lines(text: str, stats: CleanupStats) -> str:
             out.append(line)
             continue
         prev = out[-1]
-        # Predicates on prev must NOT scan the whole accumulated line: when
-        # thousands of consecutive lines join (hard-wrapped OCR output with no
-        # sentence punctuation), prev grows unboundedly and full-string regex
-        # scans turn this pass quadratic — minutes on one bad document. Every
-        # prev predicate is head- or end-anchored, so a bounded window is
-        # exact for any real line (< 400 chars) and merely conservative — a
-        # skipped join, never a wrong one — for degenerate accumulations.
-        if len(prev) <= 400:
-            prev_stripped = prev.strip()
-            prev_windows = (prev_stripped,)
-            prev_end = prev.rstrip()
-            prev_head = prev
-            prev_long_enough = len(prev_stripped) >= _WRAP_MIN_LEN
-        else:
-            prev_windows = (prev[:200].strip(), prev[-200:].strip())
-            prev_end = prev[-220:].rstrip()
-            prev_head = prev[:200]
-            prev_long_enough = True
         if (
             line.strip()
+            # The cap short-circuits before every prev predicate below, so the
+            # full-string scans and join copies are all bounded by ~4k chars —
+            # without it, thousands of consecutive joins (hard-wrapped OCR text
+            # with no sentence punctuation) made this pass quadratic: minutes
+            # on one bad document.
             and len(prev) <= _JOIN_MAX_LEN
             and not line[:1].isspace()
             and not _is_structural(line)
-            and not _is_structural(prev_head)
-            and not _fence_line(prev_head)
-            and prev_windows[0]
+            and not _is_structural(prev)
+            and not _fence_line(prev)
+            and prev.strip()
             and not _JOIN_UNSAFE_RE.search(line.strip())
-            and not any(_JOIN_UNSAFE_RE.search(w) for w in prev_windows)
+            and not _JOIN_UNSAFE_RE.search(prev.strip())
         ):
-            hyphen = _HYPHEN_WRAP_RE.search(prev_end)
+            hyphen = _HYPHEN_WRAP_RE.search(prev.rstrip())
             if hyphen and line[:1].islower():
                 fragment = hyphen.group(1)
-                before = prev_end[: -len(fragment) - 1][-1:]
+                before = prev.rstrip()[: -len(fragment) - 1][-1:]
                 # "Ag-" + "ile" -> "Agile"; but "parents-in-" + "law" is a real
                 # compound (a hyphen precedes the fragment), so keep the hyphen.
                 if before == "-":
@@ -1072,7 +1059,10 @@ def join_wrapped_lines(text: str, stats: CleanupStats) -> str:
                     out[-1] = prev.rstrip()[:-1] + line.lstrip()
                 stats.lines_joined += 1
                 continue
-            if prev_long_enough and not prev_end.endswith(_SENTENCE_END):
+            if (
+                len(prev.strip()) >= _WRAP_MIN_LEN
+                and not prev.rstrip().endswith(_SENTENCE_END)
+            ):
                 out[-1] = prev.rstrip() + " " + line.lstrip()
                 stats.lines_joined += 1
                 continue

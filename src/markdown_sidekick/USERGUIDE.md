@@ -39,7 +39,7 @@ can read when you need it.
 | ocr+text | PDF with scanned/vector pages: OCR where needed, text kept elsewhere |
 | whisper | Audio transcribed by the local Whisper model |
 | mineru | Converted by your optional MinerU server |
-| error | Conversion failed — click the row to see why |
+| error | Conversion failed — click the row for a plain-English explanation, what to try, and a **↻ Retry** button (also on right-click) |
 
 - **OCR images & scanned PDFs** — untick to force everything through markitdown
 
