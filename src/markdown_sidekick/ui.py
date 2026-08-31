@@ -404,9 +404,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         style_box.bind("<<ComboboxSelected>>", self._on_export_style_change)
 
         ttk.Label(row, text="Optimize for:", style="Muted.TLabel").pack(side="left")
-        self.target_var = tk.StringVar(
-            value=self.settings.ai_target if self.settings.ai_target in md_export.AI_TARGETS else "Claude"
-        )
+        # Settings.normalize() guarantees ai_target is a valid AI_TARGETS key.
+        self.target_var = tk.StringVar(value=self.settings.ai_target)
         self.target_box = ttk.Combobox(
             row,
             textvariable=self.target_var,
@@ -766,8 +765,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             status_bits = []
             if self.clean_var.get() and path in self._clean_stats:
                 stats = self._clean_stats[path]
-                if getattr(stats, "changed", False):
-                    status_bits.append(f"Cleaned ({stats.total_fixes:,} fixes)")
+                if stats.changed:
+                    status_bits.append(stats.brief())
             report = assess_markdown(text)
             status_bits.append(f"Quality {report.score}/100")
             status_bits.append(f"~{report.est_tokens:,} tokens")
@@ -1000,18 +999,29 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 continue
             result = self.files.get(path)
             engine = result.engine if result else ""
+            book_dir = out
+            if split:
+                # Disambiguate same-stem sources so one book folder can never
+                # silently overwrite another's chapters/index/manifest.
+                folder = path.stem
+                if folder in used_names:
+                    n = 2
+                    while f"{path.stem}-{n}" in used_names:
+                        n += 1
+                    folder = f"{path.stem}-{n}"
+                used_names.add(folder)
+                book_dir = out / folder
             # Optional AI-friendly extras (controlled from Settings).
             if self.settings.extract_images and path.suffix.lower() == ".pdf":
                 from . import figures
 
-                book_dir = out / path.stem if split else out
                 figs = figures.extract_pdf_figures(path, book_dir / "assets")
                 if figs:
                     text = figures.insert_figure_links(text, figs)
             if split:
                 res = md_export.export_book(
                     text,
-                    out / path.stem,
+                    book_dir,
                     source=path.name,
                     engine=engine,
                     front_matter=self.settings.export_front_matter,

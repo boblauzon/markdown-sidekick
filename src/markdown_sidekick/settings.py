@@ -12,6 +12,8 @@ import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+from .export import AI_TARGETS
+
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
 
 
@@ -67,6 +69,10 @@ class Settings:
             return cls()
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
+            # Migrate the pre-export-bar key: split_chapters=true meant
+            # "write book folders", now expressed as export_style="chapters".
+            if data.get("split_chapters") and "export_style" not in data:
+                data["export_style"] = "chapters"
             known = {f.name for f in fields(cls)}
             settings = cls(**{k: v for k, v in data.items() if k in known})
             settings.normalize()
@@ -94,7 +100,8 @@ class Settings:
         self.export_front_matter = bool(self.export_front_matter)
         if self.export_style not in ("single", "chapters", "ai"):
             self.export_style = "single"
-        self.ai_target = str(self.ai_target or "Claude")
+        if self.ai_target not in AI_TARGETS:
+            self.ai_target = "Claude"
         self.page_anchors = bool(self.page_anchors)
         self.extract_images = bool(self.extract_images)
         self.ollama_endpoint = str(self.ollama_endpoint or "").strip().rstrip("/")

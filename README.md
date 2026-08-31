@@ -12,7 +12,7 @@ support development:
 ![Markdown Sidekick](docs/screenshot.png)
 
 📖 **New here? Read the [User Guide](src/markdown_sidekick/USERGUIDE.md)** — also
-available inside the app via the **❓ User Guide** button.
+available inside the app via the **❓ Help** button.
 
 ## Features
 

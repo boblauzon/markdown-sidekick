@@ -61,11 +61,31 @@ class TestSplitForAi:
         text = "\n\n".join("Paragraph %d. %s" % (i, "word " * 200) for i in range(40))
         secs = split_for_ai(text, max_tokens=2000)
         assert len(secs) > 1
-        assert all(s.est_tokens <= 2600 for s in secs)  # budget + one paragraph slop
+        assert all(s.est_tokens <= 2000 for s in secs)  # the budget is a hard cap
         assert secs[0].title.endswith("(part 1)")
         # Nothing lost: total content round-trips (modulo whitespace).
         joined = "".join(s.markdown for s in secs)
         assert "Paragraph 39" in joined and "Paragraph 0" in joined
+
+    def test_no_blank_lines_still_splits_to_budget(self):
+        from markdown_sidekick.export import split_for_ai
+
+        # One giant hard-wrapped paragraph (e.g. a whisper transcript): no
+        # blank lines anywhere, so splitting falls back to line boundaries.
+        text = "\n".join("line %d %s" % (i, "word " * 30) for i in range(400))
+        secs = split_for_ai(text, max_tokens=1000)
+        assert len(secs) > 1
+        assert all(s.est_tokens <= 1000 for s in secs)
+
+    def test_unbalanced_fence_does_not_disable_splitting(self):
+        from markdown_sidekick.export import split_for_ai
+
+        # A stray unclosed ``` (a real OCR artifact) must not pin the fence
+        # state and swallow the whole document into one over-budget part.
+        text = "```\n" + "\n\n".join(("word " * 200) for _ in range(40))
+        secs = split_for_ai(text, max_tokens=2000)
+        assert len(secs) > 1
+        assert all(s.est_tokens <= 2000 for s in secs)
 
     def test_never_splits_inside_fence(self):
         from markdown_sidekick.export import split_for_ai

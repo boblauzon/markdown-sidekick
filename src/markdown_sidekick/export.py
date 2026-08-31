@@ -28,12 +28,13 @@ DEFAULT_MAX_TOKENS = 30_000
 
 # Per-platform section budgets (est. tokens). Sized so several sections fit
 # in the platform's context window with room for the conversation itself.
+# "Claude" shares DEFAULT_MAX_TOKENS: the default budget IS the Claude budget,
+# and the two must not drift apart.
 AI_TARGETS: dict[str, int] = {
-    "Claude": 30_000,
+    "Claude": DEFAULT_MAX_TOKENS,
     "ChatGPT": 12_000,
     "Gemini": 60_000,
     "Local LLM": 4_000,
-    "General": 24_000,
 }
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
@@ -87,16 +88,26 @@ class ExportResult:
         )
 
 
+def _fence_map(lines: list[str]) -> tuple[list[bool], list[bool]]:
+    """Per line: (is a ``` fence marker, inside a fence BEFORE this line)."""
+    is_fence = [bool(_FENCE_RE.match(line)) for line in lines]
+    in_fence: list[bool] = []
+    state = False
+    for fence in is_fence:
+        in_fence.append(state)
+        if fence:
+            state = not state
+    return is_fence, in_fence
+
+
 def _heading_lines(lines: list[str], pattern: re.Pattern[str]) -> list[int]:
     """Indices of heading lines, ignoring anything inside code fences."""
-    indices: list[int] = []
-    in_fence = False
-    for i, line in enumerate(lines):
-        if _FENCE_RE.match(line):
-            in_fence = not in_fence
-        elif not in_fence and pattern.match(line):
-            indices.append(i)
-    return indices
+    is_fence, in_fence = _fence_map(lines)
+    return [
+        i
+        for i, line in enumerate(lines)
+        if not is_fence[i] and not in_fence[i] and pattern.match(line)
+    ]
 
 
 def _split_at(lines: list[str], indices: list[int], titles: list[str], lead_title: str) -> list[Section]:
@@ -157,9 +168,11 @@ def split_for_ai(markdown: str, max_tokens: int) -> list[Section]:
 
     Chapter structure is used when present (via :func:`split_chapters`, which
     already sub-splits oversized chapters at ``##``). Anything still over
-    budget — including documents with no headings at all — is hard-split at
-    blank-line boundaries (never inside a code fence) into "(part N)" pieces,
-    so the guarantee holds for every input.
+    budget — including documents with no headings at all — is hard-split into
+    "(part N)" pieces at blank lines outside code fences, falling back to any
+    line outside a fence so blank-line-free text still splits. Every part fits
+    the budget unless a single indivisible fenced block alone exceeds it —
+    fences are never split.
     """
     max_chars = max_tokens * _CHARS_PER_TOKEN
     result: list[Section] = []
@@ -167,26 +180,56 @@ def split_for_ai(markdown: str, max_tokens: int) -> list[Section]:
         if sec.est_tokens <= max_tokens:
             result.append(sec)
             continue
-        pieces: list[list[str]] = [[]]
-        size = 0
-        in_fence = False
-        for line in sec.markdown.split("\n"):
-            if _FENCE_RE.match(line):
-                in_fence = not in_fence
-            pieces[-1].append(line)
-            size += len(line) + 1
-            if size >= max_chars and not in_fence and not line.strip():
-                pieces.append([])
-                size = 0
-        chunks = ["\n".join(p).strip() for p in pieces]
-        chunks = [c for c in chunks if c]
-        base = sec.title or "Document"
-        if len(chunks) == 1:
+        chunks = _hard_split(sec.markdown.split("\n"), max_chars)
+        if len(chunks) < 2:
             result.append(sec)
             continue
+        base = sec.title or "Document"
         for n, chunk in enumerate(chunks, start=1):
             result.append(Section(f"{base} (part {n})", chunk + "\n"))
     return result
+
+
+def _hard_split(lines: list[str], max_chars: int) -> list[str]:
+    """Split lines into chunks of at most ``max_chars`` joined characters.
+
+    The budget is checked BEFORE a boundary is passed, cutting at the last
+    blank line outside a code fence within budget (or, for blank-line-free
+    text, the last line boundary outside a fence), so a chunk only exceeds
+    the budget when a single indivisible fenced block does — and then by the
+    minimum possible amount. Unbalanced fences (a real OCR artifact) make
+    fence state meaningless, so it is ignored rather than letting one stray
+    marker disable splitting entirely.
+    """
+    is_fence, in_fence = _fence_map(lines)
+    if sum(is_fence) % 2:
+        in_fence = [False] * len(lines)
+    cum = [0]
+    for line in lines:
+        cum.append(cum[-1] + len(line) + 1)
+    n = len(lines)
+    chunks: list[str] = []
+    start = 0
+    while start < n:
+        if cum[n] - cum[start] <= max_chars:
+            end = n
+        else:
+            best_blank = best_soft = None
+            c = start + 1
+            while c < n and cum[c] - cum[start] <= max_chars:
+                if not in_fence[c]:
+                    best_soft = c
+                    if not lines[c - 1].strip():
+                        best_blank = c
+                c += 1
+            end = best_blank or best_soft
+            if end is None:  # indivisible fenced block: minimal overflow
+                while c < n and in_fence[c]:
+                    c += 1
+                end = c if c < n else n
+        chunks.append("\n".join(lines[start:end]).strip())
+        start = end
+    return [chunk for chunk in chunks if chunk]
 
 
 def document_title(markdown: str, fallback: str) -> str:
@@ -236,10 +279,11 @@ def export_book(
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
-    ``ai_sections=True`` guarantees every part fits ``max_tokens`` even for
-    heading-less documents (see :func:`split_for_ai`); otherwise splitting
-    follows chapter structure only. Falls back to a single decorated file
-    inside ``out_dir`` when there is nothing to split.
+    ``ai_sections=True`` sizes every part to ``max_tokens`` even for
+    heading-less documents (see :func:`split_for_ai`; only an indivisible
+    fenced block can exceed the budget); otherwise splitting follows chapter
+    structure only. Falls back to a single decorated file inside ``out_dir``
+    when there is nothing to split.
     """
     stem = Path(source).stem
     title = document_title(markdown, stem)

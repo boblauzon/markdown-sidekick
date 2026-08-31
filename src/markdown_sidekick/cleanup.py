@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 
 # A "running header/footer" is a short line that recurs across many pages.
 _HEADER_MIN_REPEATS = 4
@@ -46,35 +46,29 @@ class CleanupStats:
     lines_joined: int = 0
     fences_merged: int = 0
 
+    # Every field is a non-negative int counter, so the field list lives once:
+    # a future pass's new counter is picked up here (and by `changed`) for free.
     @property
     def total_fixes(self) -> int:
-        return (
-            self.removed_noise_lines
-            + self.toc_lines_removed
-            + self.code_blocks_fenced
-            + self.blank_runs_collapsed
-            + self.chars_normalized
-            + self.headings_promoted
-            + self.boilerplate_lines_removed
-            + self.bullets_normalized
-            + self.lines_joined
-            + self.fences_merged
-        )
+        return sum(getattr(self, f.name) for f in fields(self))
 
     @property
     def changed(self) -> bool:
-        return bool(
-            self.removed_noise_lines
-            or self.toc_lines_removed
-            or self.code_blocks_fenced
-            or self.blank_runs_collapsed
-            or self.chars_normalized
-            or self.headings_promoted
-            or self.boilerplate_lines_removed
-            or self.bullets_normalized
-            or self.lines_joined
-            or self.fences_merged
-        )
+        return self.total_fixes > 0
+
+    def brief(self) -> str:
+        """One scannable fragment for the status bar. Character normalizations
+        (ligatures, soft hyphens — routinely thousands per book) are counted
+        apart from line/block fixes so they can't inflate the fix count."""
+        structural = self.total_fixes - self.chars_normalized
+        bits = []
+        if structural:
+            bits.append(f"{structural:,} fixes")
+        if self.chars_normalized:
+            bits.append(f"{self.chars_normalized:,} chars normalized")
+        if not bits:
+            return "No cleanup changes"
+        return f"Cleaned ({', '.join(bits)})"
 
     def summary(self) -> str:
         if not self.changed:
