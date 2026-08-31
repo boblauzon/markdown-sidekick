@@ -54,7 +54,8 @@ can read when you need it.
 **Footer**
 
 - Progress bar and status line (per-page OCR progress, per-second transcription
-  progress, cleanup summaries, quality score)
+  progress, batch results); the selected file's **cleanup summary and quality
+  score** appear beside the preview, next to *Copy*
 - The **export bar** sits next to the Save button:
   - **Output** — *One Markdown file* (one .md per source), *Chapter files*
     (each book becomes a folder of per-chapter files + index.md +
@@ -68,6 +69,16 @@ can read when you need it.
 
 Changing **Settings** offers to re-convert the files you already loaded, so
 results always match the current configuration.
+
+**Keyboard shortcuts**
+
+| Keys | Action |
+| ---- | ------ |
+| Ctrl+O | Add files |
+| Delete | Remove the selected file |
+| Ctrl+S | Save Markdown |
+| Ctrl+Shift+C | Copy the previewed Markdown |
+| Esc | Close the Settings or Help window |
 
 ---
 
@@ -111,8 +122,8 @@ When **Clean output** is on (the default), the raw conversion is tidied:
   back into paragraphs, and words split with a line-end hyphen are rejoined
 - **Blank-line runs collapsed**
 
-The status bar reports what was changed, e.g.
-*"Cleanup: 276 header/page-number line(s) removed, 235 code block(s) fenced."*
+The line beside the preview reports what was changed, e.g.
+*"Cleaned (276 fixes, 1,824 chars normalized)"*.
 Untick **Clean output** at any time to see or save the unmodified conversion.
 
 ---
@@ -180,8 +191,8 @@ With *Chapter files* or *AI-sized sections* selected in the export bar, a
 500-page book becomes a folder of
 chapter files (each with front matter saying which book and part it is), an
 `index.md`, and a `manifest.json` — ready for Claude, ChatGPT, Gemini, or any
-RAG pipeline. The status bar shows a **quality score** and estimated token
-count for every converted file.
+RAG pipeline. A **quality score** and estimated token count for the selected
+file appear beside the preview.
 
 Settings persist between sessions in `settings.json` (see *Where files live*).
 

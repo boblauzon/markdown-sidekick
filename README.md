@@ -63,7 +63,7 @@ available inside the app via the **❓ Help** button.
     AI answers can cite the printed page
   - **Figure extraction** — pull embedded PDF images into an `assets/` folder
     with `![Figure]` links (de-duplicated, icons filtered out)
-  - **Quality score** in the status bar (structure, artifacts, ~token count)
+  - **Quality score** beside the preview (structure, artifacts, ~token count)
 - **Video transcription** — MP4/MKV/MOV/WEBM/AVI route through the same local
   Whisper pipeline (PyAV decodes the audio track); transcripts are grouped into
   timestamped paragraphs

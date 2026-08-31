@@ -43,8 +43,12 @@ BG_PANEL = "#262833"
 BG_INPUT = "#2f3140"
 FG = "#e6e6ec"
 FG_MUTED = "#9aa0b4"
-ACCENT = "#6c8cff"
-ACCENT_ACTIVE = "#5577f0"
+ACCENT = "#6c8cff"  # bright accent: progress bar and other non-text uses
+# Fills that carry white text need >= 4.5:1 (WCAG AA); the bright accent is
+# only 3.07:1, so buttons and selected rows use this darker pair instead.
+ACCENT_FILL = "#4a63d8"  # 5.16:1 with white text
+ACCENT_HOVER = "#5068e2"  # 4.75:1 with white text
+ACCENT_LINK = "#7d9aff"  # links on the input bg (4.86:1; #6c8cff was 4.18)
 OK_COLOR = "#5ad19a"
 ERR_COLOR = "#ff6b81"
 FONT = ("Segoe UI", 10)
@@ -93,6 +97,12 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
         self._build_style()
         self._build_layout()
+        # Keyboard path — mirrors the buttons. Handlers re-check _busy
+        # because key bindings bypass disabled-widget protection.
+        self.bind("<Control-o>", lambda _e: self.add_files())
+        self.bind("<Control-s>", lambda _e: self.save_markdown())
+        self.bind("<Control-C>", lambda _e: self.copy_preview())  # Ctrl+Shift+C
+        self.tree.bind("<Delete>", lambda _e: self.remove_selected())
         self._poll_events()
 
     # -- styling -------------------------------------------------------------
@@ -112,16 +122,16 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
         style.configure(
             "Accent.TButton",
-            background=ACCENT,
+            background=ACCENT_FILL,
             foreground="#ffffff",
             font=FONT_BOLD,
             borderwidth=0,
-            focuscolor=ACCENT,
+            focuscolor="#ffffff",
             padding=(14, 8),
         )
         style.map(
             "Accent.TButton",
-            background=[("active", ACCENT_ACTIVE), ("disabled", "#3a3c4a")],
+            background=[("active", ACCENT_HOVER), ("disabled", "#3a3c4a")],
             foreground=[("disabled", FG_MUTED)],
         )
 
@@ -131,6 +141,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             foreground=FG,
             font=FONT,
             borderwidth=0,
+            focuscolor=ACCENT,
             padding=(10, 6),
         )
         style.map(
@@ -148,7 +159,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             rowheight=26,
             font=FONT,
         )
-        style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "#fff")])
+        style.map("Treeview", background=[("selected", ACCENT_FILL)], foreground=[("selected", "#fff")])
         style.configure(
             "Treeview.Heading",
             background=BG_PANEL,
@@ -347,7 +358,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         text.configure(state="disabled")
         self.preview = text
         self._renderer = MarkdownRenderer(
-            text, fg=FG, muted=FG_MUTED, accent=ACCENT, code_bg="#15161e"
+            text, fg=FG, muted=FG_MUTED, accent=ACCENT_LINK, code_bg="#15161e"
         )
 
         pscroll = ttk.Scrollbar(panel, orient="vertical", command=text.yview)
@@ -357,6 +368,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         actions = ttk.Frame(panel, style="Panel.TFrame")
         actions.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(10, 0))
         ttk.Button(actions, text="Copy", command=self.copy_preview).pack(side="left")
+        # Selection-scoped info (cleanup/quality) lives with the preview so
+        # selecting a file never evicts batch progress from the status line.
+        self.quality_label = ttk.Label(actions, text="", style="PanelMuted.TLabel")
+        self.quality_label.pack(side="right")
 
     # Combobox labels for the export style, mapped to the persisted keys.
     _STYLE_LABELS = (
@@ -582,6 +597,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right")
 
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
         dlg.update_idletasks()
         dlg.grab_set()
 
@@ -635,6 +651,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         win.geometry("880x720")
         win.minsize(600, 400)
         win.configure(bg=BG_PANEL)
+        win.bind("<Escape>", lambda _e: win.destroy())
         self._help_win = win
 
         body = ttk.Frame(win, style="Panel.TFrame", padding=12)
@@ -660,7 +677,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         text.configure(yscrollcommand=scroll.set)
 
         renderer = MarkdownRenderer(
-            text, fg=FG, muted=FG_MUTED, accent=ACCENT, code_bg="#15161e"
+            text, fg=FG, muted=FG_MUTED, accent=ACCENT_LINK, code_bg="#15161e"
         )
         renderer.render(load_user_guide())
 
@@ -698,6 +715,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self._convert_pending()
 
     def remove_selected(self) -> None:
+        if self._busy:  # keyboard route; the button is disabled while busy
+            return
         for iid in self.tree.selection():
             path = Path(iid)
             self.files.pop(path, None)
@@ -707,6 +726,16 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._clear_preview()
 
     def clear_files(self) -> None:
+        if self._busy:
+            return
+        converted = sum(1 for r in self.files.values() if r is not None)
+        if converted and not messagebox.askyesno(
+            __app_name__,
+            f"Discard {converted} converted result(s)?\n\n"
+            "Your source files aren't touched, but re-adding them means "
+            "converting from scratch.",
+        ):
+            return
         self.files.clear()
         self._clean_cache.clear()
         self._clean_stats.clear()
@@ -744,6 +773,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             return
         result = self.files.get(path)
         if result is None:
+            self.quality_label.configure(text="")
             self._current_export_text = ""  # nothing real to copy/save
             self._show_plain(
                 path.name,
@@ -751,6 +781,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 store=False,
             )
         elif not result.ok:
+            self.quality_label.configure(text="")
             self._current_export_text = ""
             self._show_plain(path.name, f"⚠ Conversion failed:\n\n{result.error}", store=False)
         else:
@@ -761,18 +792,18 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 self._renderer.render(text)
             else:
                 self._show_plain(path.name, text, store=False)
-            # Keep the status line scannable — one short line, not a stats dump.
-            status_bits = []
+            # One short line beside the preview — not a stats dump.
+            bits = []
             if self.clean_var.get() and path in self._clean_stats:
                 stats = self._clean_stats[path]
                 if stats.changed:
-                    status_bits.append(stats.brief())
+                    bits.append(stats.brief())
             report = assess_markdown(text)
-            status_bits.append(f"Quality {report.score}/100")
-            status_bits.append(f"~{report.est_tokens:,} tokens")
+            bits.append(f"Quality {report.score}/100")
+            bits.append(f"~{report.est_tokens:,} tokens")
             if report.headings:
-                status_bits.append(f"{report.headings} headings")
-            self.status_var.set("   ·   ".join(status_bits))
+                bits.append(f"{report.headings} headings")
+            self.quality_label.configure(text="   ·   ".join(bits))
 
     def _show_plain(self, name: str, content: str, store: bool = True) -> None:
         """Drop the raw text into the preview with no Markdown styling."""
@@ -794,6 +825,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._on_select_file()
 
     def _clear_preview(self) -> None:
+        self.quality_label.configure(text="")
         self._current_export_text = ""
         self.preview_name.configure(text="")
         self.preview.configure(state="normal")
@@ -941,6 +973,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
     def save_markdown(self) -> None:
         """The one save action. Output shape comes from the export bar:
         single .md file(s), chapter folders, or AI-sized section folders."""
+        if self._busy:  # keyboard route; the button is disabled while busy
+            return
         converted = [p for p, r in self.files.items() if r and r.ok]
         if not converted:
             messagebox.showinfo(
