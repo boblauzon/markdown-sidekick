@@ -175,18 +175,25 @@ Notes:
 
 ## Settings (⚙ in the header)
 
-| Setting | What it does |
-| ------- | ------------ |
-| OCR images & scanned PDFs | Master switch for the OCR engine |
-| Transcribe audio files | Master switch for audio/video transcription |
-| Whisper model | Speech model size (see above) |
-| MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
-| Default output folder | Pre-selected in every save dialog |
-| Clean output / Rendered preview | Default states for the preview toggles |
-| YAML front matter | Saved files start with title/source/date/token metadata |
-| Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
-| Extract PDF figures | Embedded images land in an assets/ folder with links |
-| Ollama endpoint + models | Optional local-LLM polish pass and figure captions (blank = off) |
+Settings are grouped into three tabs — **Conversion**, **Output**, and
+**Local AI**:
+
+| Tab | Setting | What it does |
+| --- | ------- | ------------ |
+| Conversion | OCR images & scanned PDFs | Master switch for the OCR engine |
+| Conversion | Transcribe audio files | Master switch for audio/video transcription |
+| Conversion | Whisper model | Speech model size (see above) |
+| Conversion | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
+| Output | Default output folder | Pre-selected in every save dialog |
+| Output | Clean output / Rendered preview | Default states for the preview toggles |
+| Output | YAML front matter | Saved files start with title/source/date/token metadata |
+| Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
+| Output | Extract PDF figures | Embedded images land in an assets/ folder with links |
+| Local AI | Ollama endpoint + Detect | **Detect** probes your machine for a running Ollama, fills the model pickers with what's installed, and tells you if Ollama is running but has no models pulled yet |
+| Local AI | Polish / caption model | Optional local-LLM artifact repair and figure alt-text (blank = off) |
+
+Everything on the Local AI tab talks only to your own machine — detection
+probes localhost and never calls out to the internet.
 
 **AI-friendly export, in short:** big single files overflow AI context windows.
 With *Chapter files* or *AI-sized sections* selected in the export bar, a
@@ -248,8 +255,13 @@ There is also a **command line** for scripts and automation:
 
 ```
 markdown-sidekick-cli convert book.pdf --split-chapters --quality
+markdown-sidekick-cli convert book.pdf --ai-target Claude
 MarkdownSidekick.exe --cli convert book.pdf --split-chapters   (standalone app)
 ```
+
+`--ai-target` (Claude / ChatGPT / Gemini / "Local LLM") writes the same
+AI-sized book folders as the export bar — every part fits that platform's
+context budget. The MCP tools take a matching `max_tokens` argument.
 
 ---
 

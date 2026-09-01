@@ -155,8 +155,10 @@ You can also run it as a module:
 ```
 
 (or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick.exe --cli convert …`
-from the standalone build). Flags: `--split-chapters`, `--quality`, `--anchors`,
-`--images`, `--polish`, `--no-clean`, `--no-front-matter`, `--json`, `--out DIR`.
+from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
+(AI-sized book folders — every part fits the platform's budget), `--quality`,
+`--anchors`, `--images`, `--polish`, `--no-clean`, `--no-front-matter`,
+`--json`, `--out DIR`.
 
 ## How to use
 

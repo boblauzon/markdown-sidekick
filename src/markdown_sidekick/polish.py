@@ -70,6 +70,38 @@ def llm_available(endpoint: str) -> bool:
         return False
 
 
+DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
+
+
+def detect_ollama(endpoint: str = "", timeout: int = 3) -> tuple[str, list[str]]:
+    """Probe a local Ollama daemon and enumerate its installed models.
+
+    Tri-state result — the "running but nothing pulled" middle state is the
+    one naive probes skip, and the one that prevents "I connected it but
+    nothing happens" confusion:
+
+    - ``("ok", [model, ...])`` — daemon running, models installed
+    - ``("empty", [])`` — daemon running but no models pulled yet
+    - ``("unreachable", [])`` — nothing answered (not running / wrong URL)
+
+    A blank ``endpoint`` probes the default ``http://localhost:11434``.
+    Localhost-only by design: this never calls out to the network unless the
+    user explicitly configured a remote endpoint.
+    """
+    endpoint = (endpoint or DEFAULT_OLLAMA_ENDPOINT).rstrip("/")
+    try:
+        with urllib.request.urlopen(f"{endpoint}/api/tags", timeout=timeout) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except Exception:
+        return "unreachable", []
+    models = [
+        name
+        for entry in data.get("models", []) or []
+        if (name := str(entry.get("name", "")).strip())
+    ]
+    return ("ok", models) if models else ("empty", [])
+
+
 def _generate(endpoint: str, model: str, prompt: str, images: list[str] | None = None) -> str | None:
     payload: dict = {"model": model, "prompt": prompt, "stream": False}
     if images:
