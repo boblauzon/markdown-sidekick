@@ -16,11 +16,13 @@ class _MockOllama(http.server.BaseHTTPRequestHandler):
 
     behaviour = "repair"  # repair | truncate | error
     last_payload: dict | None = None
+    tags_payload: dict = {}  # what /api/tags returns (detection tests set this)
 
     def do_GET(self):  # /api/tags probe
         self.send_response(200)
+        self.send_header("Content-Type", "application/json")
         self.end_headers()
-        self.wfile.write(b"{}")
+        self.wfile.write(json.dumps(type(self).tags_payload).encode("utf-8"))
 
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
@@ -52,6 +54,7 @@ def mock_server():
     thread.start()
     _MockOllama.behaviour = "repair"
     _MockOllama.last_payload = None
+    _MockOllama.tags_payload = {}
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
 
@@ -111,3 +114,55 @@ class TestCaption:
 
     def test_caption_missing_file(self, mock_server):
         assert polish.caption_image("Z:/nope.png", mock_server, "m") is None
+
+
+class TestDetectOllama:
+    def test_running_with_models(self, mock_server):
+        from markdown_sidekick.polish import detect_ollama
+
+        _MockOllama.tags_payload = {
+            "models": [{"name": "llama3.2:latest"}, {"name": "llava:7b"}]
+        }
+        status, models = detect_ollama(mock_server)
+        assert status == "ok"
+        assert models == ["llama3.2:latest", "llava:7b"]
+
+    def test_running_but_no_models_pulled(self, mock_server):
+        from markdown_sidekick.polish import detect_ollama
+
+        _MockOllama.tags_payload = {"models": []}
+        assert detect_ollama(mock_server) == ("empty", [])
+
+    def test_nothing_listening(self):
+        from markdown_sidekick.polish import detect_ollama
+
+        # A port nothing listens on: bind-then-close guarantees it's free.
+        import socket
+
+        s = socket.socket()
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+        s.close()
+        assert detect_ollama(f"http://127.0.0.1:{port}", timeout=1) == (
+            "unreachable",
+            [],
+        )
+
+    def test_blank_endpoint_uses_default(self, monkeypatch):
+        from markdown_sidekick import polish
+
+        seen = []
+
+        def fake_urlopen(url, timeout=0):
+            seen.append(url)
+            raise OSError("no daemon in tests")
+
+        monkeypatch.setattr(polish.urllib.request, "urlopen", fake_urlopen)
+        polish.detect_ollama("")
+        assert seen == ["http://localhost:11434/api/tags"]
+
+    def test_junk_payload_is_empty_not_crash(self, mock_server):
+        from markdown_sidekick.polish import detect_ollama
+
+        _MockOllama.tags_payload = {"models": [{"notname": 1}, {"name": "  "}]}
+        assert detect_ollama(mock_server) == ("empty", [])

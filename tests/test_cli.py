@@ -41,6 +41,31 @@ class TestConvert:
         parts = sorted(p.name for p in book.glob("0*.md"))
         assert parts == ["01-alpha.md", "02-beta.md"]
 
+    def test_ai_target_writes_budgeted_folder(self, tmp_path):
+        # Heading-less doc far over the smallest AI budget: --ai-target must
+        # split it into parts that each fit, where --split-chapters would
+        # have written it whole (nothing to split on).
+        doc = tmp_path / "notes.html"
+        doc.write_text(
+            "".join(
+                f"<p>Paragraph {i} carries plenty of distinct wording to add "
+                f"bulk and push the document well past the smallest budget.</p>"
+                for i in range(600)
+            ),
+            encoding="utf-8",
+        )
+        rc = cli.main(
+            ["convert", str(doc), "--out", str(tmp_path / "out"), "--ai-target", "Local LLM"]
+        )
+        assert rc == 0
+        from markdown_sidekick.export import AI_TARGETS, estimate_tokens
+
+        parts = sorted((tmp_path / "out" / "notes").glob("0*.md"))
+        assert len(parts) > 1
+        for p in parts:
+            body = p.read_text(encoding="utf-8").split("---\n", 2)[-1]
+            assert estimate_tokens(body) <= AI_TARGETS["Local LLM"]
+
     def test_json_output_with_quality(self, html_doc, tmp_path, capsys):
         rc = cli.main(
             ["convert", str(html_doc), "--out", str(tmp_path / "o"), "--json", "--quality"]

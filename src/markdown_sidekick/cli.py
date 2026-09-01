@@ -49,6 +49,14 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--out", type=Path, default=None, help="output directory (default: next to each source)")
     conv.add_argument("--split-chapters", action="store_true", help="write a book folder: one file per # heading, plus index.md and manifest.json")
     conv.add_argument("--max-tokens", type=int, default=export.DEFAULT_MAX_TOKENS, help="sub-split chapters larger than this (est. tokens)")
+    conv.add_argument(
+        "--ai-target",
+        choices=list(export.AI_TARGETS),
+        default=None,
+        help="write AI-sized book folders: every part fits this platform's "
+        "context budget, even for heading-less documents "
+        "(implies --split-chapters; overrides --max-tokens)",
+    )
     conv.add_argument("--no-clean", action="store_true", help="skip the cleanup pass")
     conv.add_argument("--no-front-matter", action="store_true", help="omit YAML front matter")
     conv.add_argument("--quality", action="store_true", help="print a quality report per file")
@@ -134,7 +142,9 @@ def _convert(args: argparse.Namespace) -> int:
         if (args.images or settings.extract_images) and path.suffix.lower() == ".pdf":
             from . import figures
 
-            asset_root = (out_dir / path.stem) if args.split_chapters else out_dir
+            asset_root = (
+                (out_dir / path.stem) if (args.split_chapters or args.ai_target) else out_dir
+            )
             figs = figures.extract_pdf_figures(path, asset_root / "assets")
             if figs and settings.ollama_endpoint and settings.caption_model:
                 from . import polish
@@ -149,14 +159,17 @@ def _convert(args: argparse.Namespace) -> int:
             if figs:
                 markdown = figures.insert_figure_links(markdown, figs)
                 record["figures"] = len(figs)
-        if args.split_chapters:
+        if args.split_chapters or args.ai_target:
             res = export.export_book(
                 markdown,
                 out_dir / path.stem,
                 source=path.name,
                 engine=result.engine,
                 front_matter=not args.no_front_matter,
-                max_tokens=args.max_tokens,
+                max_tokens=(
+                    export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
+                ),
+                ai_sections=args.ai_target is not None,
             )
             written = [str(p) for p in res.paths]
             if res.index_path:

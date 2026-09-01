@@ -181,12 +181,17 @@ def convert_local_file(
 
 
 @mcp.tool
-def convert_outline(file_path: str, clean: bool = True) -> dict:
+def convert_outline(
+    file_path: str, clean: bool = True, max_tokens: int = export.DEFAULT_MAX_TOKENS
+) -> dict:
     """Convert a file and return its structure WITHOUT the content — title,
-    quality report, and a numbered list of sections (split on # headings) with
-    token estimates. Follow up with convert_section to read parts that fit
-    your context. The conversion is cached, so outline + section reads don't
-    re-convert.
+    quality report, and a numbered list of sections with token estimates.
+    Sections follow chapter structure when present, and every section is
+    guaranteed to fit max_tokens (heading-less documents are hard-split at
+    safe boundaries; only a single indivisible fenced code block can exceed
+    the budget). Follow up with convert_section — pass the SAME max_tokens
+    there or the indices won't line up. The conversion is cached, so
+    outline + section reads don't re-convert.
     """
     resolved, err = _resolve(file_path)
     if err:
@@ -195,7 +200,7 @@ def convert_outline(file_path: str, clean: bool = True) -> dict:
     if conv_err is not None:
         return {"error": conv_err}
     assert markdown is not None
-    sections = export.split_chapters(markdown)
+    sections = export.split_for_ai(markdown, max_tokens=max_tokens)
     return {
         "title": export.document_title(markdown, os.path.basename(resolved)),
         "est_tokens": export.estimate_tokens(markdown),
@@ -208,9 +213,15 @@ def convert_outline(file_path: str, clean: bool = True) -> dict:
 
 
 @mcp.tool
-def convert_section(file_path: str, section_index: int, clean: bool = True) -> str:
+def convert_section(
+    file_path: str,
+    section_index: int,
+    clean: bool = True,
+    max_tokens: int = export.DEFAULT_MAX_TOKENS,
+) -> str:
     """Return one section of a converted document (see convert_outline for
-    the section list). Uses the cached conversion when available.
+    the section list — pass the same max_tokens as the outline call so the
+    indices match). Uses the cached conversion when available.
     """
     resolved, err = _resolve(file_path)
     if err:
@@ -219,7 +230,7 @@ def convert_section(file_path: str, section_index: int, clean: bool = True) -> s
     if conv_err is not None:
         return f"Error converting '{os.path.basename(resolved)}': {conv_err}"
     assert markdown is not None
-    sections = export.split_chapters(markdown)
+    sections = export.split_for_ai(markdown, max_tokens=max_tokens)
     if not 0 <= section_index < len(sections):
         return f"Error: section_index must be 0..{len(sections) - 1}"
     return sections[section_index].markdown

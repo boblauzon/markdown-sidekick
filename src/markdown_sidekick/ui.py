@@ -190,6 +190,20 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             borderwidth=0,
             thickness=6,
         )
+        style.configure("TNotebook", background=BG_PANEL, borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            background=BG_INPUT,
+            foreground=FG_MUTED,
+            padding=(16, 7),
+            font=FONT,
+            borderwidth=0,
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", BG_PANEL)],
+            foreground=[("selected", FG)],
+        )
         style.configure("TCheckbutton", background=BG, foreground=FG, font=FONT)
         style.map(
             "TCheckbutton",
@@ -486,8 +500,6 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         dlg.configure(bg=BG_PANEL)
         dlg.transient(self)
         dlg.resizable(False, False)
-        pad = {"padx": 16}
-
         # master=dlg so these Tcl variables are freed when the dialog is destroyed
         # (otherwise they accumulate on the root across opens).
         ocr_v = tk.BooleanVar(dlg, value=self.settings.enable_ocr)
@@ -503,97 +515,183 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ollama_v = tk.StringVar(dlg, value=self.settings.ollama_endpoint)
         polish_v = tk.StringVar(dlg, value=self.settings.polish_model)
         caption_v = tk.StringVar(dlg, value=self.settings.caption_model)
+        detect_v = tk.StringVar(dlg, value="")
 
-        def section(text: str, row: int) -> None:
-            ttk.Label(dlg, text=text, style="Panel.TLabel", font=FONT_BOLD).grid(
-                row=row, column=0, columnspan=3, sticky="w", pady=(14, 4), **pad
+        ttk.Label(
+            dlg, text="Markdown Sidekick settings", style="Panel.TLabel", font=FONT_TITLE
+        ).pack(anchor="w", padx=16, pady=(16, 8))
+
+        # Tabs keep the dialog under ~450px tall — the old single column was
+        # 778px, which clipped Save/Cancel off-screen on 1080p laptops at
+        # 150% scaling (measured; roadmap X2).
+        nb = ttk.Notebook(dlg)
+        nb.pack(fill="both", expand=True, padx=16)
+
+        def tab(title: str) -> ttk.Frame:
+            frame = ttk.Frame(nb, style="Panel.TFrame", padding=(16, 12))
+            nb.add(frame, text=title)
+            return frame
+
+        def section(parent, text: str, row: int, top: int = 12) -> None:
+            ttk.Label(parent, text=text, style="Panel.TLabel", font=FONT_BOLD).grid(
+                row=row, column=0, columnspan=3, sticky="w", pady=(top, 4)
             )
 
-        def check(text: str, var, row: int) -> None:
-            ttk.Checkbutton(dlg, text=text, variable=var, style="Panel.TCheckbutton").grid(
-                row=row, column=0, columnspan=3, sticky="w", **pad
-            )
+        def check(parent, text: str, var, row: int) -> None:
+            ttk.Checkbutton(
+                parent, text=text, variable=var, style="Panel.TCheckbutton"
+            ).grid(row=row, column=0, columnspan=3, sticky="w", pady=1)
 
-        ttk.Label(dlg, text="Markdown Sidekick settings", style="Panel.TLabel",
-                  font=FONT_TITLE).grid(row=0, column=0, columnspan=3, sticky="w",
-                                        pady=(16, 0), **pad)
-
-        section("Conversion engines", 1)
-        check("OCR images & scanned PDFs", ocr_v, 2)
-        check("Transcribe audio files", audio_v, 3)
-
-        ttk.Label(dlg, text="Whisper model", style="Panel.TLabel").grid(
-            row=4, column=0, sticky="w", pady=(8, 0), **pad
+        # -- Conversion tab ---------------------------------------------------
+        conv = tab("Conversion")
+        section(conv, "Engines", 0, top=0)
+        check(conv, "OCR images & scanned PDFs", ocr_v, 1)
+        check(conv, "Transcribe audio files", audio_v, 2)
+        ttk.Label(conv, text="Whisper model", style="Panel.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
         )
-        ttk.Combobox(dlg, textvariable=model_v, values=list(WHISPER_MODELS),
-                     state="readonly", width=12).grid(row=4, column=1, sticky="w", pady=(8, 0))
+        ttk.Combobox(
+            conv,
+            textvariable=model_v,
+            values=list(WHISPER_MODELS),
+            state="readonly",
+            width=12,
+        ).grid(row=3, column=1, sticky="w", pady=(8, 0), padx=(12, 0))
+        section(conv, "High-fidelity (optional)", 4)
+        ttk.Label(conv, text="MinerU endpoint URL", style="Panel.TLabel").grid(
+            row=5, column=0, sticky="w"
+        )
+        ttk.Entry(conv, textvariable=endpoint_v, width=34).grid(
+            row=5, column=1, columnspan=2, sticky="w", padx=(12, 0)
+        )
+        ttk.Label(
+            conv,
+            text="e.g. http://127.0.0.1:2364  (blank = off)",
+            style="PanelMuted.TLabel",
+        ).grid(row=6, column=1, columnspan=2, sticky="w", padx=(12, 0))
 
-        section("High-fidelity (optional)", 5)
-        ttk.Label(dlg, text="MinerU endpoint URL", style="Panel.TLabel").grid(
-            row=6, column=0, sticky="w", **pad
+        # -- Output tab -------------------------------------------------------
+        out_tab = tab("Output")
+        section(out_tab, "Saving", 0, top=0)
+        ttk.Label(out_tab, text="Default output folder", style="Panel.TLabel").grid(
+            row=1, column=0, sticky="w"
         )
-        ttk.Entry(dlg, textvariable=endpoint_v, width=38).grid(
-            row=6, column=1, columnspan=2, sticky="w"
+        ttk.Entry(out_tab, textvariable=outdir_v, width=28).grid(
+            row=1, column=1, sticky="w", padx=(12, 0)
         )
-        ttk.Label(dlg, text="e.g. http://127.0.0.1:2364  (blank = off)",
-                  style="PanelMuted.TLabel").grid(row=7, column=1, columnspan=2, sticky="w")
-
-        section("Output", 8)
-        ttk.Label(dlg, text="Default output folder", style="Panel.TLabel").grid(
-            row=9, column=0, sticky="w", **pad
-        )
-        ttk.Entry(dlg, textvariable=outdir_v, width=30).grid(row=9, column=1, sticky="w")
 
         def browse() -> None:
             d = filedialog.askdirectory(title="Default output folder", parent=dlg)
             if d:
                 outdir_v.set(d)
 
-        ttk.Button(dlg, text="Browse…", command=browse).grid(row=9, column=2, sticky="w", padx=6)
-
-        section("Preview defaults", 10)
-        check("Clean output", clean_v, 11)
-        check("Rendered preview", rendered_v, 12)
-
-        # (Chapter/AI splitting moved to the main window's export bar, next to
+        ttk.Button(out_tab, text="Browse…", command=browse).grid(
+            row=1, column=2, sticky="w", padx=6
+        )
+        section(out_tab, "Preview defaults", 2)
+        check(out_tab, "Clean output", clean_v, 3)
+        check(out_tab, "Rendered preview", rendered_v, 4)
+        # (Chapter/AI splitting lives in the main window's export bar, next to
         # the Save button, where the output decision is actually made.)
-        section("AI-friendly export", 13)
-        check("YAML front matter on saved files", front_v, 14)
-        check("Page anchors (<!-- page N -->) in PDF conversions", anchors_v, 16)
-        check("Extract PDF figures to assets/ on save", images_v, 17)
+        section(out_tab, "AI-friendly export", 5)
+        check(out_tab, "YAML front matter on saved files", front_v, 6)
+        check(out_tab, "Page anchors (<!-- page N -->) in PDF conversions", anchors_v, 7)
+        check(out_tab, "Extract PDF figures to assets/ on save", images_v, 8)
 
-        section("Local LLM extras (optional, via Ollama)", 18)
-        ttk.Label(dlg, text="Ollama endpoint", style="Panel.TLabel").grid(
-            row=19, column=0, sticky="w", **pad
+        # -- Local AI tab -----------------------------------------------------
+        ai = tab("Local AI")
+        section(ai, "Ollama (optional — everything stays on this machine)", 0, top=0)
+        ttk.Label(ai, text="Endpoint", style="Panel.TLabel").grid(
+            row=1, column=0, sticky="w"
         )
-        ttk.Entry(dlg, textvariable=ollama_v, width=38).grid(
-            row=19, column=1, columnspan=2, sticky="w"
+        ttk.Entry(ai, textvariable=ollama_v, width=28).grid(
+            row=1, column=1, sticky="w", padx=(12, 0)
         )
-        ttk.Label(dlg, text="Polish model / caption model", style="Panel.TLabel").grid(
-            row=20, column=0, sticky="w", **pad
+        ttk.Button(ai, text="Detect", command=lambda: run_detect()).grid(
+            row=1, column=2, sticky="w", padx=6
         )
-        ttk.Entry(dlg, textvariable=polish_v, width=14).grid(row=20, column=1, sticky="w")
-        ttk.Entry(dlg, textvariable=caption_v, width=14).grid(
-            row=20, column=2, sticky="w", padx=6
+        ttk.Label(ai, textvariable=detect_v, style="PanelMuted.TLabel").grid(
+            row=2, column=0, columnspan=3, sticky="w", pady=(2, 0)
         )
+        ttk.Label(ai, text="Polish model", style="Panel.TLabel").grid(
+            row=3, column=0, sticky="w", pady=(8, 0)
+        )
+        polish_box = ttk.Combobox(ai, textvariable=polish_v, width=22)
+        polish_box.grid(row=3, column=1, sticky="w", padx=(12, 0), pady=(8, 0))
+        ttk.Label(ai, text="Caption model", style="Panel.TLabel").grid(
+            row=4, column=0, sticky="w", pady=(4, 0)
+        )
+        caption_box = ttk.Combobox(ai, textvariable=caption_v, width=22)
+        caption_box.grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
         ttk.Label(
-            dlg,
-            text="e.g. http://localhost:11434 with llama3.2 / llava  (blank = off)",
-            style="PanelMuted.TLabel",
-        ).grid(row=21, column=1, columnspan=2, sticky="w")
-
-        section("AI integration (MCP)", 22)
-        ttk.Button(
-            dlg,
-            text="📋  Copy AI setup prompt",
-            command=lambda: self.copy_mcp_prompt(parent=dlg),
-        ).grid(row=23, column=0, sticky="w", padx=16)
-        ttk.Label(
-            dlg,
-            text="Paste it into Claude, Cursor, or any AI assistant\nto connect Markdown Sidekick as a converter tool.",
+            ai,
+            text="Polish repairs residual artifacts; caption writes alt-text for\n"
+            "extracted figures. Blank model = that pass stays off.",
             style="PanelMuted.TLabel",
             justify="left",
-        ).grid(row=23, column=1, columnspan=2, sticky="w", padx=(8, 16))
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        section(ai, "AI integration (MCP)", 6)
+        ttk.Button(
+            ai,
+            text="📋  Copy AI setup prompt",
+            command=lambda: self.copy_mcp_prompt(parent=dlg),
+        ).grid(row=7, column=0, sticky="w")
+        ttk.Label(
+            ai,
+            text="Paste it into Claude, Cursor, or any AI assistant\n"
+            "to connect Markdown Sidekick as a converter tool.",
+            style="PanelMuted.TLabel",
+            justify="left",
+        ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(8, 0))
+
+        def run_detect(auto: bool = False) -> None:
+            """Probe Ollama on a worker thread and fill the model pickers.
+
+            Tri-state UX (the Ghostwire pattern): running-with-models,
+            running-but-nothing-pulled, and not-running each read differently.
+            The auto-probe on open stays quiet when nothing is found; the
+            Detect button reports every outcome. Thread-safety follows the
+            app's rule: the worker touches only a plain list, and the Tk side
+            polls it via dlg.after.
+            """
+            from . import polish  # lazy: only the settings dialog needs it
+
+            endpoint = ollama_v.get().strip()
+            if not auto:
+                detect_v.set("Probing…")
+            result_box: list[tuple[str, list[str]]] = []
+            threading.Thread(
+                target=lambda: result_box.append(polish.detect_ollama(endpoint)),
+                daemon=True,
+            ).start()
+
+            def poll() -> None:
+                if not dlg.winfo_exists():
+                    return
+                if not result_box:
+                    dlg.after(100, poll)
+                    return
+                status, models = result_box[0]
+                if status == "ok":
+                    if not endpoint:
+                        ollama_v.set(polish.DEFAULT_OLLAMA_ENDPOINT)
+                    polish_box.configure(values=models)
+                    caption_box.configure(values=models)
+                    detect_v.set(
+                        f"✓ Ollama detected — {len(models)} model(s) available"
+                    )
+                elif status == "empty":
+                    detect_v.set(
+                        "Ollama is running but has no models — try:  ollama pull llama3.2"
+                    )
+                elif not auto:
+                    detect_v.set("No local AI found. Is Ollama running?")
+
+            dlg.after(100, poll)
+
+        # Quiet auto-probe: if Ollama is already running, the pickers fill
+        # themselves before the user even reaches the tab.
+        dlg.after(250, lambda: run_detect(auto=True))
 
         def save() -> None:
             self.settings.enable_ocr = ocr_v.get()
@@ -622,7 +720,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     self.reconvert_all()
 
         btns = ttk.Frame(dlg, style="Panel.TFrame")
-        btns.grid(row=24, column=0, columnspan=3, sticky="e", pady=16, padx=16)
+        btns.pack(fill="x", pady=16, padx=16)
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right", padx=(8, 0))
         ttk.Button(btns, text="Save", style="Accent.TButton", command=save).pack(side="right")
 
@@ -910,9 +1008,16 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 if report is None:
                     report = assess_markdown(text)
                     self._quality_cache[key] = report
-                if report.binary_noise:
-                    bits.insert(0, "⚠ Output looks like binary noise — source may be corrupt")
                 bits.append(f"Quality {report.score}/100")
+                # A score under 100 with no explanation is a dead end — name
+                # the top artifact so the user knows WHY (roadmap X4). Binary
+                # noise is the one issue that means "don't trust any of it",
+                # so it gets a warning marker rather than a second bit.
+                if report.issues:
+                    top = report.issues[0]
+                    if report.binary_noise:
+                        top = "⚠ " + top
+                    bits.append(top)
                 bits.append(f"~{report.est_tokens:,} tokens")
                 if report.headings:
                     bits.append(f"{report.headings} headings")

@@ -80,6 +80,26 @@ class TestOutlineAndSections:
         out = _text(_call("convert_section", file_path=str(big_html), section_index=99))
         assert out.startswith("Error")
 
+    def test_sections_fit_max_tokens(self, big_html):
+        # The outline's budget is a hard cap: chapters over max_tokens are
+        # sub-split so an AI client can trust every section fits its context.
+        data = json.loads(
+            _text(_call("convert_outline", file_path=str(big_html), max_tokens=200))
+        )
+        assert len(data["sections"]) > 3  # chapters were sub-split
+        assert all(s["est_tokens"] <= 200 for s in data["sections"])
+        # Same max_tokens on convert_section keeps indices aligned.
+        last = len(data["sections"]) - 1
+        out = _text(
+            _call(
+                "convert_section",
+                file_path=str(big_html),
+                section_index=last,
+                max_tokens=200,
+            )
+        )
+        assert out.strip() and "Error" not in out[:20]
+
 
 class TestConvertUrl:
     def test_fetches_and_converts(self, tmp_path):
