@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from markdown_sidekick.converter import explain_error
+import random
+
+from markdown_sidekick.converter import ConversionEngine, explain_error
 
 
 class TestExplainError:
@@ -76,3 +78,63 @@ class TestExplainError:
             " - PdfConverter threw PSEOF with message: Unexpected EOF\n"
         )
         assert "corrupt" in what
+
+    def test_empty_output(self):
+        what, fix = explain_error(
+            "EmptyOutputError: the converter produced no text from this 20,000-byte file"
+        )
+        assert "no text" in what
+        assert "corrupt" in fix.lower()
+
+
+def _textish_garbage(n: int) -> bytes:
+    """Byte salad that decodes as text — the shape markitdown 'converts' to
+    the literal string 'None' (or a '| None |' table) without any error."""
+    rng = random.Random(42)
+    out = bytearray()
+    for _ in range(n):
+        r = rng.random()
+        if r < 0.12:
+            out.append(ord(" "))
+        elif r < 0.14:
+            out.append(ord("\n"))
+        else:
+            out.append(rng.randrange(0xA0, 0x100))
+    return bytes(out)
+
+
+class TestEmptyOutputGuard:
+    """A non-trivial source 'converting' to no real text must be an error,
+    not a silent success (markitdown emits str(None) for binary garbage)."""
+
+    def _engine(self) -> ConversionEngine:
+        return ConversionEngine(enable_ocr=False, enable_audio=False)
+
+    def test_garbage_docx_reports_error(self, tmp_path):
+        p = tmp_path / "garbage.docx"
+        p.write_bytes(_textish_garbage(20_000))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+        assert "EmptyOutputError" in (res.error or "")
+
+    def test_garbage_txt_reports_error(self, tmp_path):
+        p = tmp_path / "garbage.txt"
+        p.write_bytes(_textish_garbage(20_000))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+        assert "produced no text" in (res.error or "")
+
+    def test_small_empty_file_stays_ok(self, tmp_path):
+        # Below the size floor an empty conversion is not evidence of
+        # corruption — small-but-real empty documents pass through.
+        p = tmp_path / "empty.txt"
+        p.write_bytes(b"   \n\n  ")
+        res = self._engine().convert_file(p)
+        assert res.ok
+
+    def test_real_text_stays_ok(self, tmp_path):
+        p = tmp_path / "real.txt"
+        p.write_bytes(("A perfectly ordinary paragraph of text.\n" * 500).encode())
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert "ordinary paragraph" in res.markdown

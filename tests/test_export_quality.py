@@ -178,3 +178,56 @@ class TestQuality:
         r = assess_markdown("# T\n\nbody\n")
         assert "Quality" in r.summary()
         assert r.as_dict()["headings"] == 1
+
+
+class TestBinaryNoise:
+    """markitdown converts unrecognized binary garbage 'ok' — the assessor
+    must flag the salad, without ever flagging real (even messy) content."""
+
+    def test_byte_salad_flagged(self):
+        # Deterministic stand-in for garbage bytes decoded as latin-1:
+        # every codepoint 0-255, including the C0/C1 control ranges.
+        salad = ("".join(chr(i) for i in range(256)) + " ") * 30
+        r = assess_markdown(salad)
+        assert r.binary_noise
+        assert r.noise_ratio >= 0.10
+        assert r.score <= 20
+        assert any("binary noise" in i for i in r.issues)
+        assert r.as_dict()["binary_noise"] is True
+
+    def test_replacement_char_flood_flagged(self):
+        # UTF-8 decode-with-replace of random bytes: FFFD everywhere.
+        r = assess_markdown("x��z " * 300)
+        assert r.binary_noise
+
+    def test_symbol_salad_without_controls_flagged(self):
+        # Controls stripped, but tokens are still non-word salad (mixed
+        # accented letters and non-ASCII symbols, no real words).
+        r = assess_markdown("ÅÙ¬ø∂¤¦¨ " * 100)
+        assert r.binary_noise
+
+    def test_prose_and_code_not_flagged(self):
+        doc = (
+            "# Title\n\nNormal prose with punctuation, e.g. costs of $5-10!\n\n"
+            "```python\nif x <= 3 and y != {}:\n    print(f'{x:>4}|{y}')\n```\n\n"
+        ) * 20
+        r = assess_markdown(doc)
+        assert not r.binary_noise
+        assert r.word_ratio > 0.9
+
+    def test_cjk_not_flagged(self):
+        r = assess_markdown("# 標題\n\n" + "這是一段中文內容。 " * 100)
+        assert not r.binary_noise
+
+    def test_short_snippet_never_flagged(self):
+        # Below the size guard even 100% noise stays unflagged — a tiny
+        # output is not evidence of a corrupt source.
+        r = assess_markdown("��� ��")
+        assert not r.binary_noise
+
+    def test_sparse_fffd_in_real_doc_not_flagged(self):
+        # A handful of lost characters in an otherwise-real document (the
+        # artifact cleanup targets) must not read as binary garbage.
+        doc = ("A real paragraph of readable text. " * 50) + "wor�d s�pots\n"
+        r = assess_markdown(doc)
+        assert not r.binary_noise

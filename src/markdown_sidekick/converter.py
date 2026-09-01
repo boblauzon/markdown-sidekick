@@ -62,6 +62,12 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
     ".avi",
 )
 
+# A source at least this big that "converts" to no real text is reported as an
+# error rather than a silent empty success. Set high enough that small-but-real
+# empty documents (an untouched .docx is ~10 KB of zip scaffolding) pass through
+# as empty output rather than being declared failures.
+_EMPTY_OUTPUT_MIN_BYTES = 16_384
+
 
 @dataclass
 class ConversionResult:
@@ -207,9 +213,29 @@ class ConversionEngine:
                     pass  # fall back to markitdown
 
             result = self._md.convert(str(source))
-            return ConversionResult(
-                source=source, markdown=result.text_content or "", engine="markitdown"
+            text = result.text_content or ""
+            # markitdown quirk: unrecognized binary content (a corrupt docx,
+            # an mp3 with broken magic bytes) can "convert" without error to
+            # the literal string "None" (str(None) leaking from a converter),
+            # a "| None |" table, or nothing at all. A non-trivial source
+            # yielding no real text is a failure, not a success.
+            has_text = any(
+                m.group(0) != "None" for m in re.finditer(r"\w+", text)
             )
+            if not has_text:
+                try:
+                    src_size = source.stat().st_size
+                except OSError:
+                    src_size = 0
+                if src_size >= _EMPTY_OUTPUT_MIN_BYTES:
+                    return ConversionResult(
+                        source=source,
+                        error=(
+                            "EmptyOutputError: the converter produced no text "
+                            f"from this {src_size:,}-byte file"
+                        ),
+                    )
+            return ConversionResult(source=source, markdown=text, engine="markitdown")
         except Exception as exc:  # markitdown raises a variety of types
             return ConversionResult(source=source, error=f"{type(exc).__name__}: {exc}")
 
@@ -282,6 +308,12 @@ _ERROR_HINTS: tuple[tuple[re.Pattern[str], str, str], ...] = tuple(
         r"UnsupportedFormatException|[Uu]nsupported format|no converter",
         "No conversion engine understands this file type.",
         "Export the content as PDF, DOCX, HTML, or another supported format, then retry.",
+    ),
+    (
+        r"EmptyOutputError|produced no text",
+        "The conversion finished but produced no text.",
+        "The file may be corrupt, image-only (enable OCR), or a binary format "
+        "with the wrong extension. Re-export it in a supported format, then retry.",
     ),
     (
         # Includes the shapes pdfminer raises through markitdown's wrapper

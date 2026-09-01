@@ -910,6 +910,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 if report is None:
                     report = assess_markdown(text)
                     self._quality_cache[key] = report
+                if report.binary_noise:
+                    bits.insert(0, "⚠ Output looks like binary noise — source may be corrupt")
                 bits.append(f"Quality {report.score}/100")
                 bits.append(f"~{report.est_tokens:,} tokens")
                 if report.headings:

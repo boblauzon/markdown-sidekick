@@ -175,9 +175,11 @@ def _convert(args: argparse.Namespace) -> int:
             written = [str(out_path)]
         record["written"] = written
 
+        report = assess_markdown(markdown)
         if args.quality:
-            report = assess_markdown(markdown)
             record["quality"] = report.as_dict()
+        if report.binary_noise:
+            record["warning"] = "output looks like binary noise; source file may be corrupt or unsupported"
 
         if args.json:
             print(json.dumps(record, ensure_ascii=False))
@@ -185,7 +187,9 @@ def _convert(args: argparse.Namespace) -> int:
             target = written[0] if len(written) == 1 else f"{len(written)} files in {Path(written[0]).parent}"
             print(f"ok     {path.name} [{result.engine}] -> {target}")
             if args.quality:
-                print(f"       {assess_markdown(markdown).summary()}")
+                print(f"       {report.summary()}")
+            if report.binary_noise:
+                print(f"warn   {path.name}: output looks like binary noise; source file may be corrupt or unsupported")
     return 1 if failures else 0
 
 

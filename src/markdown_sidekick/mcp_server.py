@@ -149,6 +149,16 @@ def convert_local_file(
     assert markdown is not None
     logger.info("Converted (%d chars)", len(markdown))
 
+    report = assess_markdown(markdown)
+    noise_note = ""
+    if report.binary_noise:
+        noise_note = (
+            "> ⚠ Warning: this output looks like binary noise (mostly unreadable "
+            "characters). The source file may be corrupt or in a format the "
+            "converter does not actually understand — treat the content below "
+            "with suspicion.\n\n"
+        )
+
     if save_to:
         out_path = os.path.abspath(os.path.expanduser(save_to))
         export.export_single(
@@ -157,17 +167,17 @@ def convert_local_file(
             source=os.path.basename(resolved),
             front_matter=Settings.load().export_front_matter,
         )
-        report = assess_markdown(markdown)
         return f"Saved Markdown to {out_path}. {report.summary()}"
 
     if len(markdown) > max_chars:
         return (
-            markdown[:max_chars]
+            noise_note
+            + markdown[:max_chars]
             + f"\n\n---\n\n_(Truncated at {max_chars:,} of {len(markdown):,} characters. "
             "Use convert_outline + convert_section to read the rest, or save_to "
             "to write the full file to disk.)_"
         )
-    return markdown
+    return noise_note + markdown
 
 
 @mcp.tool
