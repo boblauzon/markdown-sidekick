@@ -19,6 +19,7 @@ All commands use the project venv; there is no global Python assumption.
 .venv\Scripts\python.exe -m pytest tests/ -q                  # run tests
 .venv\Scripts\python.exe -m pytest tests/test_cleanup.py -k toc -q    # single test / pattern
 .venv\Scripts\pyinstaller.exe MarkdownSidekick.spec --noconfirm       # build standalone exe (~4 min)
+ISCC.exe installer\MarkdownSidekick.iss                               # build the installer from dist\ (~2 min; Inno Setup 6)
 ```
 
 - `pytest` is a dev-only dependency — it is deliberately **not** in `requirements.txt`; install it into the venv if missing.

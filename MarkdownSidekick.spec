@@ -52,6 +52,7 @@ exe = EXE(
     name="MarkdownSidekick",
     console=False,          # windowed GUI app
     upx=False,              # UPX breaks some native DLLs; size is fine without it
+    icon="assets/MarkdownSidekick.ico",  # multi-size; also used by the installer
 )
 
 coll = COLLECT(

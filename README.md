@@ -90,7 +90,15 @@ available inside the app via the **❓ Help** button.
 
 ### Option A — Standalone app (no Python needed)
 
-Grab the one-folder distribution (`dist\MarkdownSidekick\`, ~484 MB) and
+Easiest: run **MarkdownSidekick-Setup-&lt;version&gt;.exe** (per-user install, no
+admin rights needed; Start-menu shortcut and clean uninstaller included). Build
+it yourself with [Inno Setup 6](https://jrsoftware.org/isinfo.php):
+
+```powershell
+ISCC.exe installer\MarkdownSidekick.iss
+```
+
+Or grab the one-folder distribution (`dist\MarkdownSidekick\`, ~490 MB) and
 double-click **`MarkdownSidekick.exe`**. Nothing to install — Python, the OCR
 models, and all native libraries are inside. To build it yourself:
 

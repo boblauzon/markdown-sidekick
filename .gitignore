@@ -17,3 +17,6 @@ Thumbs.db
 
 # Machine-local Claude Code settings
 .claude/settings.local.json
+
+# Installer build output
+installer/Output/
