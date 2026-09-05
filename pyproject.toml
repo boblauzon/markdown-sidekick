@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "markdown-sidekick"
-version = "1.0.0"
+version = "1.1.0"
 description = "Desktop app that converts documents, images, scanned PDFs and audio to Markdown — markitdown + local OCR + local transcription."
 readme = "README.md"
 requires-python = ">=3.10"

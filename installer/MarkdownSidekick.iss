@@ -8,7 +8,7 @@
 ; "install for all users" reachable via PrivilegesRequiredOverridesAllowed.
 
 #define MyAppName "Markdown Sidekick"
-#define MyAppVersion "1.0.0"
+#define MyAppVersion "1.1.0"
 #define MyAppPublisher "VibeProSoft"
 #define MyAppURL "https://github.com/boblauzon/markdown-sidekick"
 #define MyAppExeName "MarkdownSidekick.exe"
