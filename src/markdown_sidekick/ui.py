@@ -84,6 +84,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.settings = Settings.load()
         self.engine = ConversionEngine(
             enable_ocr=self.settings.enable_ocr,
+            ocr_device=self.settings.ocr_device,
             enable_audio=self.settings.enable_audio,
             whisper_model=self.settings.whisper_model,
             mineru_endpoint=self.settings.mineru_endpoint,
@@ -503,6 +504,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         # master=dlg so these Tcl variables are freed when the dialog is destroyed
         # (otherwise they accumulate on the root across opens).
         ocr_v = tk.BooleanVar(dlg, value=self.settings.enable_ocr)
+        ocr_device_v = tk.StringVar(dlg, value=self.settings.ocr_device)
         audio_v = tk.BooleanVar(dlg, value=self.settings.enable_audio)
         clean_v = tk.BooleanVar(dlg, value=self.settings.clean_output)
         rendered_v = tk.BooleanVar(dlg, value=self.settings.rendered_preview)
@@ -546,9 +548,24 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         conv = tab("Conversion")
         section(conv, "Engines", 0, top=0)
         check(conv, "OCR images & scanned PDFs", ocr_v, 1)
-        check(conv, "Transcribe audio files", audio_v, 2)
+        ttk.Label(conv, text="OCR device", style="Panel.TLabel").grid(
+            row=2, column=0, sticky="w", pady=(4, 0)
+        )
+        ttk.Combobox(
+            conv,
+            textvariable=ocr_device_v,
+            values=["auto", "cpu", "gpu"],
+            state="readonly",
+            width=12,
+        ).grid(row=2, column=1, sticky="w", pady=(4, 0), padx=(12, 0))
+        ttk.Label(
+            conv,
+            text="auto = GPU (DirectML) when present — measured ~6x faster",
+            style="PanelMuted.TLabel",
+        ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
+        check(conv, "Transcribe audio files", audio_v, 3)
         ttk.Label(conv, text="Whisper model", style="Panel.TLabel").grid(
-            row=3, column=0, sticky="w", pady=(8, 0)
+            row=4, column=0, sticky="w", pady=(8, 0)
         )
         ttk.Combobox(
             conv,
@@ -556,19 +573,19 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             values=list(WHISPER_MODELS),
             state="readonly",
             width=12,
-        ).grid(row=3, column=1, sticky="w", pady=(8, 0), padx=(12, 0))
-        section(conv, "High-fidelity (optional)", 4)
+        ).grid(row=4, column=1, sticky="w", pady=(8, 0), padx=(12, 0))
+        section(conv, "High-fidelity (optional)", 5)
         ttk.Label(conv, text="MinerU endpoint URL", style="Panel.TLabel").grid(
-            row=5, column=0, sticky="w"
+            row=6, column=0, sticky="w"
         )
         ttk.Entry(conv, textvariable=endpoint_v, width=34).grid(
-            row=5, column=1, columnspan=2, sticky="w", padx=(12, 0)
+            row=6, column=1, columnspan=2, sticky="w", padx=(12, 0)
         )
         ttk.Label(
             conv,
             text="e.g. http://127.0.0.1:2364  (blank = off)",
             style="PanelMuted.TLabel",
-        ).grid(row=6, column=1, columnspan=2, sticky="w", padx=(12, 0))
+        ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(12, 0))
 
         # -- Output tab -------------------------------------------------------
         out_tab = tab("Output")
@@ -695,6 +712,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
         def save() -> None:
             self.settings.enable_ocr = ocr_v.get()
+            self.settings.ocr_device = ocr_device_v.get()
             self.settings.enable_audio = audio_v.get()
             self.settings.whisper_model = model_v.get()
             self.settings.mineru_endpoint = endpoint_v.get()
@@ -738,6 +756,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         """Push saved settings into the engine and live UI controls."""
         s = self.settings
         self.engine.enable_ocr = s.enable_ocr
+        self.engine.ocr_device = s.ocr_device
         self.engine.enable_audio = s.enable_audio
         self.engine.whisper_model = s.whisper_model
         self.engine.mineru_endpoint = s.mineru_endpoint

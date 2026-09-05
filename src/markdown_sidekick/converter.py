@@ -100,6 +100,7 @@ class ConversionEngine:
 
     enable_plugins: bool = False
     enable_ocr: bool = True
+    ocr_device: str = "auto"  # auto | cpu | gpu (DirectML) — see ocr.OCR_DEVICES
     enable_audio: bool = True
     whisper_model: str = "base"
     mineru_endpoint: str = ""  # blank = disabled
@@ -112,8 +113,10 @@ class ConversionEngine:
         self._md = MarkItDown(enable_plugins=self.enable_plugins)
 
     def _ocr_engine(self) -> "ocr.OcrEngine":
-        if self._ocr is None:
-            self._ocr = ocr.OcrEngine()
+        # Rebuilt when the device setting changes — the ONNX sessions inside
+        # are bound to a provider at construction time.
+        if self._ocr is None or self._ocr.device != self.ocr_device:
+            self._ocr = ocr.OcrEngine(device=self.ocr_device)
         return self._ocr
 
     def _audio_engine(self) -> "audio.AudioTranscriber":

@@ -1,9 +1,15 @@
-"""Local, offline OCR pipeline for images and scanned PDFs.
+"""Local OCR pipeline for images and scanned PDFs.
 
-Uses **RapidOCR** (ONNX, Apache-2.0, models bundled in the wheel — no download,
-no GPU required) for text recognition, and **pypdfium2** (Apache/BSD) for PDF
-page-text inspection and rendering. pypdfium2 is used deliberately instead of
-PyMuPDF, which is AGPL-licensed and would be awkward for a distributable app.
+Uses **RapidOCR** (ONNX, Apache-2.0) for text recognition — on the GPU via
+DirectML when one is available (any DX12 card: AMD/NVIDIA/Intel; measured
+5.8x faster than CPU on an RX 5700), controlled by ``Settings.ocr_device`` —
+and **pypdfium2** (Apache/BSD) for PDF page-text inspection and rendering.
+pypdfium2 is used deliberately instead of PyMuPDF, which is AGPL-licensed and
+would be awkward for a distributable app.
+
+RapidOCR v3 downloads its ONNX models (~15 MB) once on first use — the frozen
+build bundles them (they must exist in the build venv's site-packages before
+PyInstaller runs; ``--selftest``'s image_ocr check proves the bundle worked).
 
 Both dependencies are imported defensively: if either is missing the app still
 runs and simply falls back to markitdown for everything.
@@ -19,7 +25,7 @@ from typing import Callable
 # RapidOCR pulls in onnxruntime + opencv, which are slow to import. Detect it
 # cheaply with find_spec and only import it lazily on first OCR use, so the app
 # launches fast when no OCR is needed.
-_RAPIDOCR_AVAILABLE = importlib.util.find_spec("rapidocr_onnxruntime") is not None
+_RAPIDOCR_AVAILABLE = importlib.util.find_spec("rapidocr") is not None
 
 try:
     import numpy as np  # already loaded by markitdown's deps; cheap here
@@ -149,27 +155,51 @@ def analyze_pdf(path: str | Path) -> PdfAnalysis | None:
         pdf.close()
 
 
-class OcrEngine:
-    """Lazy wrapper around RapidOCR plus pypdfium2 page rendering."""
+OCR_DEVICES = ("auto", "cpu", "gpu")
 
-    def __init__(self, render_scale: float = 2.0) -> None:
+
+class OcrEngine:
+    """Lazy wrapper around RapidOCR plus pypdfium2 page rendering.
+
+    ``device``: "auto" lets RapidOCR pick (DirectML on Windows 10+ with a
+    DX12 GPU, CPU otherwise), "gpu" forces DirectML, "cpu" forces CPU.
+    onnxruntime falls back to the CPU provider on its own if DirectML can't
+    initialise, so "auto"/"gpu" never break OCR on GPU-less machines.
+    """
+
+    def __init__(self, render_scale: float = 2.0, device: str = "auto") -> None:
         self._engine = None
         self.render_scale = render_scale
+        self.device = device if device in OCR_DEVICES else "auto"
 
     def _rapidocr(self):
         if self._engine is None:
-            from rapidocr_onnxruntime import RapidOCR
+            from rapidocr import RapidOCR
 
-            self._engine = RapidOCR()
+            device = self.device
+            if device == "auto":
+                # RapidOCR's own default stays on the CPU even when DirectML
+                # is available (measured 3.5s vs 0.7s/page) — resolve "auto"
+                # ourselves from the installed onnxruntime build.
+                import onnxruntime
+
+                device = (
+                    "gpu"
+                    if "DmlExecutionProvider" in onnxruntime.get_available_providers()
+                    else "cpu"
+                )
+            self._engine = RapidOCR(
+                params={"EngineConfig.onnxruntime.use_dml": device == "gpu"}
+            )
         return self._engine
 
     def _recognise(self, image) -> str:
         """Run OCR on a path or numpy array; return recognised lines joined."""
-        result, _elapsed = self._rapidocr()(image)
-        if not result:
+        result = self._rapidocr()(image)
+        if result is None or not result.txts:
             return ""
-        # result rows are (box, text, score); keep RapidOCR's reading order.
-        return "\n".join(row[1] for row in result)
+        # txts follow RapidOCR's reading order.
+        return "\n".join(result.txts)
 
     def image_to_markdown(self, path: str | Path) -> str:
         source = Path(path)

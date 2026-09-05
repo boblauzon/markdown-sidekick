@@ -45,8 +45,12 @@ available inside the app via the **❓ Help** button.
   - **scanned / image-only PDFs** are auto-detected and OCR'd page-by-page, while
     digital PDFs stay on the faster markitdown path (smart routing)
   - each file shows which engine produced it (`markitdown` / `ocr` / `ocr+text`)
-  - fully **offline & CPU-only** — powered by [RapidOCR](https://github.com/RapidAI/RapidOCR)
-    (ONNX, Apache-2.0, models bundled — no download, no GPU, no cloud)
+  - fully **local** — powered by [RapidOCR](https://github.com/RapidAI/RapidOCR)
+    (ONNX, Apache-2.0, no cloud); runs on your **GPU via DirectML** when one is
+    present (any DX12 card — AMD/NVIDIA/Intel, measured ~5x faster) with
+    automatic CPU fallback, selectable in Settings → *OCR device*. Models ship
+    inside the standalone exe; pip installs download them once (~15 MB) on
+    first OCR use.
 - **Settings panel** (⚙ in the header), persisted to `%LOCALAPPDATA%`: toggle OCR /
   audio, pick the Whisper model size, set a default output folder, choose preview
   defaults, and configure an optional **MinerU** high-fidelity endpoint

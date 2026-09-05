@@ -35,6 +35,10 @@ class Settings:
     """All user-configurable options, with sensible defaults."""
 
     enable_ocr: bool = True
+    # OCR compute device: "auto" (DirectML GPU when present, else CPU),
+    # "cpu", or "gpu". Kept as a plain tuple check in normalize() — settings
+    # must not import ocr.py (it pulls numpy/pypdfium2 at module level).
+    ocr_device: str = "auto"
     enable_audio: bool = True
     whisper_model: str = "base"
     mineru_endpoint: str = ""  # blank = disabled
@@ -90,6 +94,8 @@ class Settings:
         """Coerce every field to its declared type so bad/hand-edited input
         (wrong types, nulls) can never crash load or break routing."""
         self.enable_ocr = bool(self.enable_ocr)
+        if self.ocr_device not in ("auto", "cpu", "gpu"):
+            self.ocr_device = "auto"
         self.enable_audio = bool(self.enable_audio)
         self.clean_output = bool(self.clean_output)
         self.rendered_preview = bool(self.rendered_preview)

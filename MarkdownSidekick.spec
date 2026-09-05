@@ -10,7 +10,7 @@ from PyInstaller.utils.hooks import collect_all
 
 datas, binaries, hiddenimports = [], [], []
 for pkg in (
-    "rapidocr_onnxruntime",
+    "rapidocr",
     "magika",
     "tkinterdnd2",
     "pypdfium2",

@@ -143,7 +143,9 @@ often do this). Markdown Sidekick detects these automatically:
 
 Notes:
 
-- OCR runs on the CPU at roughly **5–10 seconds per page** — the status bar
+- OCR runs on your **graphics card** when you have one (any modern AMD,
+  NVIDIA, or Intel GPU — under a second per page) and otherwise on the CPU
+  at roughly **4–8 seconds per page** — the status bar
   shows page-by-page progress. It is a one-time cost; keep the saved `.md`.
 - The OCR engine (RapidOCR) ships **inside** the app. No downloads, no cloud.
 - Everything stays on your machine.
@@ -181,6 +183,7 @@ Settings are grouped into three tabs — **Conversion**, **Output**, and
 | Tab | Setting | What it does |
 | --- | ------- | ------------ |
 | Conversion | OCR images & scanned PDFs | Master switch for the OCR engine |
+| Conversion | OCR device | *auto* uses your GPU (DirectML) when present — about 5× faster; *cpu*/*gpu* force one |
 | Conversion | Transcribe audio files | Master switch for audio/video transcription |
 | Conversion | Whisper model | Speech model size (see above) |
 | Conversion | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
