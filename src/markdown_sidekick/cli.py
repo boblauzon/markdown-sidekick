@@ -63,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--json", action="store_true", help="emit one JSON object per file instead of text lines")
     conv.add_argument("--anchors", action="store_true", help="insert <!-- page N --> markers in PDF conversions (citation grounding)")
     conv.add_argument("--images", action="store_true", help="extract PDF figures to an assets/ folder and link them")
-    conv.add_argument("--polish", action="store_true", help="repair residual artifacts with the configured local LLM (needs ollama_endpoint + polish_model in settings)")
+    conv.add_argument("--polish", action="store_true", help="repair residual artifacts with the configured local AI (needs an endpoint + polish model in Settings > Local AI; Ollama or any OpenAI-compatible server)")
     conv.add_argument("--no-ocr", action="store_true", help="disable the OCR route")
     conv.add_argument("--no-audio", action="store_true", help="disable audio/video transcription")
     conv.add_argument("--whisper-model", default=None, help="whisper model size (tiny/base/small/medium)")

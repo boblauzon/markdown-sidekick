@@ -1,9 +1,10 @@
-"""Optional local-LLM finishing passes (Ollama-compatible endpoint).
+"""Optional local-AI finishing passes (Ollama, LM Studio, Jan, LocalAI, …).
 
 Heuristics fix ~95% of conversion artifacts; the remainder (garbled words,
 mis-joined sentences, odd table cells) needs judgement. When the user points
-the app at a local Ollama server (Settings → ollama_endpoint), two opt-in
-extras become available:
+the app at a local AI server (Settings → Local AI — either the Ollama-native
+dialect or any OpenAI-compatible /v1 server), two opt-in extras become
+available:
 
 - :func:`polish_markdown` — chunk the document and ask a text model to repair
   ONLY mechanical artifacts, with a size guardrail so a model that rewrites or
@@ -20,7 +21,9 @@ from __future__ import annotations
 import base64
 import json
 import re
+import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
@@ -60,49 +63,158 @@ def _post_json(url: str, payload: dict, timeout: int = _TIMEOUT_S) -> dict | Non
 
 
 def llm_available(endpoint: str) -> bool:
-    """Cheap reachability probe (GET /api/tags)."""
+    """Cheap reachability probe — true for either local-AI dialect."""
     if not endpoint:
         return False
+    return _probe_protocol(endpoint)[0] is not None
+
+
+# Well-known local AI runtimes, probed in order when no endpoint is
+# configured. THE single source for the roster — endpoints, friendly names,
+# and the port→name lookup all derive from this table. Localhost-only by
+# design; detection never leaves the machine unless the user configured a
+# remote endpoint. Spelled 127.0.0.1 rather than "localhost" deliberately:
+# on Windows, localhost resolves to ::1 first and a v4-only daemon (Ollama's
+# default bind) costs ~2s of IPv6-refusal retries on EVERY request —
+# measured 2045ms vs 4ms per call against a live Ollama.
+LOCAL_RUNTIMES: tuple[tuple[str, str], ...] = (
+    ("http://127.0.0.1:11434", "Ollama"),
+    ("http://127.0.0.1:1234", "LM Studio"),
+    ("http://127.0.0.1:1337", "Jan"),
+    ("http://127.0.0.1:8080", "LocalAI"),
+)
+KNOWN_LOCAL_ENDPOINTS: tuple[str, ...] = tuple(ep for ep, _name in LOCAL_RUNTIMES)
+DEFAULT_OLLAMA_ENDPOINT = KNOWN_LOCAL_ENDPOINTS[0]
+_PORT_NAMES = {
+    urllib.parse.urlsplit(ep).port: name for ep, name in LOCAL_RUNTIMES
+}
+# Probe order matters: Ollama serves BOTH dialects, so the native probe is
+# what distinguishes it from a pure-OpenAI-compatible server.
+_PROBES: tuple[tuple[str, str, str, str], ...] = (
+    ("/api/tags", "models", "name", "ollama"),
+    ("/v1/models", "data", "id", "openai"),
+)
+
+
+def known_runtime_names() -> str:
+    """The scanned-runtime roster as prose, for user-facing messages."""
+    return ", ".join(name for _ep, name in LOCAL_RUNTIMES)
+
+
+def _get_json(url: str, timeout: float) -> dict | None:
+    """GET returning a parsed JSON dict, or None on any failure/non-dict."""
     try:
-        with urllib.request.urlopen(f"{endpoint}/api/tags", timeout=3) as resp:
-            return resp.status == 200
-    except Exception:
-        return False
-
-
-DEFAULT_OLLAMA_ENDPOINT = "http://localhost:11434"
-
-
-def detect_ollama(endpoint: str = "", timeout: int = 3) -> tuple[str, list[str]]:
-    """Probe a local Ollama daemon and enumerate its installed models.
-
-    Tri-state result — the "running but nothing pulled" middle state is the
-    one naive probes skip, and the one that prevents "I connected it but
-    nothing happens" confusion:
-
-    - ``("ok", [model, ...])`` — daemon running, models installed
-    - ``("empty", [])`` — daemon running but no models pulled yet
-    - ``("unreachable", [])`` — nothing answered (not running / wrong URL)
-
-    A blank ``endpoint`` probes the default ``http://localhost:11434``.
-    Localhost-only by design: this never calls out to the network unless the
-    user explicitly configured a remote endpoint.
-    """
-    endpoint = (endpoint or DEFAULT_OLLAMA_ENDPOINT).rstrip("/")
-    try:
-        with urllib.request.urlopen(f"{endpoint}/api/tags", timeout=timeout) as resp:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        return data if isinstance(data, dict) else None
     except Exception:
-        return "unreachable", []
-    models = [
-        name
-        for entry in data.get("models", []) or []
-        if (name := str(entry.get("name", "")).strip())
-    ]
-    return ("ok", models) if models else ("empty", [])
+        return None
 
 
-def _generate(endpoint: str, model: str, prompt: str, images: list[str] | None = None) -> str | None:
+def _probe_protocol(endpoint: str, timeout: float = 3) -> tuple[str | None, list[str]]:
+    """(protocol, models) for one endpoint, or (None, []) if nothing answers.
+
+    The payload SHAPE is required, not just parseable JSON: a catch-all dev
+    server that answers 200 + a JSON object on every path must read as
+    unreachable, not as an empty Ollama.
+    """
+    endpoint = endpoint.rstrip("/")
+    for path, list_key, id_field, protocol in _PROBES:
+        data = _get_json(f"{endpoint}{path}", timeout)
+        if data is None:
+            continue
+        entries = data.get(list_key)
+        if not isinstance(entries, list):
+            continue
+        models = [
+            mid
+            for entry in entries
+            if isinstance(entry, dict)
+            and (mid := str(entry.get(id_field, "")).strip())
+        ]
+        return protocol, models
+    return None, []
+
+
+def _resolve_protocol(endpoint: str) -> str:
+    """Probe once, per call chain — NEVER cached: a transient daemon hiccup
+    must not pin the wrong dialect for the rest of the process (a stale
+    "ollama" verdict makes every request 404 silently on a /v1 server)."""
+    proto, _models = _probe_protocol(endpoint)
+    return proto or "ollama"
+
+
+def runtime_name(endpoint: str, protocol: str) -> str:
+    """Friendly runtime label for status text, best-effort from the port."""
+    if protocol == "ollama":
+        return "Ollama"
+    try:
+        port = urllib.parse.urlsplit(endpoint).port
+    except ValueError:
+        port = None
+    return _PORT_NAMES.get(port, "OpenAI-compatible local AI")
+
+
+# Live local daemons answer in milliseconds; a short per-probe timeout keeps
+# the nothing-installed blank scan quick, and probing ports concurrently
+# makes its worst case one slow port, not the sum (serial 3s probes measured
+# ~33s worst case on Windows).
+_SCAN_TIMEOUT_S = 1.0
+
+
+def detect_local_ai(
+    endpoint: str = "", timeout: float = 3
+) -> tuple[str, list[str], str, str]:
+    """Probe for a local AI runtime; tri-state result across all dialects.
+
+    Returns ``(status, models, protocol, endpoint)``:
+
+    - ``("ok", [model, ...], protocol, endpoint)`` — running, models loaded
+    - ``("empty", [], protocol, endpoint)`` — running but no models yet (the
+      middle state naive probes skip — it prevents "connected but nothing
+      happens" confusion)
+    - ``("unreachable", [], "", "")`` — nothing answered
+
+    A blank ``endpoint`` scans the well-known local ports concurrently (see
+    ``LOCAL_RUNTIMES``) and reports the first-listed runtime found, preferring
+    one with models over one without.
+    """
+    if endpoint.strip():
+        candidates = [endpoint.rstrip("/")]
+        results = [_probe_protocol(candidates[0], timeout=timeout)]
+    else:
+        candidates = list(KNOWN_LOCAL_ENDPOINTS)
+        with ThreadPoolExecutor(max_workers=len(candidates)) as pool:
+            results = list(
+                pool.map(
+                    lambda c: _probe_protocol(c, timeout=_SCAN_TIMEOUT_S), candidates
+                )
+            )
+    empty_hit: tuple[str, list[str], str, str] | None = None
+    for cand, (proto, models) in zip(candidates, results):
+        if proto is None:
+            continue
+        if models:
+            return "ok", models, proto, cand
+        if empty_hit is None:
+            empty_hit = ("empty", [], proto, cand)
+    return empty_hit or ("unreachable", [], "", "")
+
+
+def _generate(
+    endpoint: str,
+    model: str,
+    prompt: str,
+    images: list[str] | None = None,
+    protocol: str | None = None,
+) -> str | None:
+    """Generate via whichever protocol the endpoint speaks.
+
+    Callers doing many generations resolve the protocol once and pass it in;
+    left None, it is resolved fresh (never cached across calls)."""
+    endpoint = endpoint.rstrip("/")
+    if (protocol or _resolve_protocol(endpoint)) == "openai":
+        return _generate_openai(endpoint, model, prompt, images)
     payload: dict = {"model": model, "prompt": prompt, "stream": False}
     if images:
         payload["images"] = images
@@ -110,6 +222,30 @@ def _generate(endpoint: str, model: str, prompt: str, images: list[str] | None =
     if not data:
         return None
     text = data.get("response")
+    return text if isinstance(text, str) and text.strip() else None
+
+
+def _generate_openai(
+    endpoint: str, model: str, prompt: str, images: list[str] | None = None
+) -> str | None:
+    """OpenAI-compatible /v1/chat/completions (LM Studio, Jan, LocalAI, …)."""
+    if images:
+        content: object = [{"type": "text", "text": prompt}] + [
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}}
+            for b64 in images
+        ]
+    else:
+        content = prompt
+    data = _post_json(
+        f"{endpoint}/v1/chat/completions",
+        {"model": model, "messages": [{"role": "user", "content": content}], "stream": False},
+    )
+    if not data:
+        return None
+    try:
+        text = data["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError):
+        return None
     return text if isinstance(text, str) and text.strip() else None
 
 
@@ -145,12 +281,15 @@ def polish_markdown(
     """
     if not endpoint or not model or not text.strip():
         return text, 0
+    # One protocol resolution per run: chunks reuse it, and a transient
+    # probe failure costs at most this run, never the whole process.
+    protocol = _resolve_protocol(endpoint)
     chunks = _split_chunks(text)
     out: list[str] = []
     changed = 0
     total = len(chunks)
     for n, chunk in enumerate(chunks, start=1):
-        repaired = _generate(endpoint, model, _POLISH_PROMPT + chunk)
+        repaired = _generate(endpoint, model, _POLISH_PROMPT + chunk, protocol=protocol)
         if repaired is not None and _MIN_RATIO <= len(repaired) / max(1, len(chunk)) <= _MAX_RATIO:
             # Strip a markdown wrapper some models add around the whole reply.
             m = re.fullmatch(r"```(?:markdown)?\n(.*)\n```\s*", repaired, re.S)

@@ -41,7 +41,7 @@ markdown-sidekick-mcp = "markdown_sidekick.mcp_server:main"
 markdown-sidekick-cli = "markdown_sidekick.cli:main"
 
 [project.urls]
-Repository = "https://github.com/roblauzon/markdown-sidekick"
+Repository = "https://github.com/boblauzon/markdown-sidekick"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -192,7 +192,7 @@ Settings are grouped into three tabs — **Conversion**, **Output**, and
 | Output | YAML front matter | Saved files start with title/source/date/token metadata |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | Embedded images land in an assets/ folder with links |
-| Local AI | Ollama endpoint + Detect | **Detect** probes your machine for a running Ollama, fills the model pickers with what's installed, and tells you if Ollama is running but has no models pulled yet |
+| Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
 | Local AI | Polish / caption model | Optional local-LLM artifact repair and figure alt-text (blank = off) |
 
 Everything on the Local AI tab talks only to your own machine — detection

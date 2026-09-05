@@ -496,6 +496,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         if self._busy:
             messagebox.showinfo(__app_name__, "Finish the current conversion first.")
             return
+        from . import polish  # lazy: stdlib-only, but only the dialog needs it
+
         dlg = tk.Toplevel(self)
         dlg.title("Settings")
         dlg.configure(bg=BG_PANEL)
@@ -617,7 +619,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
         # -- Local AI tab -----------------------------------------------------
         ai = tab("Local AI")
-        section(ai, "Ollama (optional — everything stays on this machine)", 0, top=0)
+        section(
+            ai,
+            f"{polish.known_runtime_names()}… "
+            "(optional — everything stays on this machine)",
+            0,
+            top=0,
+        )
         ttk.Label(ai, text="Endpoint", style="Panel.TLabel").grid(
             row=1, column=0, sticky="w"
         )
@@ -666,19 +674,18 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
             Tri-state UX (the Ghostwire pattern): running-with-models,
             running-but-nothing-pulled, and not-running each read differently.
-            The auto-probe on open stays quiet when nothing is found; the
-            Detect button reports every outcome. Thread-safety follows the
-            app's rule: the worker touches only a plain list, and the Tk side
-            polls it via dlg.after.
+            The auto-probe on open stays quiet when nothing ANSWERS (a found
+            runtime is reported even without models); the Detect button
+            reports every outcome. Thread-safety follows the app's rule: the
+            worker touches only a plain list, and the Tk side polls it via
+            dlg.after.
             """
-            from . import polish  # lazy: only the settings dialog needs it
-
             endpoint = ollama_v.get().strip()
             if not auto:
                 detect_v.set("Probing…")
-            result_box: list[tuple[str, list[str]]] = []
+            result_box: list[tuple[str, list[str], str, str]] = []
             threading.Thread(
-                target=lambda: result_box.append(polish.detect_ollama(endpoint)),
+                target=lambda: result_box.append(polish.detect_local_ai(endpoint)),
                 daemon=True,
             ).start()
 
@@ -688,21 +695,34 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 if not result_box:
                     dlg.after(100, poll)
                     return
-                status, models = result_box[0]
+                status, models, protocol, found = result_box[0]
                 if status == "ok":
-                    if not endpoint:
-                        ollama_v.set(polish.DEFAULT_OLLAMA_ENDPOINT)
+                    name = polish.runtime_name(found, protocol)
+                    # Fill the endpoint only if the field is STILL blank — the
+                    # scan takes a while and must never clobber a URL the user
+                    # typed in the meantime.
+                    if not endpoint and found and not ollama_v.get().strip():
+                        ollama_v.set(found)
                     polish_box.configure(values=models)
                     caption_box.configure(values=models)
-                    detect_v.set(
-                        f"✓ Ollama detected — {len(models)} model(s) available"
-                    )
+                    detect_v.set(f"✓ {name} detected — {len(models)} model(s) available")
                 elif status == "empty":
-                    detect_v.set(
-                        "Ollama is running but has no models — try:  ollama pull llama3.2"
+                    name = polish.runtime_name(found, protocol)
+                    hint = (
+                        "try:  ollama pull llama3.2"
+                        if protocol == "ollama"
+                        else "load a model in the app, then Detect again"
                     )
+                    detect_v.set(f"{name} is running but has no models — {hint}")
                 elif not auto:
-                    detect_v.set("No local AI found. Is Ollama running?")
+                    # Say what was actually probed: one typed endpoint, or
+                    # the well-known-port scan.
+                    if endpoint:
+                        detect_v.set("Nothing answered at that endpoint.")
+                    else:
+                        detect_v.set(
+                            f"No local AI found (checked the {polish.known_runtime_names()} ports)."
+                        )
 
             dlg.after(100, poll)
 

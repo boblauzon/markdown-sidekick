@@ -73,9 +73,11 @@ available inside the app via the **❓ Help** button.
   timestamped paragraphs
 - **Headless CLI** — `markdown-sidekick-cli convert *.pdf --split-chapters
   --quality` (or `MarkdownSidekick.exe --cli convert …`) for scripts and CI
-- **Optional local-LLM extras** (point Settings at an Ollama endpoint; off by
-  default, fully offline): artifact **polish** pass with a size guardrail, and
-  vision-model **alt-text captions** for extracted figures
+- **Optional local-LLM extras** (off by default, fully local): artifact
+  **polish** pass with a size guardrail, and vision-model **alt-text captions**
+  for extracted figures. Works with **Ollama, LM Studio, Jan, LocalAI** or any
+  OpenAI-compatible server — Settings → Local AI auto-detects whichever is
+  running and lists its models
 - **Copy** the Markdown to the clipboard, or hit the single **💾 Save Markdown…**
   button — one file gets a save dialog, a batch gets a folder (Copy/Save respect
   the Clean-output setting)
@@ -274,6 +276,13 @@ dist\MarkdownSidekick\MarkdownSidekick.exe --mcp   # standalone build
 
 > The server logs to **stderr** and keeps **stdout** clean for JSON-RPC (stray
 > library output is redirected), so the connection stays stable.
+
+## Feedback 🐛
+
+Found a bug or want a feature?
+**[Open an issue](https://github.com/boblauzon/markdown-sidekick/issues)** —
+there are templates for both, and conversion oddities (a PDF that cleans
+badly, a file that won't convert) are especially welcome.
 
 ## Support the project ☕
 
