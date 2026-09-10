@@ -12,4 +12,4 @@ labels: bug
 
 **If the row said `error`:** paste the "Technical details" text from the preview.
 
-**Version + how you run it** (e.g. "1.1.0 installer" / "portable zip" / "pip"):
+**Version + how you run it** (e.g. "1.1.1 installer" / "portable zip" / "pip"):
