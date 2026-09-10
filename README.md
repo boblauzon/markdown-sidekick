@@ -9,9 +9,9 @@ support development:
 
 <a href='https://ko-fi.com/O6K81ZYB9P' target='_blank'><img height='36' style='border:0px;height:36px;' src='https://storage.ko-fi.com/cdn/kofi6.png?v=6' border='0' alt='Buy Me a Coffee at ko-fi.com' /></a>
 
-![Markdown Sidekick](docs/screenshot.png)
+![Markdown Sidekick](https://raw.githubusercontent.com/boblauzon/markdown-sidekick/main/docs/screenshot.png)
 
-📖 **New here? Read the [User Guide](src/markdown_sidekick/USERGUIDE.md)** — also
+📖 **New here? Read the [User Guide](https://github.com/boblauzon/markdown-sidekick/blob/main/src/markdown_sidekick/USERGUIDE.md)** — also
 available inside the app via the **❓ Help** button.
 
 ## Features
@@ -276,6 +276,24 @@ dist\MarkdownSidekick\MarkdownSidekick.exe --mcp   # standalone build
 
 > The server logs to **stderr** and keeps **stdout** clean for JSON-RPC (stray
 > library output is redirected), so the connection stays stable.
+
+## Releasing (maintainers)
+
+1. Bump the version in `pyproject.toml`, `src/markdown_sidekick/__init__.py`
+   and `installer/MarkdownSidekick.iss`, then commit.
+2. Run `app.py --selftest` in the build venv (so RapidOCR's models are present),
+   build with `pyinstaller MarkdownSidekick.spec --noconfirm`, verify with
+   `dist\MarkdownSidekick\MarkdownSidekick.exe --selftest`, then compile the
+   installer with `ISCC.exe installer\MarkdownSidekick.iss`.
+3. Tag `vX.Y.Z`, push, and publish a GitHub Release with the zip, the Setup exe
+   and their `.sha256` files.
+4. Publishing the release triggers `.github/workflows/publish.yml`, which builds
+   the sdist/wheel and uploads them to PyPI via *trusted publishing* (no API
+   token). One-time setup: on PyPI, *Account settings → Publishing* → add a
+   pending publisher for project `markdown-sidekick`, owner `boblauzon`,
+   repository `markdown-sidekick`, workflow `publish.yml`, environment `pypi`;
+   on GitHub, *Settings → Environments* → create `pypi`. The workflow can also
+   be run by hand from the Actions tab against any tag.
 
 ## Feedback 🐛
 
