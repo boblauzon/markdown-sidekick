@@ -74,8 +74,10 @@ available inside the app via the **❓ Help** button.
 - **Headless CLI** — `markdown-sidekick-cli convert *.pdf --split-chapters
   --quality` (or `MarkdownSidekick.exe --cli convert …`) for scripts and CI
 - **Optional local-LLM extras** (off by default, fully local): artifact
-  **polish** pass with a size guardrail, and vision-model **alt-text captions**
-  for extracted figures. Works with **Ollama, LM Studio, Jan, LocalAI** or any
+  **polish** pass with a size guardrail, vision-model **alt-text captions**
+  for extracted figures, and a 2–3 sentence **document summary** written into
+  the saved front matter (so an AI can tell what a file is before loading all
+  of it). Works with **Ollama, LM Studio, Jan, LocalAI** or any
   OpenAI-compatible server — Settings → Local AI auto-detects whichever is
   running and lists its models
 - **Copy** the Markdown to the clipboard, or hit the single **💾 Save Markdown…**
@@ -171,7 +173,7 @@ You can also run it as a module:
 (or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick.exe --cli convert …`
 from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
 (AI-sized book folders — every part fits the platform's budget), `--quality`,
-`--anchors`, `--images`, `--polish`, `--no-clean`, `--no-front-matter`,
+`--anchors`, `--images`, `--polish`, `--summarize`, `--no-clean`, `--no-front-matter`,
 `--json`, `--out DIR`.
 
 ## How to use

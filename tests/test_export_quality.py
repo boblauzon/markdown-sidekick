@@ -231,3 +231,27 @@ class TestBinaryNoise:
         doc = ("A real paragraph of readable text. " * 50) + "wor�d s�pots\n"
         r = assess_markdown(doc)
         assert not r.binary_noise
+
+
+class TestSummaryInExport:
+    def test_single_file_gets_summary_field(self, tmp_path):
+        out = tmp_path / "doc.md"
+        export_single("# T\n\nbody\n", out, source="doc.pdf", summary="What it is: a test.")
+        text = out.read_text(encoding="utf-8")
+        assert 'summary: "What it is: a test."' in text  # colon forces quoting
+        assert text.index("summary:") < text.index("source:")
+
+    def test_blank_summary_leaves_no_field(self, tmp_path):
+        out = tmp_path / "doc.md"
+        export_single("# T\n\nbody\n", out, source="doc.pdf", summary="")
+        assert "summary" not in out.read_text(encoding="utf-8")
+
+    def test_book_carries_summary_in_parts_index_and_manifest(self, tmp_path):
+        res = export_book(_BOOK, tmp_path / "book", source="book.pdf", summary="A book about things.")
+        part = res.paths[1].read_text(encoding="utf-8")
+        assert "book_summary: A book about things." in part
+        assert "\nsummary:" not in part  # parts describe the book, not themselves
+        index = res.index_path.read_text(encoding="utf-8")
+        assert "\nA book about things.\n" in index
+        manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
+        assert manifest["summary"] == "A book about things."

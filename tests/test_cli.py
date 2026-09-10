@@ -96,3 +96,26 @@ class TestCapabilities:
         assert rc == 0
         info = json.loads(capsys.readouterr().out)
         assert "ocr" in info and "audio" in info
+
+
+class TestSummarize:
+    def test_summarize_flag_writes_front_matter_field(self, html_doc, tmp_path, monkeypatch):
+        from markdown_sidekick import polish
+        from markdown_sidekick.settings import Settings
+
+        monkeypatch.setattr(
+            cli.Settings, "load",
+            classmethod(lambda cls: Settings(ollama_endpoint="http://127.0.0.1:1", summary_model="m")),
+        )
+        monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: "Two chapters of filler.")
+        rc = cli.main(["convert", str(html_doc), "--out", str(tmp_path / "out"), "--summarize"])
+        assert rc == 0
+        text = (tmp_path / "out" / "sample.md").read_text(encoding="utf-8")
+        assert "summary: Two chapters of filler." in text
+
+    def test_no_flag_no_call(self, html_doc, tmp_path, monkeypatch):
+        from markdown_sidekick import polish
+
+        monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: pytest.fail("called"))
+        rc = cli.main(["convert", str(html_doc), "--out", str(tmp_path / "out")])
+        assert rc == 0

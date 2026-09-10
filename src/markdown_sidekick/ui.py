@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import queue
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -519,6 +520,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ollama_v = tk.StringVar(dlg, value=self.settings.ollama_endpoint)
         polish_v = tk.StringVar(dlg, value=self.settings.polish_model)
         caption_v = tk.StringVar(dlg, value=self.settings.caption_model)
+        summary_v = tk.StringVar(dlg, value=self.settings.summary_model)
         detect_v = tk.StringVar(dlg, value="")
 
         ttk.Label(
@@ -648,26 +650,32 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         )
         caption_box = ttk.Combobox(ai, textvariable=caption_v, width=22)
         caption_box.grid(row=4, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
+        ttk.Label(ai, text="Summary model", style="Panel.TLabel").grid(
+            row=5, column=0, sticky="w", pady=(4, 0)
+        )
+        summary_box = ttk.Combobox(ai, textvariable=summary_v, width=22)
+        summary_box.grid(row=5, column=1, sticky="w", padx=(12, 0), pady=(4, 0))
         ttk.Label(
             ai,
             text="Polish repairs residual artifacts; caption writes alt-text for\n"
-            "extracted figures. Blank model = that pass stays off.",
+            "extracted figures; summary adds a 2–3 sentence description to\n"
+            "saved front matter. Blank model = that pass stays off.",
             style="PanelMuted.TLabel",
             justify="left",
-        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
-        section(ai, "AI integration (MCP)", 6)
+        ).grid(row=6, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        section(ai, "AI integration (MCP)", 7)
         ttk.Button(
             ai,
             text="📋  Copy AI setup prompt",
             command=lambda: self.copy_mcp_prompt(parent=dlg),
-        ).grid(row=7, column=0, sticky="w")
+        ).grid(row=8, column=0, sticky="w")
         ttk.Label(
             ai,
             text="Paste it into Claude, Cursor, or any AI assistant\n"
             "to connect Markdown Sidekick as a converter tool.",
             style="PanelMuted.TLabel",
             justify="left",
-        ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(8, 0))
+        ).grid(row=8, column=1, columnspan=2, sticky="w", padx=(8, 0))
 
         def run_detect(auto: bool = False) -> None:
             """Probe Ollama on a worker thread and fill the model pickers.
@@ -705,6 +713,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                         ollama_v.set(found)
                     polish_box.configure(values=models)
                     caption_box.configure(values=models)
+                    summary_box.configure(values=models)
                     detect_v.set(f"✓ {name} detected — {len(models)} model(s) available")
                 elif status == "empty":
                     name = polish.runtime_name(found, protocol)
@@ -745,6 +754,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.settings.ollama_endpoint = ollama_v.get()
             self.settings.polish_model = polish_v.get()
             self.settings.caption_model = caption_v.get()
+            self.settings.summary_model = summary_v.get()
             self.settings.save()
             self._apply_settings()
             dlg.destroy()
@@ -1302,14 +1312,54 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         if not dest:
             return
         result = self.files.get(path)
+        summary = ""
+        if self.settings.export_front_matter:
+            summary = self._summarize_for_export(text, path.name)
         md_export.export_single(
             text,
             Path(dest),
             source=path.name,
             engine=result.engine if result else "",
             front_matter=self.settings.export_front_matter,
+            summary=summary,
         )
         self.status_var.set(f"Saved {Path(dest).name}.")
+
+    def _summarize_for_export(self, text: str, name: str) -> str:
+        """Document summary from the configured local AI, or "" when off/failed.
+
+        The request runs on a worker thread; this side only pumps Tk and
+        polls a plain list (the app's threading rule), so the window keeps
+        painting while a slow model thinks. The busy flag locks the action
+        buttons meanwhile so a stray click can't re-enter save.
+        """
+        endpoint, model = self.settings.ollama_endpoint, self.settings.summary_model
+        if not endpoint or not model:
+            return ""
+        from . import polish
+
+        box: list[str | None] = []
+        threading.Thread(
+            target=lambda: box.append(polish.summarize_markdown(text, endpoint, model)),
+            daemon=True,
+        ).start()
+        was_busy = self._busy
+        self._set_busy(True)
+        self.status_var.set(f"Summarizing {name} with {model}…")
+        self.configure(cursor="watch")
+        try:
+            while not box:
+                self.update()
+                time.sleep(0.05)
+        except tk.TclError:  # window closed mid-wait
+            return ""
+        finally:
+            try:
+                self.configure(cursor="")
+                self._set_busy(was_busy)
+            except tk.TclError:
+                pass
+        return box[0] or ""
 
     def _save_batch(self, converted: list[Path]) -> None:
         # Always show the dialog (pre-filled with the default folder) — silent
@@ -1351,6 +1401,11 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 figs = figures.extract_pdf_figures(path, book_dir / "assets")
                 if figs:
                     text = figures.insert_figure_links(text, figs)
+            # A book folder always has somewhere to put the summary (index +
+            # manifest); a single file only has its front matter.
+            summary = ""
+            if split or self.settings.export_front_matter:
+                summary = self._summarize_for_export(text, path.name)
             if split:
                 res = md_export.export_book(
                     text,
@@ -1360,6 +1415,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     front_matter=self.settings.export_front_matter,
                     max_tokens=max_tokens if style == "ai" else md_export.DEFAULT_MAX_TOKENS,
                     ai_sections=style == "ai",
+                    summary=summary,
                 )
                 saved += len(res.paths)
                 continue
@@ -1378,6 +1434,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 source=path.name,
                 engine=engine,
                 front_matter=self.settings.export_front_matter,
+                summary=summary,
             )
             saved += 1
         self.status_var.set(f"Saved {saved} Markdown file(s) to {out}.")

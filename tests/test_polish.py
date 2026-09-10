@@ -10,6 +10,12 @@ import pytest
 
 from markdown_sidekick import polish
 
+# Reply to a summary prompt (messy on purpose: reasoning tag, label, quotes).
+_DEFAULT_SUMMARY_REPLY = (
+    '<think>let me read</think>\n"Summary: This guide explains the widget '
+    'protocol.\nIt is aimed at integrators."'
+)
+
 
 class _MockOllama(http.server.BaseHTTPRequestHandler):
     """Configurable /api/generate responder."""
@@ -19,6 +25,7 @@ class _MockOllama(http.server.BaseHTTPRequestHandler):
     # /api/tags payload. The default is SHAPED (models list present): the
     # probe requires the shape, so an unshaped {} would read as not-Ollama.
     tags_payload: dict = {"models": []}
+    summary_response: str = _DEFAULT_SUMMARY_REPLY
 
     def do_GET(self):  # /api/tags probe
         self.send_response(200)
@@ -36,7 +43,9 @@ class _MockOllama(http.server.BaseHTTPRequestHandler):
             return
         prompt = payload["prompt"]
         chunk = prompt.split("\n\n", 1)[1] if "\n\n" in prompt else prompt
-        if type(self).behaviour == "truncate":
+        if prompt.startswith(polish._SUMMARY_PROMPT):
+            response = type(self).summary_response
+        elif type(self).behaviour == "truncate":
             response = "way too short"
         else:
             response = chunk.replace("garb led", "garbled")
@@ -57,6 +66,7 @@ def mock_server():
     _MockOllama.behaviour = "repair"
     _MockOllama.last_payload = None
     _MockOllama.tags_payload = {"models": []}
+    _MockOllama.summary_response = _DEFAULT_SUMMARY_REPLY
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
 
@@ -207,9 +217,11 @@ class _MockOpenAI(http.server.BaseHTTPRequestHandler):
         content = payload["messages"][0]["content"]
         text = content if isinstance(content, str) else content[0]["text"]
         chunk = text.split("\n\n", 1)[1] if "\n\n" in text else text
-        self._json(
-            {"choices": [{"message": {"content": chunk.replace("garb led", "garbled")}}]}
-        )
+        if text.startswith(polish._SUMMARY_PROMPT):
+            reply = "A short overview of the widget protocol for integrators."
+        else:
+            reply = chunk.replace("garb led", "garbled")
+        self._json({"choices": [{"message": {"content": reply}}]})
 
     def log_message(self, *args):
         pass
@@ -257,6 +269,10 @@ class TestOpenAICompatible:
         assert isinstance(content, list)
         assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
 
+    def test_summary_via_openai_dialect(self, mock_openai):
+        out = polish.summarize_markdown("# Widgets\n\nProtocol text.\n", mock_openai, "m")
+        assert out == "A short overview of the widget protocol for integrators."
+
     def test_runtime_names(self):
         assert polish.runtime_name("http://localhost:11434", "ollama") == "Ollama"
         assert polish.runtime_name("http://localhost:1234", "openai") == "LM Studio"
@@ -267,3 +283,65 @@ class TestOpenAICompatible:
             polish.runtime_name("http://gpubox:12345", "openai")
             == "OpenAI-compatible local AI"
         )
+
+
+class TestSummarize:
+    _DOC = "# Widget Protocol\n\nThis document describes the widget protocol.\n"
+
+    def test_reply_is_normalised_to_one_plain_line(self, mock_server):
+        out = polish.summarize_markdown(self._DOC, mock_server, "llama3.2")
+        # <think> block, "Summary:" label, wrapping quotes and the newline all go.
+        assert out == "This guide explains the widget protocol. It is aimed at integrators."
+        prompt = _MockOllama.last_payload["prompt"]
+        assert prompt.startswith(polish._SUMMARY_PROMPT)
+        assert "describes the widget protocol" in prompt
+
+    def test_only_the_document_head_is_sent(self, mock_server):
+        doc = self._DOC + ("A filler paragraph of prose.\n\n" * 2000) + "THE-TAIL-MARKER\n"
+        polish.summarize_markdown(doc, mock_server, "llama3.2")
+        prompt = _MockOllama.last_payload["prompt"]
+        assert "THE-TAIL-MARKER" not in prompt
+        assert len(prompt) < polish._SUMMARY_HEAD_CHARS * 2
+
+    def test_head_cut_waits_for_the_fence_to_close(self):
+        # A listing straddling the limit is kept whole, then the cut happens.
+        # (900 × 7 chars of prose sits under the limit; the fence carries the
+        # running size past it, and the cut waits for the closing fence.)
+        doc = ("prose\n\n" * 900) + "```python\n" + ("x = 1\n" * 1000) + "```\n\n" + "after\n"
+        head = polish._document_head(doc, limit=7_000)
+        assert head.count("```") == 2
+        assert "after" not in head
+
+    def test_oversize_fence_is_capped_and_closed(self):
+        # A single listing bigger than the backstop is truncated — but the
+        # head still ends with balanced fences.
+        doc = "intro\n\n```python\n" + ("x = 1\n" * 4000) + "```\n\nafter\n"
+        head = polish._document_head(doc)
+        assert len(head) <= polish._SUMMARY_HEAD_CHARS * 2 + 4
+        assert head.count("```") % 2 == 0
+
+    def test_overlong_reply_is_cut_at_a_sentence(self, mock_server):
+        _MockOllama.summary_response = "This sentence is padding for the test. " * 40
+        out = polish.summarize_markdown(self._DOC, mock_server, "llama3.2")
+        assert out is not None
+        assert len(out) <= polish._SUMMARY_MAX_CHARS
+        assert out.endswith(".")
+
+    def test_wall_of_text_without_sentences_is_rejected(self, mock_server):
+        _MockOllama.summary_response = "word " * 300
+        assert polish.summarize_markdown(self._DOC, mock_server, "llama3.2") is None
+
+    def test_fenced_or_empty_reply_is_rejected(self, mock_server):
+        _MockOllama.summary_response = "Here you go:\n```\nprint('hi')\n```\nand more ```"
+        assert polish.summarize_markdown(self._DOC, mock_server, "llama3.2") is None
+        _MockOllama.summary_response = "   "
+        assert polish.summarize_markdown(self._DOC, mock_server, "llama3.2") is None
+
+    def test_server_error_gives_none(self, mock_server):
+        _MockOllama.behaviour = "error"
+        assert polish.summarize_markdown(self._DOC, mock_server, "llama3.2") is None
+
+    def test_disabled_without_endpoint_or_model(self):
+        assert polish.summarize_markdown(self._DOC, "", "llama3.2") is None
+        assert polish.summarize_markdown(self._DOC, "http://127.0.0.1:1", "") is None
+        assert polish.summarize_markdown("   ", "http://127.0.0.1:1", "m") is None

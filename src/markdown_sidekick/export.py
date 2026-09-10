@@ -249,13 +249,19 @@ def export_single(
     source: str,
     engine: str = "",
     front_matter: bool = True,
+    summary: str = "",
 ) -> ExportResult:
-    """Write one decorated Markdown file."""
+    """Write one decorated Markdown file.
+
+    ``summary`` (optional, from the local-AI pass) becomes a ``summary:``
+    front-matter field; blank means the field is simply absent.
+    """
     content = markdown
     if front_matter:
         content = build_front_matter(
             {
                 "title": document_title(markdown, Path(source).stem),
+                "summary": summary,
                 "source": source,
                 "converted": date.today().isoformat(),
                 "converter": "Markdown Sidekick" + (f" ({engine})" if engine else ""),
@@ -276,6 +282,7 @@ def export_book(
     front_matter: bool = True,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     ai_sections: bool = False,
+    summary: str = "",
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -284,6 +291,10 @@ def export_book(
     fenced block can exceed the budget); otherwise splitting follows chapter
     structure only. Falls back to a single decorated file inside ``out_dir``
     when there is nothing to split.
+
+    A document-level ``summary`` lands in index.md, manifest.json, and each
+    part's front matter as ``book_summary`` (the parts describe the whole
+    book, not themselves).
     """
     stem = Path(source).stem
     title = document_title(markdown, stem)
@@ -299,6 +310,7 @@ def export_book(
             source=source,
             engine=engine,
             front_matter=front_matter,
+            summary=summary,
         )
 
     result = ExportResult()
@@ -317,6 +329,7 @@ def export_book(
                 {
                     "title": sec.title or title,
                     "book": title,
+                    "book_summary": summary,
                     "part": f"{n} of {total}",
                     "source": source,
                     "converted": date.today().isoformat(),
@@ -331,6 +344,8 @@ def export_book(
         )
 
     index_lines = [f"# {title}", "", f"Converted from **{source}** — {total} parts.", ""]
+    if summary:
+        index_lines += [summary, ""]
     for entry in manifest_files:
         index_lines.append(f"- [{entry['title'] or 'Front matter'}]({entry['file']})")
     result.index_path = out_dir / "index.md"
@@ -338,6 +353,7 @@ def export_book(
 
     manifest = {
         "title": title,
+        "summary": summary,
         "source": source,
         "engine": engine,
         "converted": date.today().isoformat(),

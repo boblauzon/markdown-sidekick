@@ -64,6 +64,7 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--anchors", action="store_true", help="insert <!-- page N --> markers in PDF conversions (citation grounding)")
     conv.add_argument("--images", action="store_true", help="extract PDF figures to an assets/ folder and link them")
     conv.add_argument("--polish", action="store_true", help="repair residual artifacts with the configured local AI (needs an endpoint + polish model in Settings > Local AI; Ollama or any OpenAI-compatible server)")
+    conv.add_argument("--summarize", action="store_true", help="write a 2-3 sentence document summary into the front matter using the configured local AI (needs an endpoint + summary model in Settings > Local AI)")
     conv.add_argument("--no-ocr", action="store_true", help="disable the OCR route")
     conv.add_argument("--no-audio", action="store_true", help="disable audio/video transcription")
     conv.add_argument("--whisper-model", default=None, help="whisper model size (tiny/base/small/medium)")
@@ -138,6 +139,19 @@ def _convert(args: argparse.Namespace) -> int:
             )
             record["polished_chunks"] = chunks_changed
 
+        summary = ""
+        if args.summarize and settings.ollama_endpoint and settings.summary_model:
+            from . import polish
+
+            print("    summarizing…", file=sys.stderr, flush=True)
+            summary = (
+                polish.summarize_markdown(
+                    markdown, settings.ollama_endpoint, settings.summary_model
+                )
+                or ""
+            )
+            record["summary"] = summary
+
         out_dir = args.out if args.out is not None else path.parent
         if (args.images or settings.extract_images) and path.suffix.lower() == ".pdf":
             from . import figures
@@ -170,6 +184,7 @@ def _convert(args: argparse.Namespace) -> int:
                     export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
                 ),
                 ai_sections=args.ai_target is not None,
+                summary=summary,
             )
             written = [str(p) for p in res.paths]
             if res.index_path:
@@ -184,6 +199,7 @@ def _convert(args: argparse.Namespace) -> int:
                 source=path.name,
                 engine=result.engine,
                 front_matter=not args.no_front_matter,
+                summary=summary,
             )
             written = [str(out_path)]
         record["written"] = written

@@ -11,6 +11,9 @@ available:
   truncates a chunk is ignored and the original kept.
 - :func:`caption_image` — ask a vision model for one-sentence alt text for an
   extracted figure, so AI readers see the diagram's content, not a bare link.
+- :func:`summarize_markdown` — ask a text model for a 2-3 sentence document
+  summary that export writes into the YAML front matter, so an AI (or a
+  person) can tell what a file is before loading all of it.
 
 Everything degrades silently: any network/model failure returns the input (or
 None for captions). Nothing here ever runs unless an endpoint is configured.
@@ -46,6 +49,18 @@ _POLISH_PROMPT = (
 _CAPTION_PROMPT = (
     "Describe this figure from a technical document in one factual sentence "
     "for use as image alt text. No preamble."
+)
+
+# Summaries see only the document's opening: title, preface and first chapter
+# carry what a summary needs, and a 500-page book would blow any context.
+_SUMMARY_HEAD_CHARS = 12_000
+_SUMMARY_MIN_CHARS = 20
+_SUMMARY_MAX_CHARS = 600
+_SUMMARY_PROMPT = (
+    "Summarize the following document excerpt in two or three plain sentences "
+    "(at most 60 words) for a reader deciding whether to open it: what it is "
+    "about, and who it is for. Write in the third person. No preamble, no "
+    "Markdown, no bullet points, no quotation marks. Return ONLY the summary.\n\n"
 )
 
 
@@ -320,3 +335,54 @@ def caption_image(image_path: str | Path, endpoint: str, model: str) -> str | No
     caption = " ".join(caption.split())
     # Alt text must stay a short single line.
     return caption[:300] if caption else None
+
+
+def _document_head(text: str, limit: int = _SUMMARY_HEAD_CHARS) -> str:
+    """The opening of the document, cut at a blank line outside any fence.
+
+    A document that opens with one enormous listing would defeat the
+    fence-safe cut, so a hard cap at twice the limit backstops it.
+    """
+    head = _split_chunks(text, limit)[0]
+    if len(head) > limit * 2:
+        head = head[: limit * 2].rsplit("\n", 1)[0]
+        if head.count("```") % 2:  # the cap landed inside a fence — close it
+            head += "\n```"
+    return head
+
+
+def _clean_summary(reply: str) -> str | None:
+    """Normalise a model reply to one plain line, or None when unusable."""
+    # Reasoning models (qwen3, deepseek-r1, …) prefix a <think> block.
+    reply = re.sub(r"<think>.*?</think>", "", reply, flags=re.S | re.I)
+    reply = re.sub(r"^\s*```[a-z]*\n(.*?)\n```\s*$", r"\1", reply, flags=re.S)
+    quotes = "\"'“”"
+    reply = " ".join(reply.split()).strip(quotes)
+    reply = re.sub(r"^(summary|tl;dr)\s*:\s*", "", reply, flags=re.I).strip(quotes)
+    if "```" in reply or len(reply) < _SUMMARY_MIN_CHARS:
+        return None
+    if len(reply) > _SUMMARY_MAX_CHARS:
+        # Keep whole sentences only; a summary with no boundary in budget is
+        # a wall of text, not a summary.
+        cut = max(reply.rfind(p, 0, _SUMMARY_MAX_CHARS) for p in (". ", "! ", "? "))
+        if cut < _SUMMARY_MIN_CHARS:
+            return None
+        reply = reply[: cut + 1]
+    return reply
+
+
+def summarize_markdown(text: str, endpoint: str, model: str) -> str | None:
+    """A 2-3 sentence document summary for export front matter, or None.
+
+    Only the opening of the document is sent (see :func:`_document_head`).
+    The reply is normalised to a single plain line and rejected when it is
+    empty, still contains Markdown fences, or overruns the size cap without a
+    sentence boundary — a bad summary is worse than none, so the caller
+    simply omits the field.
+    """
+    if not endpoint or not model or not text.strip():
+        return None
+    reply = _generate(endpoint, model, _SUMMARY_PROMPT + _document_head(text))
+    if reply is None:
+        return None
+    return _clean_summary(reply)

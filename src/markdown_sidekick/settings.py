@@ -59,6 +59,7 @@ class Settings:
     ollama_endpoint: str = ""  # e.g. http://localhost:11434
     polish_model: str = ""  # e.g. llama3.2 — repairs residual artifacts
     caption_model: str = ""  # e.g. llava — alt-text for extracted figures
+    summary_model: str = ""  # e.g. llama3.2 — 2-3 sentence summary in front matter
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -113,3 +114,4 @@ class Settings:
         self.ollama_endpoint = str(self.ollama_endpoint or "").strip().rstrip("/")
         self.polish_model = str(self.polish_model or "").strip()
         self.caption_model = str(self.caption_model or "").strip()
+        self.summary_model = str(self.summary_model or "").strip()

@@ -45,3 +45,14 @@ class TestValidation:
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
         _write_settings(tmp_path, {"export_style": "everything"})
         assert Settings.load().export_style == "single"
+
+
+class TestLocalAIModels:
+    def test_summary_model_round_trips_and_tolerates_junk(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        _write_settings(tmp_path, {"summary_model": "  llama3.2 "})
+        assert Settings.load().summary_model == "llama3.2"
+        _write_settings(tmp_path, {"summary_model": None})
+        assert Settings.load().summary_model == ""
+        _write_settings(tmp_path, {"summary_model": 42})
+        assert Settings.load().summary_model == "42"

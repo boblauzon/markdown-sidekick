@@ -193,7 +193,7 @@ Settings are grouped into three tabs — **Conversion**, **Output**, and
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | Embedded images land in an assets/ folder with links |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
-| Local AI | Polish / caption model | Optional local-LLM artifact repair and figure alt-text (blank = off) |
+| Local AI | Polish / caption / summary model | Optional local-LLM passes: artifact repair, figure alt-text, and a 2–3 sentence document summary written into the saved file's front matter (blank = that pass is off) |
 
 Everything on the Local AI tab talks only to your own machine — detection
 probes localhost and never calls out to the internet.
