@@ -71,6 +71,7 @@ def _get_engine() -> ConversionEngine:
             whisper_model=s.whisper_model,
             mineru_endpoint=s.mineru_endpoint,
             page_anchors=s.page_anchors,
+            pdf_layout=s.pdf_layout,
         )
     return _engine
 
@@ -280,12 +281,13 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
 @mcp.tool
 def list_capabilities() -> dict:
     """Report which local conversion engines are available in this install."""
-    from . import audio, mineru, ocr
+    from . import audio, mineru, ocr, pdflayout
 
     s = Settings.load()
     return {
         "image_ocr": ocr.ocr_available(),
         "pdf_ocr": ocr.pdf_ocr_available(),
+        "pdf_layout": pdflayout.layout_available() and s.pdf_layout,
         "audio_transcription": audio.audio_available(),
         "mineru_endpoint": mineru.mineru_configured(s.mineru_endpoint),
         "whisper_model": s.whisper_model,

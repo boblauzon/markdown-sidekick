@@ -22,7 +22,23 @@ available inside the app via the **❓ Help** button.
 - **Live Markdown preview** of each converted file, with a **Rendered** toggle that
   styles headings, bold/italic, lists, tables, links and fenced code — or switch to
   raw Markdown
-- **Clean output** pass (on by default) that tidies the raw markitdown text:
+- **Column-aware PDF reading** (on by default) — digital PDFs are read by their
+  page geometry with [pypdfium2](https://github.com/pypdfium2-team/pypdfium2), not
+  as a text stream:
+  - multi-column pages are read column by column (never sliced across columns
+    into tables); margin notes follow the text they annotate; real numeric
+    tables stay Markdown tables
+  - text outside the PDF's **TrimBox** — InDesign slugs, job tickets, crop-mark
+    labels, the facing page of a spread — is dropped at the source
+  - drop-shadow / fake-bold type drawn twice is read once (no "DDrraawwiinngg")
+  - the PDF's **bookmarks become `#`/`##` headings**, so chapter export splits
+    on the book's real chapters (cover/copyright/contents become front matter)
+  - fixed-width text becomes fenced code with its indentation intact; running
+    headers and page numbers are removed geometrically; hyphenated line breaks
+    and unmapped ligatures are repaired against the document's own vocabulary
+- **Clean output** pass (on by default) that tidies the raw converted text:
+  - removes printer's marks (InDesign `.indd` stamps, job tickets, DTP tags)
+    and repairs doubled shadow text in any conversion
   - normalizes PDF ligatures (ﬁ→fi), soft hyphens, and replacement-char runs
   - strips leaked page numbers (arabic + roman) and recurring running-headers
   - removes Table-of-Contents / index blocks in *any* form — scrambled tables,
@@ -43,8 +59,9 @@ available inside the app via the **❓ Help** button.
 - **Local OCR pipeline** (on by default) for content markitdown can't read:
   - **images** (PNG/JPG/BMP/TIFF/WEBP) are run through OCR to extract their text
   - **scanned / image-only PDFs** are auto-detected and OCR'd page-by-page, while
-    digital PDFs stay on the faster markitdown path (smart routing)
-  - each file shows which engine produced it (`markitdown` / `ocr` / `ocr+text`)
+    digital pages keep their text layer (smart routing)
+  - each file shows which engine produced it (`pdflayout` / `markitdown` / `ocr` /
+    `ocr+text`)
   - fully **local** — powered by [RapidOCR](https://github.com/RapidAI/RapidOCR)
     (ONNX, Apache-2.0, no cloud); runs on your **GPU via DirectML** when one is
     present (any DX12 card — AMD/NVIDIA/Intel, measured ~5x faster) with
@@ -58,15 +75,18 @@ available inside the app via the **❓ Help** button.
   and PDFs route to it for layout-aware Markdown, with automatic fallback to the
   built-in OCR / markitdown pipeline if it's unreachable
 - **AI-friendly export** (Settings → *AI-friendly export*):
-  - **YAML front matter** on saved files (title, source, date, token estimate)
+  - **YAML front matter** on saved files (title, author, source, date, token
+    and image counts; title/author come from the PDF itself when trustworthy)
   - **Export bar** in the main window: choose *One Markdown file*, *Chapter
     files* (book folder with `index.md` + `manifest.json`), or **AI-sized
     sections** with an *Optimize for* picker (Claude / ChatGPT / Gemini /
     Local LLM) that guarantees every part fits that platform's context window
   - **Page anchors** — optional `<!-- page N -->` markers in PDF conversions so
     AI answers can cite the printed page
-  - **Figure extraction** — pull embedded PDF images into an `assets/` folder
-    with `![Figure]` links (de-duplicated, icons filtered out)
+  - **Figure extraction** (on by default) — embedded PDF images of at least
+    120 px land in an `images/` folder, each linked **where it sits in the
+    text** (`![Figure 12.1](images/fig_p12_1.jpg)`); JPEGs are copied without
+    re-encoding, repeated logos and off-page images are skipped
   - **Quality score** beside the preview (structure, artifacts, ~token count)
 - **Video transcription** — MP4/MKV/MOV/WEBM/AVI route through the same local
   Whisper pipeline (PyAV decodes the audio track); transcripts are grouped into
@@ -77,7 +97,8 @@ available inside the app via the **❓ Help** button.
   **polish** pass with a size guardrail, vision-model **alt-text captions**
   for extracted figures, and a 2–3 sentence **document summary** written into
   the saved front matter (so an AI can tell what a file is before loading all
-  of it). Works with **Ollama, LM Studio, Jan, LocalAI** or any
+  of it) — requested as structured JSON from the book's outline and
+  introduction, with refusals and chatty replies rejected rather than saved. Works with **Ollama, LM Studio, Jan, LocalAI** or any
   OpenAI-compatible server — Settings → Local AI auto-detects whichever is
   running and lists its models
 - **Copy** the Markdown to the clipboard, or hit the single **💾 Save Markdown…**
@@ -173,8 +194,8 @@ You can also run it as a module:
 (or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick.exe --cli convert …`
 from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
 (AI-sized book folders — every part fits the platform's budget), `--quality`,
-`--anchors`, `--images`, `--polish`, `--summarize`, `--no-clean`, `--no-front-matter`,
-`--json`, `--out DIR`.
+`--anchors`, `--images` / `--no-images`, `--no-layout`, `--polish`, `--summarize`,
+`--no-clean`, `--no-front-matter`, `--json`, `--out DIR`.
 
 ## How to use
 
@@ -199,7 +220,9 @@ Markdown_Sidekick/
 │  └─ markdown_sidekick/
 │     ├─ __init__.py
 │     ├─ __main__.py            # python -m markdown_sidekick
-│     ├─ converter.py           # markitdown wrapper + OCR routing (UI-agnostic)
+│     ├─ converter.py           # engine routing: layout / markitdown / OCR (UI-agnostic)
+│     ├─ pdflayout.py           # column-aware digital-PDF reader (pypdfium2)
+│     ├─ figures.py             # PDF figure extraction + in-place links
 │     ├─ cleanup.py             # post-conversion cleanup passes (UI-agnostic)
 │     ├─ ocr.py                 # local OCR engine + PDF triage (UI-agnostic)
 │     ├─ audio.py               # local audio transcription (faster-whisper)
@@ -223,7 +246,7 @@ it can be reused from scripts or tests independently of Tkinter.
 - **OCR routing**: a PDF is sent to the OCR pipeline only when a meaningful share of
   its pages look scanned (little/no text layer + a page-dominating image). A single
   full-page figure in an otherwise digital book won't drag the whole document onto the
-  slower OCR path. Untick **OCR images & scanned PDFs** to force the markitdown path.
+  slower OCR path. Untick **OCR images & scanned PDFs** to skip OCR entirely.
 - **OCR performance**: OCR runs on the CPU, roughly 1–3 s per page; large scanned PDFs
   show per-page progress in the status bar. The OCR model loads on first use (~1 s).
 - **Audio transcription** needs no system `ffmpeg` — `faster-whisper`'s PyAV wheels

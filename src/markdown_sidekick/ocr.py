@@ -201,6 +201,15 @@ class OcrEngine:
         # txts follow RapidOCR's reading order.
         return "\n".join(result.txts)
 
+    def ocr_page(self, page) -> str:
+        """Render one pypdfium2 page and return its recognised text."""
+        bitmap = page.render(scale=self.render_scale)
+        try:
+            pil = bitmap.to_pil().convert("RGB")
+        finally:
+            bitmap.close()  # free the native render buffer
+        return self._recognise(np.asarray(pil)).strip()
+
     def image_to_markdown(self, path: str | Path) -> str:
         source = Path(path)
         body = self._recognise(str(source)).strip()
@@ -257,12 +266,7 @@ class OcrEngine:
                 page = pdf[i]
                 try:
                     if i in scanned:
-                        bitmap = page.render(scale=self.render_scale)
-                        try:
-                            pil = bitmap.to_pil().convert("RGB")
-                        finally:
-                            bitmap.close()  # free the native render buffer
-                        text = self._recognise(np.asarray(pil)).strip()
+                        text = self.ocr_page(page)
                         tag = "ocr"
                     else:
                         textpage = page.get_textpage()

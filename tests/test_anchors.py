@@ -37,15 +37,32 @@ class TestPdfTextAnchors:
         assert "Page one says hello" in md
         assert md.index("page 1") < md.index("Page one") < md.index("page 2")
 
-    def test_converter_routes_to_pdftext_when_enabled(self, two_page_pdf):
+    def test_layout_engine_emits_anchors_when_enabled(self, two_page_pdf):
         engine = ConversionEngine(enable_ocr=False, enable_audio=False, page_anchors=True)
+        result = engine.convert_file(two_page_pdf)
+        assert result.ok
+        assert result.engine == "pdflayout"
+        assert "<!-- page 2 -->" in result.markdown
+        assert result.markdown.index("<!-- page 2 -->") > result.markdown.index("Page one")
+
+    def test_layout_engine_omits_anchors_by_default(self, two_page_pdf):
+        engine = ConversionEngine(enable_ocr=False, enable_audio=False)
+        result = engine.convert_file(two_page_pdf)
+        assert result.ok
+        assert result.engine == "pdflayout"
+        assert "<!-- page" not in result.markdown
+
+    def test_layout_off_routes_anchors_to_pdftext(self, two_page_pdf):
+        engine = ConversionEngine(
+            enable_ocr=False, enable_audio=False, page_anchors=True, pdf_layout=False
+        )
         result = engine.convert_file(two_page_pdf)
         assert result.ok
         assert result.engine == "pdftext"
         assert "<!-- page 2 -->" in result.markdown
 
-    def test_converter_default_stays_markitdown(self, two_page_pdf):
-        engine = ConversionEngine(enable_ocr=False, enable_audio=False)
+    def test_layout_off_default_stays_markitdown(self, two_page_pdf):
+        engine = ConversionEngine(enable_ocr=False, enable_audio=False, pdf_layout=False)
         result = engine.convert_file(two_page_pdf)
         assert result.ok
         assert result.engine == "markitdown"

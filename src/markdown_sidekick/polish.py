@@ -24,6 +24,7 @@ from __future__ import annotations
 import base64
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -31,6 +32,9 @@ from pathlib import Path
 from typing import Callable
 
 _TIMEOUT_S = 180
+# A structured-output request failing faster than this was rejected by the
+# server (worth a plain-text retry); slower, it timed out.
+_SCHEMA_REJECT_S = 30
 _CHUNK_TARGET_CHARS = 8_000
 # Guardrail: a repaired chunk must stay close in size to the original —
 # a big delta means the model summarised, expanded, or truncated.
@@ -51,16 +55,61 @@ _CAPTION_PROMPT = (
     "for use as image alt text. No preamble."
 )
 
-# Summaries see only the document's opening: title, preface and first chapter
-# carry what a summary needs, and a 500-page book would blow any context.
+# Summaries see a curated view of the document, never the whole of it: the
+# title, the section outline, and an excerpt starting at the introduction
+# (a book's first pages are cover, copyright and contents — a model shown
+# only those answers "this appears to be a table of contents…").
 _SUMMARY_HEAD_CHARS = 12_000
-_SUMMARY_MIN_CHARS = 20
+_SUMMARY_OUTLINE_CHARS = 2_500
+_SUMMARY_MIN_CHARS = 40
 _SUMMARY_MAX_CHARS = 600
 _SUMMARY_PROMPT = (
-    "Summarize the following document excerpt in two or three plain sentences "
+    "Summarize the document described below in two or three plain sentences "
     "(at most 60 words) for a reader deciding whether to open it: what it is "
     "about, and who it is for. Write in the third person. No preamble, no "
-    "Markdown, no bullet points, no quotation marks. Return ONLY the summary.\n\n"
+    "Markdown, no bullet points, no quotation marks. Describe the work itself, "
+    "not the excerpt, and ignore printing or production marks. Respond with "
+    'JSON: {"summary": "...", "insufficient_content": false}. Only if the '
+    "material says nothing about what the document is, set "
+    '"insufficient_content" to true and leave "summary" empty.\n\n'
+)
+# Structured output: the model gets an explicit way to say "can't summarise"
+# instead of writing that into the summary field.
+_SUMMARY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "summary": {"type": "string"},
+        "insufficient_content": {"type": "boolean"},
+    },
+    "required": ["summary", "insufficient_content"],
+    "additionalProperties": False,
+}
+# A summary is third-person description; conversational replies, refusals and
+# meta-commentary about "the provided text" are rejected outright — a bad
+# summary in front matter is worse than none.
+_REFUSAL_RE = re.compile(
+    r"\bI(?:'m|’m|'ve|’ve|'ll|’ll|'d|’d)?\s+(?:am|can|cannot|can't|can’t|could|would|will|have|"
+    r"need|see|notice|apologi[sz]e|don't|don’t|do|happy|glad|unable|sorry|think|believe|hope)\b"
+    r"|\b(?:I'm|I’m)\b"
+    # Phrasings only — "language model" or "table of contents" alone are
+    # legitimate subjects (a book about LLMs; a reference book's layout).
+    r"|\bas (?:an? )?(?:AI|artificial intelligence|(?:large )?language model)\b"
+    r"|\bthe (?:provided|given|supplied) (?:text|excerpt|document|content|snippet|material)\b"
+    r"|\b(?:this|the) (?:snippet|excerpt|text) (?:appears|seems|is not|isn't|does not|doesn't)\b"
+    r"|\bsnippet\b|\bno (?:main|substantive|coherent|meaningful|actual) (?:content|text)\b"
+    r"|\b(?:provide|share|give me|send) (?:more|additional|further) (?:context|information|text|details)\b"
+    r"|\bif you (?:can|could|would) (?:provide|share|clarify|specify)\b|\bplease (?:provide|share|clarify)\b"
+    r"|\blet me know\b|\bhappy to help\b|\bglad to help\b|\bhere(?:'s| is) (?:a|the|your) summary\b"
+    r"|\b(?:table of )?contents page\b|\b(?:appears|seems) to be (?:a|the) table of contents\b"
+    # Echoed printer's slugs (a model once named the typesetter "Ray" as the
+    # author). "prepress"/"DTP" stay allowed: design books are ABOUT them.
+    r"|\.indd\b|\bJob(?: No\.?)?:\s*\d|\(Ray\)",
+    re.IGNORECASE,
+)
+_INTRO_HEADING_RE = re.compile(
+    r"^#{1,2}\s+.*\b(?:introduction|preface|foreword|overview|about this book|"
+    r"how to use|who this book is for|getting started)\b",
+    re.IGNORECASE,
 )
 
 
@@ -222,17 +271,22 @@ def _generate(
     prompt: str,
     images: list[str] | None = None,
     protocol: str | None = None,
+    schema: dict | None = None,
 ) -> str | None:
     """Generate via whichever protocol the endpoint speaks.
 
     Callers doing many generations resolve the protocol once and pass it in;
-    left None, it is resolved fresh (never cached across calls)."""
+    left None, it is resolved fresh (never cached across calls). ``schema``
+    requests structured JSON output (Ollama ``format`` / OpenAI
+    ``response_format``)."""
     endpoint = endpoint.rstrip("/")
     if (protocol or _resolve_protocol(endpoint)) == "openai":
-        return _generate_openai(endpoint, model, prompt, images)
+        return _generate_openai(endpoint, model, prompt, images, schema)
     payload: dict = {"model": model, "prompt": prompt, "stream": False}
     if images:
         payload["images"] = images
+    if schema:
+        payload["format"] = schema
     data = _post_json(f"{endpoint}/api/generate", payload)
     if not data:
         return None
@@ -241,7 +295,11 @@ def _generate(
 
 
 def _generate_openai(
-    endpoint: str, model: str, prompt: str, images: list[str] | None = None
+    endpoint: str,
+    model: str,
+    prompt: str,
+    images: list[str] | None = None,
+    schema: dict | None = None,
 ) -> str | None:
     """OpenAI-compatible /v1/chat/completions (LM Studio, Jan, LocalAI, …)."""
     if images:
@@ -251,10 +309,17 @@ def _generate_openai(
         ]
     else:
         content = prompt
-    data = _post_json(
-        f"{endpoint}/v1/chat/completions",
-        {"model": model, "messages": [{"role": "user", "content": content}], "stream": False},
-    )
+    payload: dict = {
+        "model": model,
+        "messages": [{"role": "user", "content": content}],
+        "stream": False,
+    }
+    if schema:
+        payload["response_format"] = {
+            "type": "json_schema",
+            "json_schema": {"name": "result", "schema": schema, "strict": True},
+        }
+    data = _post_json(f"{endpoint}/v1/chat/completions", payload)
     if not data:
         return None
     try:
@@ -351,6 +416,25 @@ def _document_head(text: str, limit: int = _SUMMARY_HEAD_CHARS) -> str:
     return head
 
 
+def _unwrap_json_summary(reply: str) -> str | None:
+    """The summary from a structured (JSON) reply; None when the model
+    declared the material insufficient. A reply that isn't the expected JSON
+    object is returned unchanged for the plain-text guardrails."""
+    body = re.sub(r"<think>.*?</think>", "", reply, flags=re.S | re.I).strip()
+    body = re.sub(r"^```(?:json)?\s*\n?(.*?)\n?```$", r"\1", body, flags=re.S).strip()
+    if not body.startswith("{"):
+        return reply
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return reply
+    if not isinstance(data, dict) or not isinstance(data.get("summary"), str):
+        return reply
+    if data.get("insufficient_content") is True:
+        return None
+    return data["summary"]
+
+
 def _clean_summary(reply: str) -> str | None:
     """Normalise a model reply to one plain line, or None when unusable."""
     # Reasoning models (qwen3, deepseek-r1, …) prefix a <think> block.
@@ -361,6 +445,8 @@ def _clean_summary(reply: str) -> str | None:
     reply = re.sub(r"^(summary|tl;dr)\s*:\s*", "", reply, flags=re.I).strip(quotes)
     if "```" in reply or len(reply) < _SUMMARY_MIN_CHARS:
         return None
+    if _REFUSAL_RE.search(reply):
+        return None  # a refusal or chat, not a description of the document
     if len(reply) > _SUMMARY_MAX_CHARS:
         # Keep whole sentences only; a summary with no boundary in budget is
         # a wall of text, not a summary.
@@ -371,18 +457,65 @@ def _clean_summary(reply: str) -> str | None:
     return reply
 
 
-def summarize_markdown(text: str, endpoint: str, model: str) -> str | None:
+def _summary_source(text: str, title: str = "") -> str:
+    """The curated view of a document that a summary is written from:
+    title, section outline, and an excerpt starting at the introduction."""
+    text = re.sub(r"<!--.*?-->", "", text, flags=re.S)  # anchors, figure markers
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)  # image links
+    lines = text.split("\n")
+    headings: list[tuple[int, str]] = []
+    in_fence = False
+    for i, line in enumerate(lines):
+        if line.lstrip().startswith("```"):
+            in_fence = not in_fence
+        elif not in_fence and re.match(r"^#{1,2}\s+\S", line):
+            headings.append((i, line.lstrip("#").strip()))
+    start = 0
+    intro = next((i for i, _t in headings if _INTRO_HEADING_RE.match(lines[i])), None)
+    if intro is not None:
+        start = intro
+    elif headings:
+        start = headings[0][0]
+    parts: list[str] = []
+    if title:
+        parts.append(f"Title: {title}")
+    if len(headings) > 1:
+        outline, size = [], 0
+        for _i, heading in headings:
+            size += len(heading) + 2
+            if size > _SUMMARY_OUTLINE_CHARS:
+                break
+            outline.append(heading)
+        parts.append("Sections: " + "; ".join(outline))
+    parts.append("Excerpt:\n" + _document_head("\n".join(lines[start:])))
+    return "\n\n".join(parts)
+
+
+def summarize_markdown(text: str, endpoint: str, model: str, title: str = "") -> str | None:
     """A 2-3 sentence document summary for export front matter, or None.
 
-    Only the opening of the document is sent (see :func:`_document_head`).
-    The reply is normalised to a single plain line and rejected when it is
-    empty, still contains Markdown fences, or overruns the size cap without a
+    The model sees a curated view (see :func:`_summary_source`) and is asked
+    for JSON with an explicit "insufficient content" flag; a server that
+    rejects structured output is asked again in plain text. The reply is
+    normalised to a single plain line and rejected when it is empty, still
+    contains Markdown fences, reads as a refusal or chat ("I'm happy to
+    help…"), echoes prepress marks, or overruns the size cap without a
     sentence boundary — a bad summary is worse than none, so the caller
     simply omits the field.
     """
     if not endpoint or not model or not text.strip():
         return None
-    reply = _generate(endpoint, model, _SUMMARY_PROMPT + _document_head(text))
+    protocol = _resolve_protocol(endpoint)
+    prompt = _SUMMARY_PROMPT + _summary_source(text, title)
+    started = time.monotonic()
+    reply = _generate(endpoint, model, prompt, protocol=protocol, schema=_SUMMARY_SCHEMA)
+    # A server without structured-output support rejects the request at
+    # once; a slow failure is a timeout, and retrying would double the wait.
+    if reply is None and time.monotonic() - started < _SCHEMA_REJECT_S:
+        reply = _generate(endpoint, model, prompt, protocol=protocol)
+    if reply is None:
+        return None
+    reply = _unwrap_json_summary(reply)
     if reply is None:
         return None
     return _clean_summary(reply)

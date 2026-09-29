@@ -9,6 +9,7 @@ from markdown_sidekick.cleanup import (
     CleanupStats,
     clean_markdown,
     fence_code_blocks,
+    fix_shadow_text,
     join_wrapped_lines,
     normalize_bullets,
     normalize_characters,
@@ -16,6 +17,7 @@ from markdown_sidekick.cleanup import (
     repair_fences,
     strip_page_noise,
     strip_plain_toc,
+    strip_prepress,
     strip_repeated_blocks,
     _guess_language,
     _harvest_section_titles,
@@ -47,6 +49,122 @@ class TestNormalizeCharacters:
         # A lone replacement char marks one lost character — kept.
         out = _clean("wo�d\n")
         assert "wo�d" in out
+
+    def test_pdfminer_cid_placeholders_removed(self):
+        stats = CleanupStats()
+        out = normalize_characters("Gra(cid:16)hic (cid:3)\n", stats)
+        assert "(cid:" not in out
+        assert stats.chars_normalized == 2
+
+
+# ---------------------------------------------------------------------------
+# doubled "shadow" text (Quarto design-book corpus)
+# ---------------------------------------------------------------------------
+class TestShadowText:
+    def test_doubled_title_lines_repaired(self):
+        stats = CleanupStats()
+        text = "DDrraawwiinngg CCoommiiccss LLaabb\nCChhaarraacctteerrss,, PPaanneellss,,\n"
+        out = fix_shadow_text(text, stats)
+        assert out == "Drawing Comics Lab\nCharacters, Panels,\n"
+        assert stats.shadow_words_fixed == 5
+
+    def test_lone_doubled_word_and_quadruple_layers(self):
+        assert fix_shadow_text("MMaakkiinngg\n", CleanupStats()) == "Making\n"
+        out = fix_shadow_text("JJJJoooobbbb::::00003333 TTTTiiiittttlllleeee\n", CleanupStats())
+        assert out == "Job:03 Title\n"
+
+    def test_doubled_run_inside_a_normal_line(self):
+        out = fix_shadow_text("see page 4 JJoobb::0033--770000006655 TTiittllee::RRPP here\n", CleanupStats())
+        assert out == "see page 4 Job:03-700065 Title:RP here\n"
+
+    def test_real_words_and_numbers_untouched(self):
+        text = "The bookkeeper saw 1100 committees in 2200 BC. Aaron sees Mississippi.\n"
+        assert fix_shadow_text(text, CleanupStats()) == text
+
+    def test_genuinely_doubled_tokens_untouched(self):
+        # Placeholders and sequences are doubled on purpose (review finding:
+        # "XXXX XXXX" once became "XX XX", "AATT CCGG" became "AT CG").
+        text = "Bookkeeping codes XXXX XXXX XXXX 1234 and primers AATT CCGG AACCGGTT.\n"
+        assert fix_shadow_text(text, CleanupStats()) == text
+
+    def test_short_doubled_words_repaired_in_company(self):
+        assert fix_shadow_text("tthhee GG rriidd\n", CleanupStats()) == "the G rid\n"
+
+    def test_fenced_code_untouched(self):
+        text = "```\nxx = 'aabbccdd' 'eeffgghh'\n```\n"
+        assert fix_shadow_text(text, CleanupStats()) == text
+
+
+# ---------------------------------------------------------------------------
+# prepress slugs (InDesign file stamps, job tickets, DTP tags)
+# ---------------------------------------------------------------------------
+class TestPrepress:
+    _SLUGS = (
+        "700065 - MakingBreakingGrid2ndED_001-077.indd 1 3/23/17 5:23 PM\n"
+        "Real paragraph text survives.\n"
+        "Job No: 05-30592 Title: RP-Graphic Design Reference & Specification\n"
+        "#175 DTP: 216 Page: 4 (RAY)(Text)\n"
+        "Drawing In Black & White_001-144_11520 C2.indd 19 20/8/16 14:37\n"
+    )
+
+    def test_slug_lines_removed(self):
+        stats = CleanupStats()
+        out = strip_prepress(self._SLUGS, stats)
+        assert out == "Real paragraph text survives.\n"
+        assert stats.prepress_removed >= 5
+
+    def test_real_text_on_a_slug_line_is_kept(self):
+        text = (
+            "MAKING AND BREAKING THE GRID 700065 - Grid2ndED_001-077.indd 44 3/23/17 5:23 PM\n"
+            "018-035_28824.indd 22 7/31/12 2:01 PM\n"
+        )
+        out = strip_prepress(text, CleanupStats())
+        assert out == "MAKING AND BREAKING THE GRID\n"
+
+    def test_table_rows_are_cleaned_not_mangled(self):
+        text = (
+            "001-007_30592.indd 1 5/13/13 3:37 PM\n"
+            "| Measure | P 186C(RAY)(Text) | #175 DTP: 216 Page: 8 |\n"
+            "| mm | points | picas |\n"
+        )
+        out = strip_prepress(text, CleanupStats())
+        assert out.split("\n") == ["| Measure |  |  |", "| mm | points | picas |", ""]
+
+    def test_code_and_prose_mentions_survive_in_a_stamped_document(self):
+        # Review findings: "(text)" arguments were stripped from unfenced
+        # code, and prose mentioning a .indd file lost its first half.
+        text = (
+            "700065 - Grid_001-077.indd 1 3/23/17 5:23 PM\n"
+            "def show(text):\n"
+            "    print(text)\n"
+            "    return len(text)\n"
+            "Designers who use the master_page approach save grid.indd 2 times before printing it.\n"
+        )
+        out = strip_prepress(text, CleanupStats())
+        assert out == (
+            "def show(text):\n"
+            "    print(text)\n"
+            "    return len(text)\n"
+            "Designers who use the master_page approach save grid.indd 2 times before printing it.\n"
+        )
+
+    def test_undated_stamp_alone_on_its_line_is_removed(self):
+        text = "Body.\n9780760383186 - Logos that Last_front_endpaper.indd 9\nUPOD p001-032_.indd   21\nMore.\n"
+        assert strip_prepress(text, CleanupStats()) == "Body.\nMore.\n"
+
+    def test_documents_without_strong_markers_untouched(self):
+        # A single weak marker is not proof of a print proof.
+        text = "The (Text) variable holds the Job: 12 Title: field.\n"
+        assert strip_prepress(text, CleanupStats()) == text
+
+    def test_doubled_ticket_removed_end_to_end(self):
+        text = (
+            "001-017_28824.indd 2 7/31/12 10:48 AM\n"
+            "((FFooggrraa 2299))WWFF JJoobb::0077--2288882244 TTiittllee::RRPP--DDrraawwiinngg\n"
+            "Body.\n"
+        )
+        out = _clean(text)
+        assert out == "Body.\n"
 
 
 # ---------------------------------------------------------------------------

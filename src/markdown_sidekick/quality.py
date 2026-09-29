@@ -58,6 +58,13 @@ _BULLET_CHAR_RE = re.compile(r"^\s*•\s+\S", re.M)
 _HEADING_RE = re.compile(r"^#{1,6}\s+\S", re.M)
 _FENCE_RE = re.compile(r"^\s*```(\w*)\s*$", re.M)
 _LONG_LINE_HARD_WRAP_RE = re.compile(r"^.{60,90}[a-z,]\n[a-z]", re.M)
+# Printer's slug text that leaked from outside a PDF's trim box.
+_PREPRESS_RE = re.compile(
+    r"\.indd\b|\bJob(?:\s*No\.?)?\s*:\s*[\d-]+\s+Title\s*:|#\d+\s+DTP\s*:|\bDtp\s*:\s*\w+\s+Page\s*:",
+    re.IGNORECASE,
+)
+# Shadow / fake-bold type extracted twice over: "DDrraawwiinngg".
+_DOUBLED_WORD_RE = re.compile(r"\b(?:([A-Za-z])\1){3,}\b")
 
 
 @dataclass
@@ -74,6 +81,8 @@ class QualityReport:
     lone_bullets: int = 0
     raw_bullet_lines: int = 0
     hard_wrap_hints: int = 0
+    prepress_residue: int = 0
+    doubled_words: int = 0
     noise_ratio: float = 0.0
     word_ratio: float = 1.0
     binary_noise: bool = False
@@ -104,6 +113,8 @@ class QualityReport:
             "lone_bullets": self.lone_bullets,
             "raw_bullet_lines": self.raw_bullet_lines,
             "hard_wrap_hints": self.hard_wrap_hints,
+            "prepress_residue": self.prepress_residue,
+            "doubled_words": self.doubled_words,
             "noise_ratio": round(self.noise_ratio, 3),
             "word_ratio": round(self.word_ratio, 3),
             "binary_noise": self.binary_noise,
@@ -134,6 +145,8 @@ def assess_markdown(text: str) -> QualityReport:
     r.lone_bullets = len(_LONE_BULLET_RE.findall(text))
     r.raw_bullet_lines = len(_BULLET_CHAR_RE.findall(text))
     r.hard_wrap_hints = len(_LONG_LINE_HARD_WRAP_RE.findall(text))
+    r.prepress_residue = len(_PREPRESS_RE.findall(text))
+    r.doubled_words = len(_DOUBLED_WORD_RE.findall(text))
 
     sample = text[:_NOISE_SAMPLE_CHARS]
     r.noise_ratio = sum(1 for ch in sample if _is_noise_char(ch)) / len(sample)
@@ -160,6 +173,8 @@ def assess_markdown(text: str) -> QualityReport:
         score -= 15
         r.issues.append("unbalanced code fences")
     for count, per, cap, label in (
+        (r.prepress_residue, 10, 20, "prepress slug residue"),
+        (r.doubled_words, 20, 10, "doubled (shadow) text"),
         (r.toc_residue, 10, 20, "TOC residue"),
         (r.lone_bullets, 20, 15, "sheared bullets"),
         (r.raw_bullet_lines, 50, 10, "non-Markdown bullets"),

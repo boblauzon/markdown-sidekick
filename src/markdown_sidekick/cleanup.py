@@ -45,6 +45,8 @@ class CleanupStats:
     bullets_normalized: int = 0
     lines_joined: int = 0
     fences_merged: int = 0
+    prepress_removed: int = 0
+    shadow_words_fixed: int = 0
 
     # Every field is a non-negative int counter, so the field list lives once:
     # a future pass's new counter is picked up here (and by `changed`) for free.
@@ -74,6 +76,10 @@ class CleanupStats:
         if not self.changed:
             return "No cleanup changes."
         parts = []
+        if self.prepress_removed:
+            parts.append(f"{self.prepress_removed} prepress slug(s) removed")
+        if self.shadow_words_fixed:
+            parts.append(f"{self.shadow_words_fixed} doubled word(s) repaired")
         if self.removed_noise_lines:
             parts.append(f"{self.removed_noise_lines} header/page-number line(s) removed")
         if self.toc_lines_removed:
@@ -120,11 +126,272 @@ _CHAR_MAP = {
     "‑": "-",  # non-breaking hyphen
 }
 _CHAR_TRANSLATION = str.maketrans(_CHAR_MAP)
+# pdfminer's placeholder for a glyph with no Unicode mapping — never text.
+_CID_RE = re.compile(r"\(cid:\d+\)")
 
 
 def normalize_characters(text: str, stats: CleanupStats) -> str:
     stats.chars_normalized += sum(text.count(ch) for ch in _CHAR_MAP)
-    return text.translate(_CHAR_TRANSLATION)
+    text = text.translate(_CHAR_TRANSLATION)
+    if "(cid:" in text:
+        text, n = _CID_RE.subn("", text)
+        stats.chars_normalized += n
+    return text
+
+
+# ---------------------------------------------------------------------------
+# Pass 0b — doubled "shadow" text
+# ---------------------------------------------------------------------------
+# Drop-shadow and fake-bold type is drawn twice (or four times); extractors
+# that sort glyphs by position interleave the copies: "DDrraawwiinngg
+# CCoommiiccss LLaabb". Only RUNS of doubled words are repaired — two or more
+# in a row, or one long one standing alone on its line — so real words with
+# repeated letters ("bookkeeper") and numbers ("1100") are never touched.
+_DOUBLED_MIN_LEN = 4
+
+
+def _is_doubled(token: str) -> bool:
+    return (
+        len(token) >= _DOUBLED_MIN_LEN
+        and len(token) % 2 == 0
+        and all(token[i] == token[i + 1] for i in range(0, len(token), 2))
+    )
+
+
+def _dedouble(token: str) -> str:
+    # Up to three layers: "JJJJoooobbbb" -> "JJoobb" -> "Job".
+    for _ in range(3):
+        if not _is_doubled(token):
+            break
+        token = token[::2]
+    return token
+
+
+def _doubled_pair(token: str) -> bool:
+    """A 2-char doubled token ("--", "::", "GG") — only ever continues a run."""
+    return len(token) == 2 and token[0] == token[1]
+
+
+def _letter_pairs(token: str) -> int:
+    return len(re.findall(r"([A-Za-z])\1", token))
+
+
+def _wordlike(token: str) -> bool:
+    """Does a de-doubled token look like a word (a vowel and a consonant)?
+    Placeholders ("XXXX" -> "XX"), nucleotide strings ("AATT" -> "AT") and
+    hex colours ("FFEEDD" -> "FED") are genuinely doubled text and must
+    survive. (A hex-lettered word inside a shadow run is still repaired —
+    the run's other words vouch for it.)"""
+    letters = {c.lower() for c in token if c.isalpha()}
+    if letters <= set("acgtu") or re.fullmatch(r"[0-9A-Fa-f]+", token):
+        return False
+    return bool(letters & set("aeiouy")) and bool(letters - set("aeiouy"))
+
+
+def _fix_doubled_runs(tokens: list[str]) -> tuple[list[str], int]:
+    out: list[str] = []
+    fixed = 0
+    i = 0
+    n = len(tokens)
+    while i < n:
+        if not (_is_doubled(tokens[i]) and re.search(r"[A-Za-z]", tokens[i])):
+            out.append(tokens[i])
+            i += 1
+            continue
+        j = i
+        lettered = 0
+        while j < n and (_is_doubled(tokens[j]) or _doubled_pair(tokens[j])):
+            if _is_doubled(tokens[j]) and _wordlike(_dedouble(tokens[j])):
+                lettered += 1
+            j += 1
+        # A doubled token with 4+ letter pairs has no English lookalike, so
+        # it is repaired even alone; shorter ones need company.
+        lone = _wordlike(_dedouble(tokens[i])) and (
+            (n == 1 and _letter_pairs(tokens[i]) >= 3) or _letter_pairs(tokens[i]) >= 4
+        )
+        if lettered >= 2 or lone:
+            for t in tokens[i:j]:
+                out.append(t[0] if _doubled_pair(t) else _dedouble(t))
+            fixed += j - i
+        else:
+            out.extend(tokens[i:j])
+        i = j
+    return out, fixed
+
+
+def fix_shadow_text(text: str, stats: CleanupStats) -> str:
+    if not re.search(r"([A-Za-z])\1([A-Za-z])\2([A-Za-z])\3", text):
+        return text  # fast path: no triple of consecutive letter pairs anywhere
+    out: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if _fence_line(line):
+            in_fence = not in_fence
+        if in_fence or not re.search(r"([A-Za-z])\1([A-Za-z])\2", line):
+            out.append(line)
+            continue
+        tokens = line.split()
+        new, fixed = _fix_doubled_runs(tokens)
+        if fixed:
+            stats.shadow_words_fixed += fixed
+            indent = line[: len(line) - len(line.lstrip())]
+            out.append(indent + " ".join(new))
+            continue
+        out.append(line)
+    return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# Pass 0c — prepress slugs (InDesign file stamps, job tickets, DTP tags)
+# ---------------------------------------------------------------------------
+# Print-ready PDFs carry printer's marks in the slug area outside the trim:
+# "700065 - MakingBreakingGrid2ndED_001-077.indd 1 3/23/17 5:23 PM",
+# "Job No: 05-30592 Title: RP-Graphic Design Reference…", "#175 DTP: 216
+# Page: 4", "(RAY)(Text)". Text extractors that ignore the TrimBox emit them
+# into the body (and they fool AI summarisers — "Ray" was once reported as a
+# book's author). The PDF layout engine clips them geometrically; this pass
+# catches them in markitdown/OCR output and older conversions.
+#
+# Slug TOKENS are removed; a line is dropped only when what remains is junk
+# (colour-bar numbers, ink names), so real text merged onto the same line
+# survives.
+_DATE = r"\d{1,2}/\d{1,2}/\d{2,4}"
+_STAMP_TIME = r"(?:\s+" + _DATE + r"(?:\s+\d{1,2}:\d{2}(?::\d{2})?(?:\s*[AaPp]\.?[Mm]\.?)?)?)?"
+# InDesign file stamp, matched in two halves so the filename (which may
+# contain spaces) is searched BACKWARDS from ".indd" within a short window —
+# a forward regex with an optional multi-word prefix backtracks
+# quadratically over long paragraph lines.
+# No \b after the page number: some stamps glue it to a job code ("35D808").
+_INDD_TAIL_RE = re.compile(r"\.indd\b\s+\d{1,4}" + _STAMP_TIME, re.IGNORECASE)
+_INDD_DATED_RE = re.compile(r"\.indd\b\s+\d{1,4}\s+" + _DATE, re.IGNORECASE)
+# The filename: words may precede an underscored InDesign name
+# ("Drawing In Black & White_001-144_11520 C2"), but nothing after it except
+# a short version suffix — so prose before a mention of "grid.indd" is safe.
+_INDD_HEAD_RE = re.compile(
+    r"(?:\b\d{4,}\s*-\s*)?(?:(?:[\w&']+\s+){0,5}[\w&'-]*_[\w&'.-]*(?:\s+[A-Z]\d{1,2})?|[\w&'.-]*)$"
+)
+_INDD_WINDOW = 120
+# A line that is nothing but a stamp, date or not ("UPOD p001-032_.indd 21").
+_INDD_ONLY_LINE_RE = re.compile(
+    r"^\s*(?:\d{4,}\s*-\s*)?[\w&' .-]{1,80}\.indd\s+\d{1,4}" + _STAMP_TIME + r"\s*$",
+    re.IGNORECASE,
+)
+# Unmistakable prepress markers, removed wherever they appear.
+_STRONG_TOKEN_RE = re.compile(
+    # Job ticket: Job[ No]: 03-700065 Title: … (up to the next marker)
+    r"(?:\(Fogra\s*\d+\)\s*\w{0,3}\s*)?\bJob(?:\s*No\.?)?\s*:\s*[\d-]+\s+Title\s*:\s*.*?"
+    r"(?=\s*(?:\((?:RAY|Ray|Text)\)|\bJob(?:\s*No\.?)?\s*:|" + _DATE + r"|\||$))"
+    # DTP operator stamps: "#175 DTP: 216 Page: 4", "Dtp:LY Page:32"
+    + r"|(?:\bC\d+_)?#\d+\s+DTP\s*:\s*\S+\s+Page\s*:\s*\d+"
+    + r"|\bDtp\s*:\s*\w+\s+Page\s*:\s*\d+"
+    + r"|\(Fogra\s*\d+\)\w{0,3}",
+    re.IGNORECASE,
+)
+# Operator / proof tags — CASE-SENSITIVE ("(text)" is a code argument) and
+# only removed beside a strong marker or on a line of nothing else.
+_WEAK_TOKEN_RE = re.compile(
+    r"(?:\bP\s+\d{2,4}C\s*)?\((?:RAY|Ray|Text)\)|\(\((?:RRAAYY|RRaayy|TTeexxtt)\)\)"
+)
+_DATE_TIME_RE = re.compile(_DATE + r"\s+\d{1,2}:\d{2}")
+# Document gate: one dated or stand-alone ".indd" stamp is proof on its own;
+# the weaker markers ("Job: … Title:", "DTP:") must appear at least twice.
+_PREPRESS_STRONG_RE = re.compile(r"\bJob(?:\s*No\.?)?\s*:\s*[\d-]+\s+Title\s*:|\bDTP\s*:", re.I)
+
+
+def _remove_slug_tokens(line: str) -> tuple[str, int]:
+    """(line with prepress tokens blanked, number of tokens removed).
+
+    Nothing is removed unless the line carries a STRONG marker (a real
+    InDesign stamp, job ticket, DTP stamp or Fogra tag) or consists of
+    operator tags alone.
+    """
+    hits = 0
+    if ".indd" in line.lower():
+        # An undated ".indd N" is a stamp only beside other slug evidence or
+        # alone on its line; "the grid.indd 2 times" in prose is not.
+        context = bool(
+            _INDD_ONLY_LINE_RE.match(line)
+            or _STRONG_TOKEN_RE.search(line)
+            or _DATE_TIME_RE.search(line)
+        )
+        pieces: list[str] = []
+        pos = 0
+        for m in _INDD_TAIL_RE.finditer(line):
+            window = max(pos, m.start() - _INDD_WINDOW)
+            head = _INDD_HEAD_RE.search(line, window, m.start())
+            start = head.start() if head else m.start()
+            # Undated: still a stamp when the name is an InDesign job name
+            # ("028-057_30592.indd 35") — prose names a file ("grid.indd").
+            if not (context or _INDD_DATED_RE.match(line, m.start()) or "_" in line[start : m.start()]):
+                continue
+            pieces.append(line[pos:start])
+            pieces.append(" ")
+            pos = m.end()
+            hits += 1
+        pieces.append(line[pos:])
+        line = "".join(pieces)
+    line, n = _STRONG_TOKEN_RE.subn(" ", line)
+    hits += n
+    if hits:
+        line, n = _WEAK_TOKEN_RE.subn(" ", line)
+        return line, hits + n
+    stripped, n = _WEAK_TOKEN_RE.subn(" ", line)
+    if n and not re.search(r"[A-Za-z]", stripped):
+        return stripped, n  # a line of operator tags only
+    return line, 0
+
+
+# Residue that is still slug-area junk: numbers, dates, times, ink names.
+_SLUG_JUNK_WORDS = frozenset({"yellow", "cyan", "magenta", "black", "key", "am", "pm", "rp", "wf", "wh"})
+_PREPRESS_HINTS = (".indd", "job", "dtp", "(ray)", "(text)", "fogra", "rraayy", "tteexxtt")
+_PREPRESS_MIN_DOC_HITS = 2
+
+
+def _slug_residue_is_junk(residue: str, max_real: int = 1) -> bool:
+    """True when what's left after removing slug tokens is still slug-area
+    junk: at most ``max_real`` real words (a stray "RP" or ink name aside).
+    Table cells pass 0 — a one-word cell is normal content."""
+    words = [w.lower() for w in re.findall(r"[A-Za-z]{2,}", residue)]
+    real = [w for w in words if w not in _SLUG_JUNK_WORDS]
+    return len(real) <= max_real
+
+
+def strip_prepress(text: str, stats: CleanupStats) -> str:
+    # A lone "(Text)" or "Job:" could be real; only act on documents that
+    # unmistakably carry prepress marks.
+    stamped = any(
+        _INDD_DATED_RE.search(line) or _INDD_ONLY_LINE_RE.match(line)
+        for line in text.split("\n")
+        if ".indd" in line.lower()
+    )
+    if not stamped and len(_PREPRESS_STRONG_RE.findall(text)) < _PREPRESS_MIN_DOC_HITS:
+        return text
+    out: list[str] = []
+    in_fence = False
+    for line in text.split("\n"):
+        if _fence_line(line):
+            in_fence = not in_fence
+        low = line.lower()
+        # Code is never touched: "(text)" in `def show(text):` is an argument.
+        if in_fence or not any(k in low for k in _PREPRESS_HINTS) or _is_strong_code(line):
+            out.append(line)
+            continue
+        residue, hits = _remove_slug_tokens(line)
+        if not hits:
+            out.append(line)
+            continue
+        stats.prepress_removed += hits
+        if _is_table_row(line):
+            cells = [c.strip() for c in residue.strip().strip("|").split("|")]
+            if not any(c and not _slug_residue_is_junk(c, max_real=0) for c in cells):
+                continue
+            out.append("| " + " | ".join(cells) + " |")
+            continue
+        if _slug_residue_is_junk(residue):
+            continue
+        indent = line[: len(line) - len(line.lstrip())]
+        out.append(indent + " ".join(residue.split()))
+    return "\n".join(out)
 
 
 # Runs of U+FFFD (the replacement character) are unrecoverable extraction junk —
@@ -1088,6 +1355,8 @@ def clean_markdown(
     text: str,
     *,
     normalize_chars: bool = True,
+    fix_shadow: bool = True,
+    strip_slugs: bool = True,
     strip_noise: bool = True,
     strip_toc: bool = True,
     promote_headings: bool = True,
@@ -1103,6 +1372,12 @@ def clean_markdown(
         return text, stats
     if normalize_chars:
         text = normalize_characters(text, stats)
+    # De-double before slug stripping: shadowed job tickets ("JJoobb::…")
+    # only match the slug patterns once repaired.
+    if fix_shadow:
+        text = fix_shadow_text(text, stats)
+    if strip_slugs:
+        text = strip_prepress(text, stats)
     # Titles must be harvested before the TOC (their source) is stripped.
     titles = _harvest_section_titles(text) if promote_headings else {}
     if strip_noise:

@@ -33,6 +33,9 @@ _HR = re.compile(r"^\s*([-_])(\s*\1){2,}\s*$")
 _BLOCKQUOTE = re.compile(r"^\s*>\s?(.*)$")
 # A fenced-code marker: 3+ backticks at line start.
 _FENCE = re.compile(r"^(\s*)(`{3,})(.*)$")
+# A whole-line HTML comment: page anchors / figure markers. Shown as a muted
+# placeholder so the reader sees where a page starts or a figure will land.
+_COMMENT = re.compile(r"^\s*<!--\s*(.*?)\s*-->\s*$")
 
 
 class MarkdownRenderer:
@@ -128,6 +131,10 @@ class MarkdownRenderer:
         w = self.w
         if line.strip() == "":
             w.insert("end", "\n")
+            return
+        m = _COMMENT.match(line)
+        if m:
+            w.insert("end", f"⟨{m.group(1)}⟩\n", ("muted",))
             return
         if _HR.match(line):
             w.insert("end", "─" * 48 + "\n", ("hr",))

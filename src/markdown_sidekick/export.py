@@ -6,13 +6,16 @@ document into either a decorated single file or a "book folder":
 
     <stem>/
       index.md            table of contents linking the parts
-      manifest.json       machine-readable map (titles, token estimates)
+      manifest.json       machine-readable map (titles, tokens, image counts)
+      00-front-matter.md  whatever precedes the first chapter heading
       01-chapter-name.md  one file per top-level heading, each with YAML
       02-...              front matter identifying the book and part
+      images/             extracted figures (see figures.py), when enabled
 
-Splitting happens on ``#`` headings (which the cleanup pipeline restores for
-book PDFs); a chapter that still exceeds the token budget is sub-split at its
-``##`` boundaries. All writes are UTF-8.
+Splitting happens on ``#`` headings (which the PDF layout engine derives from
+the PDF's bookmarks, and the cleanup pipeline restores for older book
+conversions); a chapter that still exceeds the token budget is sub-split at
+its ``##`` boundaries. All writes are UTF-8.
 """
 
 from __future__ import annotations
@@ -40,10 +43,17 @@ AI_TARGETS: dict[str, int] = {
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
+_IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
+_YAML_HOSTILE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")
+_LEAD_TITLE = "Front matter"
 
 
 def estimate_tokens(text: str) -> int:
     return max(1, len(text) // _CHARS_PER_TOKEN)
+
+
+def count_images(text: str) -> int:
+    return len(_IMAGE_LINK_RE.findall(text))
 
 
 def slugify(title: str, max_len: int = 60) -> str:
@@ -56,6 +66,10 @@ def build_front_matter(fields: dict[str, object]) -> str:
     when they contain YAML-significant characters."""
     lines = ["---"]
     for key, value in fields.items():
+        if isinstance(value, str):
+            # YAML rejects control characters, and a lone surrogate can't be
+            # written as UTF-8 — neither may reach the file from any source.
+            value = re.sub(r"\s*[\r\n]+\s*", " ", _YAML_HOSTILE_RE.sub("", value)).strip()
         if value is None or value == "":
             continue
         if isinstance(value, str) and re.search(r"[:#\[\]{}\"'|>&%@`,]", value):
@@ -122,6 +136,36 @@ def _split_at(lines: list[str], indices: list[int], titles: list[str], lead_titl
     return sections
 
 
+# Anchors and markers are not content; image links are (a gallery chapter
+# of nothing but figures is a real chapter).
+_NON_TEXT_LINE_RE = re.compile(r"^\s*(?:<!--.*?-->)?\s*$")
+
+
+def _is_divider(sec: Section) -> bool:
+    """A heading with nothing under it — a book's part-divider page."""
+    head, _, body = sec.markdown.partition("\n")
+    return head.startswith("#") and all(_NON_TEXT_LINE_RE.match(l) for l in body.split("\n"))
+
+
+def _fold_dividers(sections: list[Section]) -> list[Section]:
+    """Fold part-divider sections ("# GETTING STARTED" alone on its page)
+    into the chapter that follows, instead of writing a near-empty file.
+    The divider's heading is kept at the top of that chapter's file."""
+    out: list[Section] = []
+    pending: list[Section] = []
+    for sec in sections:
+        if _is_divider(sec):
+            pending.append(sec)
+            continue
+        if pending:
+            lead = "".join(p.markdown.rstrip() + "\n\n" for p in pending)
+            sec = Section(sec.title, lead + sec.markdown)
+            pending = []
+        out.append(sec)
+    out.extend(pending)  # dividers at the very end have nothing to join
+    return out
+
+
 # Book-style structural headings. When several are present, ONLY they define
 # split points — other "#" lines in converted books are often stray unfenced
 # code comments ("# cli_main.py") and would shred the document into fragments.
@@ -143,7 +187,7 @@ def split_chapters(markdown: str, max_tokens: int = DEFAULT_MAX_TOKENS) -> list[
     if len(h1s) < 2:
         return [Section("", markdown)]
     titles = [_H1_RE.match(lines[i]).group(1) for i in h1s]  # type: ignore[union-attr]
-    sections = _split_at(lines, h1s, titles, "Front matter")
+    sections = _fold_dividers(_split_at(lines, h1s, titles, _LEAD_TITLE))
 
     result: list[Section] = []
     for sec in sections:
@@ -250,22 +294,28 @@ def export_single(
     engine: str = "",
     front_matter: bool = True,
     summary: str = "",
+    title: str = "",
+    author: str = "",
 ) -> ExportResult:
     """Write one decorated Markdown file.
 
     ``summary`` (optional, from the local-AI pass) becomes a ``summary:``
-    front-matter field; blank means the field is simply absent.
+    front-matter field; blank means the field is simply absent. ``title`` /
+    ``author`` come from the source's own metadata when the converter could
+    vouch for them; a blank title falls back to the document's first heading.
     """
     content = markdown
     if front_matter:
         content = build_front_matter(
             {
-                "title": document_title(markdown, Path(source).stem),
+                "title": title or document_title(markdown, Path(source).stem),
+                "author": author,
                 "summary": summary,
                 "source": source,
                 "converted": date.today().isoformat(),
                 "converter": "Markdown Sidekick" + (f" ({engine})" if engine else ""),
                 "est_tokens": estimate_tokens(markdown),
+                "image_count": count_images(markdown) or None,
             }
         ) + markdown
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -283,6 +333,8 @@ def export_book(
     max_tokens: int = DEFAULT_MAX_TOKENS,
     ai_sections: bool = False,
     summary: str = "",
+    title: str = "",
+    author: str = "",
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -294,10 +346,11 @@ def export_book(
 
     A document-level ``summary`` lands in index.md, manifest.json, and each
     part's front matter as ``book_summary`` (the parts describe the whole
-    book, not themselves).
+    book, not themselves). Text before the first chapter heading is written
+    as ``00-front-matter.md`` so chapter N lands in a file numbered N.
     """
     stem = Path(source).stem
-    title = document_title(markdown, stem)
+    title = title or document_title(markdown, stem)
     if ai_sections:
         sections = split_for_ai(markdown, max_tokens)
     else:
@@ -311,39 +364,54 @@ def export_book(
             engine=engine,
             front_matter=front_matter,
             summary=summary,
+            title=title,
+            author=author,
         )
 
     result = ExportResult()
     manifest_files = []
     total = len(sections)
     used_names: set[str] = set()
+    # Number the lead front-matter file 00 so chapter numbers line up.
+    first = 0 if sections[0].title.startswith(_LEAD_TITLE) else 1
     for n, sec in enumerate(sections, start=1):
-        name = f"{n:02d}-{slugify(sec.title or 'section')}"
+        name = f"{n - 1 + first:02d}-{slugify(sec.title or 'section')}"
         while name in used_names:  # duplicate section titles
             name += "-b"
         used_names.add(name)
         path = out_dir / f"{name}.md"
+        images = count_images(sec.markdown)
         content = sec.markdown
         if front_matter:
             content = build_front_matter(
                 {
                     "title": sec.title or title,
                     "book": title,
+                    "author": author,
                     "book_summary": summary,
                     "part": f"{n} of {total}",
                     "source": source,
                     "converted": date.today().isoformat(),
                     "converter": "Markdown Sidekick" + (f" ({engine})" if engine else ""),
                     "est_tokens": sec.est_tokens,
+                    "image_count": images or None,
                 }
             ) + sec.markdown
         path.write_text(content, encoding="utf-8")
         result.paths.append(path)
         manifest_files.append(
-            {"file": path.name, "title": sec.title, "est_tokens": sec.est_tokens}
+            {
+                "file": path.name,
+                "title": sec.title,
+                "est_tokens": sec.est_tokens,
+                "image_count": images,
+            }
         )
 
-    index_lines = [f"# {title}", "", f"Converted from **{source}** — {total} parts.", ""]
+    index_lines = [f"# {title}", ""]
+    if author:
+        index_lines += [f"*{author}*", ""]
+    index_lines += [f"Converted from **{source}** — {total} parts.", ""]
     if summary:
         index_lines += [summary, ""]
     for entry in manifest_files:
@@ -353,11 +421,13 @@ def export_book(
 
     manifest = {
         "title": title,
+        "author": author,
         "summary": summary,
         "source": source,
         "engine": engine,
         "converted": date.today().isoformat(),
         "total_est_tokens": estimate_tokens(markdown),
+        "total_images": count_images(markdown),
         "files": manifest_files,
     }
     result.manifest_path = out_dir / "manifest.json"

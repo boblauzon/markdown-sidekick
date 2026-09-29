@@ -20,8 +20,9 @@ _DEFAULT_SUMMARY_REPLY = (
 class _MockOllama(http.server.BaseHTTPRequestHandler):
     """Configurable /api/generate responder."""
 
-    behaviour = "repair"  # repair | truncate | error
+    behaviour = "repair"  # repair | truncate | error | reject_format
     last_payload: dict | None = None
+    payloads: list = []
     # /api/tags payload. The default is SHAPED (models list present): the
     # probe requires the shape, so an unshaped {} would read as not-Ollama.
     tags_payload: dict = {"models": []}
@@ -37,8 +38,11 @@ class _MockOllama(http.server.BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         payload = json.loads(self.rfile.read(length))
         type(self).last_payload = payload
-        if type(self).behaviour == "error":
-            self.send_response(500)
+        type(self).payloads.append(payload)
+        if type(self).behaviour == "error" or (
+            type(self).behaviour == "reject_format" and "format" in payload
+        ):
+            self.send_response(500 if type(self).behaviour == "error" else 400)
             self.end_headers()
             return
         prompt = payload["prompt"]
@@ -65,6 +69,7 @@ def mock_server():
     thread.start()
     _MockOllama.behaviour = "repair"
     _MockOllama.last_payload = None
+    _MockOllama.payloads = []
     _MockOllama.tags_payload = {"models": []}
     _MockOllama.summary_response = _DEFAULT_SUMMARY_REPLY
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -272,6 +277,9 @@ class TestOpenAICompatible:
     def test_summary_via_openai_dialect(self, mock_openai):
         out = polish.summarize_markdown("# Widgets\n\nProtocol text.\n", mock_openai, "m")
         assert out == "A short overview of the widget protocol for integrators."
+        fmt = _MockOpenAI.last_payload["response_format"]
+        assert fmt["type"] == "json_schema"
+        assert fmt["json_schema"]["schema"] == polish._SUMMARY_SCHEMA
 
     def test_runtime_names(self):
         assert polish.runtime_name("http://localhost:11434", "ollama") == "Ollama"
@@ -345,3 +353,95 @@ class TestSummarize:
         assert polish.summarize_markdown(self._DOC, "", "llama3.2") is None
         assert polish.summarize_markdown(self._DOC, "http://127.0.0.1:1", "") is None
         assert polish.summarize_markdown("   ", "http://127.0.0.1:1", "m") is None
+
+
+class TestSummaryGuardrails:
+    """The failure modes found in a real 18-book audit: a refusal pasted into
+    front matter, and the typesetter "Ray" reported as the author."""
+
+    _DOC = "# Widget Protocol\n\nThis document describes the widget protocol.\n"
+    _GOOD = "A practical reference to the widget protocol for integrators and testers."
+
+    def test_conversational_refusal_is_rejected(self, mock_server):
+        _MockOllama.summary_response = (
+            "I'm happy to help you analyze the provided text. However, it appears "
+            "to be a snippet from a book's contents page, specifically from the book "
+            '"Making and Breaking the Grid" by Timothy Samara. There is no main content '
+            "or coherent text that I can analyze. If you can provide more context or "
+            "specify what you would like me to analyze, I'll be happy to help."
+        )
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") is None
+
+    @pytest.mark.parametrize(
+        "reply",
+        [
+            "As an AI language model, I cannot summarize this document for you today.",
+            "The provided text appears to be a list of chapter titles and page numbers.",
+            "Unfortunately I don't have enough information; please provide more context.",
+            "A comics guide by Ray, based on :RP-Drawing Comics Lab (Text)(Ray) (Ray).",
+            "A book about grids, from 700065 - Grid_001-077.indd with many exercises.",
+        ],
+    )
+    def test_meta_and_slug_echo_replies_rejected(self, mock_server, reply):
+        _MockOllama.summary_response = reply
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") is None
+
+    @pytest.mark.parametrize(
+        "good",
+        [
+            "A hands-on guide to fine-tune and deploy a large language model on your own hardware.",
+            "A reference manual whose table of contents doubles as a checklist for print designers.",
+        ],
+    )
+    def test_topic_words_are_not_mistaken_for_refusals(self, mock_server, good):
+        _MockOllama.summary_response = good
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") == good
+
+    def test_design_vocabulary_is_not_mistaken_for_slugs(self, mock_server):
+        good = "A reference to prepress, DTP production and print specifications for designers."
+        _MockOllama.summary_response = good
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") == good
+
+    def test_structured_output_is_requested_and_unwrapped(self, mock_server):
+        _MockOllama.summary_response = json.dumps(
+            {"summary": self._GOOD, "insufficient_content": False}
+        )
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") == self._GOOD
+        assert _MockOllama.last_payload["format"] == polish._SUMMARY_SCHEMA
+
+    def test_insufficient_content_flag_gives_none(self, mock_server):
+        _MockOllama.summary_response = json.dumps(
+            {"summary": "", "insufficient_content": True}
+        )
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") is None
+
+    def test_refusal_inside_json_still_rejected(self, mock_server):
+        _MockOllama.summary_response = json.dumps(
+            {"summary": "I'm happy to help, but the text is only a snippet.", "insufficient_content": False}
+        )
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") is None
+
+    def test_server_without_structured_output_gets_a_plain_retry(self, mock_server):
+        _MockOllama.behaviour = "reject_format"
+        _MockOllama.summary_response = self._GOOD
+        assert polish.summarize_markdown(self._DOC, mock_server, "m") == self._GOOD
+        assert ["format" in p for p in _MockOllama.payloads] == [True, False]
+
+    def test_summary_input_skips_front_matter_and_lists_sections(self, mock_server):
+        doc = (
+            "COVER BLURB NOBODY NEEDS\n\n# Contents\n\nChapter 1 Grids 5\n\n"
+            "# Introduction\n\nThis book teaches layout grids.\n\n"
+            "# Chapter 1: Grids\n\nBody text.\n"
+        )
+        polish.summarize_markdown(doc, mock_server, "m", title="The Grid Book")
+        prompt = _MockOllama.last_payload["prompt"]
+        assert "Title: The Grid Book" in prompt
+        assert "Sections: Contents; Introduction; Chapter 1: Grids" in prompt
+        assert "Excerpt:\n# Introduction" in prompt
+        assert "COVER BLURB" not in prompt
+
+    def test_markers_and_images_are_not_sent(self, mock_server):
+        doc = "# T\n\n<!-- page 3 -->\n\n![Figure 3.1](images/fig_p3_1.jpg)\n\nWords.\n"
+        polish.summarize_markdown(doc, mock_server, "m")
+        prompt = _MockOllama.last_payload["prompt"]
+        assert "<!--" not in prompt and "fig_p3_1" not in prompt
