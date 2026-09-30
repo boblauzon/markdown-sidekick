@@ -112,8 +112,78 @@ class TestSplitForAi:
     def test_chaptered_book_uses_chapters(self):
         from markdown_sidekick.export import split_for_ai
 
-        secs = split_for_ai(_BOOK, max_tokens=30_000)
-        assert [s.title for s in secs][:2] == ["Front matter", "Chapter 1: Getting Started"]
+        # Chapters that can't share a part keep chapter boundaries as breaks
+        # (each ~20 tokens here); a roomier budget packs them.
+        secs = split_for_ai(_BOOK, max_tokens=25)
+        assert [s.title for s in secs] == [
+            "Front matter", "Chapter 1: Getting Started", "Chapter 2: Going Deeper"
+        ]
+        secs = split_for_ai(_BOOK, max_tokens=30)
+        assert [s.title for s in secs] == [
+            "Front matter – Chapter 1: Getting Started", "Chapter 2: Going Deeper"
+        ]
+
+    def test_small_chapters_are_packed_up_to_the_budget(self):
+        from markdown_sidekick.export import split_chapters, split_for_ai
+
+        # 60 one-page "principles" (the UPoD shape): one file each was 134
+        # parts at every budget. Packed, each part fills toward the budget.
+        book = "".join(f"# Principle {i}\n\n" + ("word " * 180) + "\n\n" for i in range(60))
+        secs = split_for_ai(book, max_tokens=2_000)
+        assert 5 <= len(secs) < 60
+        assert all(s.est_tokens <= 2_000 for s in secs)  # still a hard cap
+        assert secs[0].title.startswith("Principle 0 – Principle ")
+        # Parts break only at chapter boundaries, and nothing is lost.
+        assert all(s.markdown.startswith("# Principle ") for s in secs)
+        chapters = split_chapters(book, max_tokens=2_000)
+        assert sum(s.markdown.count("# Principle ") for s in secs) == len(chapters) == 60
+
+    def test_packing_never_splits_a_fence_or_joins_an_oversize_part(self):
+        from markdown_sidekick.export import split_for_ai
+
+        fenced = "```python\n" + ("x = 1\n" * 900) + "```\n"
+        book = "# A\n\nshort\n\n# B\n\n" + fenced + "\n# C\n\nshort\n\n# D\n\nshort\n"
+        secs = split_for_ai(book, max_tokens=500)
+        titles = [s.title for s in secs]
+        assert "B" in titles  # the indivisible listing stands alone
+        assert all(s.markdown.count("```") % 2 == 0 for s in secs)
+        assert titles[-1] == "C – D"
+
+    def test_heading_only_section_travels_with_what_follows(self):
+        from markdown_sidekick.export import Section, _pack
+
+        body = "word " * 300 + "\n"  # ~375 tokens
+        secs = [
+            Section("One", "# One\n\n" + body),
+            Section("Opener", "## Opener\n"),  # a chapter-opener page
+            Section("Two", "# Two\n\n" + body),
+        ]
+        assert [s.title for s in _pack(secs, max_tokens=400)] == ["One", "Opener – Two"]
+
+    def test_hard_split_never_ends_a_part_on_a_heading(self):
+        from markdown_sidekick.export import split_for_ai
+
+        text = ("prose " * 60 + "\n\n") * 3 + "## Next Topic\n\n" + ("prose " * 60 + "\n\n") * 3
+        for s in split_for_ai(text, max_tokens=250):
+            last = [l for l in s.markdown.strip().split("\n") if l.strip()][-1]
+            assert not last.startswith("#")
+
+    def test_whole_book_within_budget_is_one_file(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        res = export_book(_BOOK, tmp_path / "b", source="b.pdf", ai_sections=True)
+        assert [p.name for p in res.paths] == ["b.md"]
+
+    def test_packed_front_matter_part_is_not_numbered_00(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        book = "Preface text.\n\n" + "".join(
+            f"# Chapter {i}\n\n" + ("word " * 300) + "\n\n" for i in range(1, 7)
+        )
+        res = export_book(book, tmp_path / "b", source="b.pdf", ai_sections=True, max_tokens=900)
+        names = [p.name for p in res.paths]
+        assert names[0].startswith("01-front-matter-chapter-")
+        assert not any(n.startswith("00-") for n in names)
 
     def test_ai_targets_defined(self):
         from markdown_sidekick.export import AI_TARGETS
@@ -247,6 +317,12 @@ class TestQuality:
         assert any("prepress" in i for i in r.issues)
         assert any("doubled" in i for i in r.issues)
         assert r.as_dict()["prepress_residue"] == 2
+
+    def test_genuinely_doubled_text_is_not_shadow(self):
+        # Corpus finding: a placeholder "IIIIIIII" cost a book its score;
+        # hex colours are doubled on purpose too.
+        r = assess_markdown("# T\n\nSwatch FFEEDD beside IIIIIIII and AATTCCGG.\n")
+        assert r.doubled_words == 0
 
 
 class TestBinaryNoise:

@@ -81,6 +81,7 @@ available inside the app via the **❓ Help** button.
     files* (book folder with `index.md` + `manifest.json`), or **AI-sized
     sections** with an *Optimize for* picker (Claude / ChatGPT / Gemini /
     Local LLM) that guarantees every part fits that platform's context window
+    and packs short chapters together up to that budget
   - **Page anchors** — optional `<!-- page N -->` markers in PDF conversions so
     AI answers can cite the printed page
   - **Figure extraction** (on by default) — embedded PDF images of at least

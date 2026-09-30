@@ -13,6 +13,8 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from .cleanup import is_shadow_word
+
 # ~4 characters per token is a good cross-model estimate for English prose;
 # it avoids shipping a tokenizer dependency for what is only a gauge.
 _CHARS_PER_TOKEN = 4
@@ -63,7 +65,9 @@ _PREPRESS_RE = re.compile(
     r"\.indd\b|\bJob(?:\s*No\.?)?\s*:\s*[\d-]+\s+Title\s*:|#\d+\s+DTP\s*:|\bDtp\s*:\s*\w+\s+Page\s*:",
     re.IGNORECASE,
 )
-# Shadow / fake-bold type extracted twice over: "DDrraawwiinngg".
+# Shadow / fake-bold type extracted twice over: "DDrraawwiinngg". The regex
+# finds candidates; cleanup's word test drops placeholders ("IIIIIIII") and
+# hex colours ("FFEEDD"), which are doubled on purpose.
 _DOUBLED_WORD_RE = re.compile(r"\b(?:([A-Za-z])\1){3,}\b")
 
 
@@ -146,7 +150,9 @@ def assess_markdown(text: str) -> QualityReport:
     r.raw_bullet_lines = len(_BULLET_CHAR_RE.findall(text))
     r.hard_wrap_hints = len(_LONG_LINE_HARD_WRAP_RE.findall(text))
     r.prepress_residue = len(_PREPRESS_RE.findall(text))
-    r.doubled_words = len(_DOUBLED_WORD_RE.findall(text))
+    r.doubled_words = sum(
+        1 for m in _DOUBLED_WORD_RE.finditer(text) if is_shadow_word(m.group(0))
+    )
 
     sample = text[:_NOISE_SAMPLE_CHARS]
     r.noise_ratio = sum(1 for ch in sample if _is_noise_char(ch)) / len(sample)

@@ -188,6 +188,13 @@ def _wordlike(token: str) -> bool:
     return bool(letters & set("aeiouy")) and bool(letters - set("aeiouy"))
 
 
+def is_shadow_word(token: str) -> bool:
+    """Is ``token`` a doubled word ("DDrraawwiinngg") rather than genuinely
+    doubled text (placeholders, nucleotides, hex colours)? Shared with the
+    quality scanner so the score and the repair agree."""
+    return _is_doubled(token) and _wordlike(_dedouble(token))
+
+
 def _fix_doubled_runs(tokens: list[str]) -> tuple[list[str], int]:
     out: list[str] = []
     fixed = 0
@@ -468,19 +475,37 @@ def _isolated_bare(index: int, lines: list[str], bare: set[int]) -> bool:
     return prev not in bare and nxt not in bare
 
 
+def _in_code(lines: list[str]) -> list[bool]:
+    """Per line: a ``` fence marker or inside a fenced block."""
+    flags: list[bool] = []
+    in_fence = False
+    for line in lines:
+        if _fence_line(line):
+            in_fence = not in_fence
+            flags.append(True)
+        else:
+            flags.append(in_fence)
+    return flags
+
+
 def strip_page_noise(text: str, stats: CleanupStats) -> str:
     lines = text.split("\n")
-    running = _find_running_headers(lines)
+    # Fenced code is never page furniture: a REPL's bare "42" is output.
+    code = _in_code(lines)
+    running = _find_running_headers([ln for ln, c in zip(lines, code) if not c])
     # Only treat bare numbers as page noise when many of them appear AND each is
     # isolated — a real paginated document has a stream of scattered page numbers;
     # a stray year/value or a numeric list (a run of numbers) must be kept.
-    bare = {i for i, ln in enumerate(lines) if _BARE_PAGE_RE.match(ln)}
-    roman = {i for i, ln in enumerate(lines) if _BARE_ROMAN_RE.match(ln)}
+    bare = {i for i, ln in enumerate(lines) if not code[i] and _BARE_PAGE_RE.match(ln)}
+    roman = {i for i, ln in enumerate(lines) if not code[i] and _BARE_ROMAN_RE.match(ln)}
     strip_bare = len(bare) >= _BARE_PAGE_MIN_COUNT
     strip_roman = len(roman) >= _BARE_ROMAN_MIN_COUNT
     numeric = bare | roman
     out: list[str] = []
     for i, line in enumerate(lines):
+        if code[i]:
+            out.append(line)
+            continue
         if (
             (strip_bare and i in bare or strip_roman and i in roman)
             and _isolated_bare(i, lines, numeric)
@@ -606,20 +631,24 @@ def _looks_like_toc_fragment(line: str) -> bool:
 def strip_toc_tables(text: str, stats: CleanupStats) -> str:
     """Remove table regions dominated by empty / page-number / roman cells."""
     lines = text.split("\n")
+    # Fenced code is exempt: "| id | 12 |" console output is not a TOC, and
+    # a dropped fence marker would unbalance every fence after it.
+    code = _in_code(lines)
+    visible = [("" if c else ln) for ln, c in zip(lines, code)]
     nav_regions = [
-        (s, e) for (s, e) in _table_regions(lines) if _region_is_navigational(lines, s, e)
+        (s, e) for (s, e) in _table_regions(visible) if _region_is_navigational(visible, s, e)
     ]
     if not nav_regions:
         return text
     drop = set()
     for start, end in nav_regions:
-        drop.update(range(start, end + 1))
+        drop.update(k for k in range(start, end + 1) if not code[k])
     # Between two nav regions, drop only lines that look like wrapped TOC-title
     # fragments — never real prose that happens to sit between TOC tables.
     for (_s1, e1), (s2, _e2) in zip(nav_regions, nav_regions[1:]):
         if s2 - e1 - 1 <= _TOC_BRIDGE_MAX:
             for k in range(e1 + 1, s2):
-                if _looks_like_toc_fragment(lines[k]):
+                if not code[k] and _looks_like_toc_fragment(lines[k]):
                     drop.add(k)
     stats.toc_lines_removed += len(drop)
     return "\n".join(line for i, line in enumerate(lines) if i not in drop)
@@ -667,7 +696,10 @@ def _is_plain_toc_signal(line: str) -> bool:
 
 def strip_plain_toc(text: str, stats: CleanupStats) -> str:
     lines = text.split("\n")
-    signals = [i for i, ln in enumerate(lines) if _is_plain_toc_signal(ln)]
+    # Fenced code is exempt: box-drawn console tables ("┌────┬────┐") read
+    # as leader lines, and a dropped fence marker unbalances the rest.
+    code = _in_code(lines)
+    signals = [i for i, ln in enumerate(lines) if not code[i] and _is_plain_toc_signal(ln)]
     if len(signals) < _PLAIN_TOC_MIN_SIGNALS:
         return text
     # Cluster the signal lines, then drop each cluster's span including the
@@ -687,7 +719,7 @@ def strip_plain_toc(text: str, stats: CleanupStats) -> str:
             continue
         drop.update(cluster)
         for k in range(cluster[0], cluster[-1] + 1):
-            if k not in drop and _looks_like_toc_fragment(lines[k]):
+            if k not in drop and not code[k] and _looks_like_toc_fragment(lines[k]):
                 drop.add(k)
     stats.toc_lines_removed += len(drop)
     return "\n".join(line for i, line in enumerate(lines) if i not in drop)
@@ -1351,9 +1383,17 @@ def collapse_blank_runs(text: str, stats: CleanupStats) -> str:
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
+# Engines whose output has no page furniture left: pdflayout removes running
+# heads and folios geometrically, from the page margins. The text-pattern
+# noise pass would only delete real repeats there — "Step 1" labels,
+# "Elsevier, 2007" citations, a chart's years, "See also" entries.
+_FURNITURE_FREE_ENGINES = frozenset({"pdflayout"})
+
+
 def clean_markdown(
     text: str,
     *,
+    engine: str = "",
     normalize_chars: bool = True,
     fix_shadow: bool = True,
     strip_slugs: bool = True,
@@ -1366,7 +1406,11 @@ def clean_markdown(
     join_wrapped: bool = True,
     collapse_blanks: bool = True,
 ) -> tuple[str, CleanupStats]:
-    """Run the enabled cleanup passes; return ``(cleaned_text, stats)``."""
+    """Run the enabled cleanup passes; return ``(cleaned_text, stats)``.
+
+    ``engine`` is the converter that produced ``text``
+    (``ConversionResult.engine``); passes it already did better are skipped.
+    """
     stats = CleanupStats()
     if not text:
         return text, stats
@@ -1380,7 +1424,7 @@ def clean_markdown(
         text = strip_prepress(text, stats)
     # Titles must be harvested before the TOC (their source) is stripped.
     titles = _harvest_section_titles(text) if promote_headings else {}
-    if strip_noise:
+    if strip_noise and engine not in _FURNITURE_FREE_ENGINES:
         text = strip_page_noise(text, stats)
     if strip_toc:
         text = strip_toc_tables(text, stats)

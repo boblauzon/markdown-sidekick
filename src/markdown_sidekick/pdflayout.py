@@ -245,7 +245,14 @@ def _read_chars(textpage):
             else:
                 space = True
             continue
-        if u in (32, 9, 0xA0, 0x3000):
+        if u in (0xA0, 9, 13) and chars and chars[-1][10] == addr and chars[-1][0].isalpha() and not space:
+            # Mid-word in one text object: some font subsets encode the
+            # "ff" ligature as NBSP, TAB or CR ("di\xa0erent"). Kept (as
+            # NBSP) for the ligature repair, which turns it back into a
+            # space if no word results; a real line break still splits the
+            # segment geometrically.
+            u = 0xA0
+        elif u in (32, 9, 0xA0, 0x3000):
             space = True
             continue
         if u in (10, 13) or u >= 0x110000:
@@ -707,9 +714,12 @@ def _continues(prev: _Line, nxt: _Line, left: float, right: float) -> bool:
     return forced or (prev.x1 - left) >= 0.6 * (right - left)
 
 
-def _join_para(lines: list[_Line], left: float, right: float) -> list[str]:
-    paras: list[str] = []
+def _join_para(lines: list[_Line], left: float, right: float) -> list[tuple[str, _Line]]:
+    """Reflowed paragraphs, each with its own first line (for geometry: a
+    title and the subtitle under it share a run, not a type size)."""
+    paras: list[tuple[str, _Line]] = []
     cur = lines[0].text.strip()
+    first = lines[0]
     for prev, nxt in zip(lines, lines[1:]):
         ntext = nxt.text.strip()
         if _continues(prev, nxt, left, right):
@@ -723,9 +733,9 @@ def _join_para(lines: list[_Line], left: float, right: float) -> list[str]:
             else:
                 cur += " " + ntext
         else:
-            paras.append(cur)
-            cur = ntext
-    paras.append(cur)
+            paras.append((cur, first))
+            cur, first = ntext, nxt
+    paras.append((cur, first))
     return paras
 
 
@@ -826,8 +836,8 @@ def _leaf_blocks(kind: str, payload, fence_mono: bool, stats: LayoutStats) -> li
                 stats.code_blocks += 1
                 blocks.append(_Block("code", _code_block(run), run[0].y1, left, run[0].h))
             else:
-                for para in _join_para(run, left, right):
-                    blocks.append(_Block("para", para, run[0].y1, run[0].x0, run[0].h))
+                for para, first in _join_para(run, left, right):
+                    blocks.append(_Block("para", para, first.y1, first.x0, first.h))
     for f in figs:
         if f.y1 < top:
             blocks.append(_Block("fig", f.key, f.y1))
@@ -1104,7 +1114,8 @@ def _overlaps_text(fig: _Seg, texts: list[_Seg]) -> bool:
 # ---------------------------------------------------------------------------
 # Document-level text repair
 # ---------------------------------------------------------------------------
-_LIGATURES = ("ff", "fi", "fl", "ffi", "ffl", "ft", "st", "ct", "tt")
+# Tried in order; "th" last — display faces set a "Th" ligature ("\x1featre").
+_LIGATURES = ("ff", "fi", "fl", "ffi", "ffl", "ft", "st", "ct", "tt", "th")
 # Common ligature-bearing words: a book whose font breaks EVERY "ff" never
 # spells "different" correctly anywhere, so its own vocabulary can't vote.
 _SEED_WORDS = frozenset(
@@ -1128,10 +1139,48 @@ _WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
 _CTRL_CLASS = "\x00\x01\x03-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f"
 _CTRL_WORD_RE = re.compile(rf"[^\W\d_]*[{_CTRL_CLASS}][^\W\d_{_CTRL_CLASS}]*(?:[{_CTRL_CLASS}][^\W\d_]*)*")
 _CTRL_RE = re.compile(rf"[{_CTRL_CLASS}]")
+# Printable stand-ins some font subsets use for a ligature (see
+# _repair_ligatures): NBSP, soft hyphen, pdfium's line-end hyphen marker.
+_AMBIG_WORD_RE = re.compile(r"(?<![^\W\d_])([^\W\d_]+)([\xa0\xad\x02])([^\W\d_]+)")
 # The \x02 marker is always glued to its continuation; no whitespace may be
 # matched after it, or a dangling break would swallow a paragraph gap.
 _HYPHEN_BREAK_RE = re.compile(r"([^\W\d_]*)\x02([^\W\d_]*)")
 _LONE_SURROGATE_RE = re.compile(r"[\ud800-\udfff]")
+
+
+_LIGATURE_STEM_MIN = 6  # shortest known word that may vouch as a stem
+
+
+def _apply_ligature(word: str, code: str, lig: str) -> str:
+    # The "Th" ligature is a capital's: at a word start it reads "Th".
+    if lig == "th" and word.startswith(code):
+        word = "Th" + word[len(code):]
+    return word.replace(code, lig)
+
+
+def _vocab_ligatures(word: str, code: str, vocab: set[str]) -> tuple[list[str], str | None]:
+    """(exact, stem) for ``word`` with ``code`` standing for a ligature:
+    ``exact`` lists the ligatures that make it a known word; failing any,
+    ``stem`` is the one that makes it contain the longest known word
+    spanning the ligature ("undi\\x96erentiated" holds "different")."""
+    exact = [lig for lig in _LIGATURES if word.replace(code, lig).lower() in vocab]
+    if exact:
+        return exact, None
+    p = word.index(code)
+    best, best_len = None, 0
+    for lig in _LIGATURES:
+        cand = word.replace(code, lig).lower()
+        end = p + len(lig)
+        # Substrings holding the whole ligature and a letter either side.
+        for i in range(p):
+            for j in range(len(cand), end, -1):
+                n = j - i
+                if n <= best_len or n < _LIGATURE_STEM_MIN:
+                    break
+                if cand[i:j] in vocab:
+                    best, best_len = lig, n
+                    break
+    return [], best
 
 
 def _repair_ligatures(text: str, stats: LayoutStats) -> str:
@@ -1140,26 +1189,65 @@ def _repair_ligatures(text: str, stats: LayoutStats) -> str:
     Such glyphs surface as control characters (or pdfium's "no mapping",
     kept as a placeholder). A word resolves to the ligature that turns it
     into a word the document spells correctly elsewhere (or a common
-    ligature word); failing that, the ligature that the same control code
-    stands for in other words — a code is consistent within one font
-    ("di\\x81erent" -> "different"). Unresolvable codes are dropped.
+    ligature word), or that makes it contain one ("undi\\x96erentiated"
+    holds "different"); failing that, the ligature that the same control
+    code stands for in other words — a code is consistent within one font
+    ("di\\x81erent" -> "different"), though every font subset of a book may
+    pick its own. Unresolvable codes are dropped.
+
+    Some subsets even reuse a printable character (NBSP, the soft hyphen,
+    pdfium's line-end hyphen marker): between two letters those are only
+    candidates, repaired when a ligature makes a known word and otherwise
+    left in their usual role.
     """
-    if not _CTRL_RE.search(text):
-        return text
-    vocab = {w.lower() for w in _WORD_RE.findall(_CTRL_RE.sub(" ", text))}
+    has_ctrl = _CTRL_RE.search(text) is not None
+    if not has_ctrl and not _AMBIG_WORD_RE.search(text):
+        return text.replace("\xa0", " ")
+    words = set(_CTRL_WORD_RE.findall(text))
+    # Words carrying a code are left out: their fragments ("di", "erent")
+    # are not words and must not vouch for anything.
+    vocab_text = _AMBIG_WORD_RE.sub(" ", _CTRL_WORD_RE.sub(" ", text))
+    vocab = {w.lower() for w in _WORD_RE.findall(vocab_text)}
     vocab |= _SEED_WORDS
     resolved: dict[str, str] = {}
-    votes: dict[str, Counter[str]] = {}
-    for word in set(_CTRL_WORD_RE.findall(text)):
-        codes = set(_CTRL_RE.findall(word))
-        if len(codes) != 1:
-            continue
-        code = next(iter(codes))
-        hits = [lig for lig in _LIGATURES if word.replace(code, lig).lower() in vocab]
-        if hits:
-            resolved[word] = word.replace(code, hits[0])
-            votes.setdefault(code, Counter())[hits[0]] += 1
-    mapping = {code: c.most_common(1)[0][0] for code, c in votes.items()}
+    votes: dict[str, Counter[str]] = {}  # from unambiguous whole words
+    stem_votes: dict[str, Counter[str]] = {}  # weaker: from stems
+    mapping: dict[str, str] = {}
+    pending = {w for w in words if len(set(_CTRL_RE.findall(w))) == 1}
+    # Two rounds: a word repaired in the first (a surname, via its font's
+    # well-attested code) joins the vocabulary, so the same word under
+    # another font's code resolves in the second.
+    for _round in range(2):
+        ambiguous: dict[str, list[str]] = {}
+        stems: dict[str, str] = {}
+        for word in pending:
+            code = _CTRL_RE.search(word).group(0)  # type: ignore[union-attr]
+            exact, stem = _vocab_ligatures(word, code, vocab)
+            if len(exact) == 1:
+                resolved[word] = _apply_ligature(word, code, exact[0])
+                votes.setdefault(code, Counter())[exact[0]] += 1
+            elif exact:
+                ambiguous[word] = exact  # "o?er": offer or other
+            elif stem is not None:
+                stems[word] = stem
+                stem_votes.setdefault(code, Counter())[stem] += 1
+        mapping = {code: c.most_common(1)[0][0] for code, c in stem_votes.items()}
+        mapping.update({code: c.most_common(1)[0][0] for code, c in votes.items()})
+        pending -= resolved.keys()
+        for word in pending:
+            code = _CTRL_RE.search(word).group(0)  # type: ignore[union-attr]
+            lig = mapping.get(code)
+            if word in ambiguous:
+                # The code's other words decide between real words.
+                lig = lig if lig in ambiguous[word] else ambiguous[word][0]
+            elif word in stems and code not in votes:
+                lig = stems[word]  # a whole-word vote outranks a stem guess
+            if lig is not None:
+                resolved[word] = _apply_ligature(word, code, lig)
+        pending -= resolved.keys()
+        if not pending:
+            break
+        vocab |= {w.lower() for w in resolved.values()}
 
     def fix_word(m: re.Match[str]) -> str:
         word = m.group(0)
@@ -1170,8 +1258,24 @@ def _repair_ligatures(text: str, stats: LayoutStats) -> str:
             stats.ligatures_repaired += 1
         return fixed
 
-    text = _CTRL_WORD_RE.sub(fix_word, text)
-    return _CTRL_RE.sub("", text)
+    if has_ctrl:
+        text = _CTRL_RE.sub("", _CTRL_WORD_RE.sub(fix_word, text))
+        vocab |= {w.lower() for w in resolved.values()}
+
+    def fix_candidate(m: re.Match[str]) -> str:
+        a, code, b = m.groups()
+        if code != "\xa0" and (a + b).lower() in vocab:
+            return m.group(0)  # a real hyphen break: "devi\x02ation"
+        # Whole words only: these characters have a real role, and a stem
+        # can span a genuine break ("Extr[afford]inary" from "Extra-ordinary").
+        exact, _stem = _vocab_ligatures(m.group(0), code, vocab)
+        if not exact:
+            return m.group(0)
+        stats.ligatures_repaired += 1
+        return a + exact[0] + b
+
+    text = _AMBIG_WORD_RE.sub(fix_candidate, text)
+    return text.replace("\xa0", " ")
 
 
 def _resolve_hyphens(text: str) -> str:
@@ -1237,12 +1341,91 @@ def _title_from_page(blocks: list[_Block]) -> str:
     if not paras:
         return ""
     tallest = max(b.h for b in paras)
-    parts = [b.text for b in paras if b.h >= 0.8 * tallest][:3]
+    picked = [k for k, b in enumerate(paras) if b.h >= 0.8 * tallest][:3]
+    parts = [paras[k].text for k in picked]
+    # "Design Elements:" set large over a smaller "Color Fundamentals" —
+    # a title ending in a colon continues in the next block.
+    if parts[-1].rstrip().endswith(":") and picked[-1] + 1 < len(paras):
+        parts.append(paras[picked[-1] + 1].text)
     title = " ".join(" ".join(parts).split())
     # Small-caps fonts extract as "DesiGn"; fall back to title case then.
     if re.search(r"[a-z][A-Z]", title):
         title = title.title()
     return title if 3 <= len(title) <= 150 else ""
+
+
+# Library of Congress CIP data on a copyright page: "Title: Made by James :
+# the honest guide to creativity and logo design / James Martin.
+# Description: …". The next field name ends the author statement, since
+# names carry their own periods ("Lyle H. Sandler").
+_CIP_CONTEXT_RE = re.compile(r"Library of Congress|\bNames:|\bDescription:|\bIdentifiers:")
+_CIP_RE = re.compile(
+    r"\bTitle:\s*(?P<title>[^/]{3,250}?)\s*/\s*(?P<author>[^/]{3,150}?)\."
+    r"(?=\s+(?:Description|Identifiers|Subjects|Series|Other titles|Includes|Summary|Edition)\b|\s*$)"
+)
+# "Copyright © 2020 Packt Publishing" — publishers set the title (and an
+# edition line) directly above the notice.
+_COPYRIGHT_RE = re.compile(r"^Copyright\s*(?:©|\(c\))", re.IGNORECASE)
+_EDITION_RE = re.compile(
+    r"^(?:First|Second|Third|Fourth|Fifth|Sixth|Seventh|Eighth|Ninth|Tenth|\d{1,2}(?:st|nd|rd|th))\s+Edition$",
+    re.IGNORECASE,
+)
+_FRONT_MATTER_PAGES = 12  # the copyright page is searched for in these
+_SMALL_WORDS = frozenset(
+    "a an and as at but by for from in into nor of on or the to vs via with".split()
+)
+
+
+def _title_case(title: str) -> str:
+    """CIP titles are in sentence case ("Universal principles of branding");
+    capitalise them as a title, keeping small words and existing capitals."""
+    words = title.split()
+    return " ".join(
+        w if (k and w.lower() in _SMALL_WORDS) or not w[:1].islower() else w[:1].upper() + w[1:]
+        for k, w in enumerate(words)
+    )
+
+
+_TITLE_PAGE_SCAN = 6  # an unbookmarked title page sits among these (after cover art)
+# ("Foreword by …" is a title-page credit; a real foreword is too long.)
+_NOT_TITLE_PAGE_RE = re.compile(r"\b(?:contents|copyright|dedicat\w*|isbn)\b|©", re.I)
+
+
+def _unmarked_title_page(pages: list[list[_Block]]) -> list[_Block] | None:
+    """The first page with any text, if it reads as a title page: a few
+    short blocks (title, subtitle, author), nothing else. Only that page is
+    considered — a later sparse page is as likely an epigraph."""
+    for blocks in pages[:_TITLE_PAGE_SCAN]:
+        paras = [b for b in blocks if b.kind == "para" and b.text.strip()]
+        if not paras:
+            continue  # the cover: an image
+        text = " ".join(b.text for b in paras)
+        if len(paras) <= 6 and len(text) <= 300 and not _NOT_TITLE_PAGE_RE.search(text):
+            return blocks
+        return None
+    return None
+
+
+def _front_matter_meta(pages: list[list[_Block]]) -> tuple[str, str]:
+    """(title, author) from a copyright page, "" when absent: its CIP data,
+    else the title lines set above a "Copyright ©" notice."""
+    for blocks in pages:
+        paras = [b.text for b in blocks if b.kind == "para"]
+        page_text = " ".join(paras)
+        if _CIP_CONTEXT_RE.search(page_text):
+            m = _CIP_RE.search(page_text)
+            if m:
+                title = _title_case(m.group("title").split(" : ")[0])
+                return title, m.group("author").split(";")[0]
+        for k, text in enumerate(paras[:3]):
+            if not (k and _COPYRIGHT_RE.match(text)):
+                continue
+            head = [p.strip() for p in paras[:k]]
+            if len(head) >= 2 and _EDITION_RE.match(head[-1]):
+                return f"{head[-2]}, {head[-1]}", ""
+            if len(head) == 1 and len(head[0]) <= 120 and not head[0].endswith("."):
+                return head[0], ""
+    return "", ""
 
 
 # ---------------------------------------------------------------------------
@@ -1371,6 +1554,14 @@ def extract_markdown(
                     if title:
                         break
         author = _sane_meta(meta.get("Author"))
+        if not (title and author):
+            # Many print PDFs carry only an ISBN filename as metadata; the
+            # copyright page still names the book (and often its author).
+            fm_title, fm_author = _front_matter_meta(pages[:_FRONT_MATTER_PAGES])
+            title = title or _sane_meta(fm_title)
+            author = author or _sane_meta(fm_author)
+        if not title and (page := _unmarked_title_page(pages)) is not None:
+            title = _sane_meta(_title_from_page(page))
     finally:
         pdf.close()
 
@@ -1402,9 +1593,34 @@ _CONTINUED_MIN_CHARS = 30
 _OPEN_END = (".", "!", "?", ":", ";", '"', "”", "’", ")", "…", "]")
 
 
+# A paragraph ending on one of these words stops mid-sentence, so a
+# capitalised block that FINISHES the sentence continues it ("…currently at
+# the" / "University of Vermont."). Particles that can end a phrase ("log
+# in", "stand by") are deliberately absent. Figure labels and captions often
+# sit between the halves instead ("…taper to an" / "Negative Feedback
+# Loop"), hence the sentence-end and caption tests on the next block.
+_DANGLING_WORD_RE = re.compile(
+    r"(?:^|\s)(?:the|a|an|of|and|or|nor|to|for|with|from|than|that|its|their|his|her|our|your)$"
+)
+_CAPTION_LEAD_RE = re.compile(
+    r"^(?:Above|Below|Opposite|Left|Right|Top|Bottom|Facing|Figure|Fig\.|Table|Plate|Source)\b"
+)
+_DANGLING_MIN_CHARS = 50  # shorter is a heading or a label ("The simplest use of yield from")
+
+
 def _joined(prev: str, nxt: str) -> str | None:
     """``prev`` + ``nxt`` as one paragraph if ``nxt`` continues ``prev``."""
-    if not nxt[:1].islower() or prev.startswith(("#", "|", "```", "<!--")):
+    if prev.startswith(("#", "|", "```", "<!--")) or not nxt[:1].isalpha():
+        return None
+    if not nxt[:1].islower():
+        if (
+            len(prev) >= _DANGLING_MIN_CHARS
+            and _DANGLING_WORD_RE.search(prev)
+            and nxt.rstrip().endswith((".", "!", "?", "…", "”", '"', "’"))
+            and not _CAPTION_LEAD_RE.match(nxt)
+            and not _BULLET_START_RE.match(nxt)
+        ):
+            return prev + " " + nxt
         return None
     if prev.endswith(("\x02", "\xad")):
         return prev[:-1] + "\x02" + nxt

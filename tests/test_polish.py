@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.server
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -348,6 +349,28 @@ class TestSummarize:
     def test_server_error_gives_none(self, mock_server):
         _MockOllama.behaviour = "error"
         assert polish.summarize_markdown(self._DOC, mock_server, "llama3.2") is None
+
+    def _fake_generate(self, monkeypatch, elapsed: float) -> list:
+        calls: list = []
+        clock = iter([0.0, elapsed])
+        monkeypatch.setattr(polish, "_resolve_protocol", lambda endpoint: "ollama")
+        monkeypatch.setattr(polish, "time", SimpleNamespace(monotonic=lambda: next(clock)))
+        monkeypatch.setattr(
+            polish, "_generate", lambda *a, **k: calls.append(k.get("schema")) or None
+        )
+        return calls
+
+    def test_fast_rejection_is_retried_in_plain_text(self, monkeypatch):
+        calls = self._fake_generate(monkeypatch, elapsed=0.5)
+        assert polish.summarize_markdown(self._DOC, "http://x", "m") is None
+        assert calls == [polish._SUMMARY_SCHEMA, None]
+
+    def test_timeout_is_not_retried(self, monkeypatch):
+        # Review finding: a timed-out structured request was repeated in
+        # plain text, doubling a 180 s wait behind the save's watch cursor.
+        calls = self._fake_generate(monkeypatch, elapsed=polish._SCHEMA_REJECT_S + 1)
+        assert polish.summarize_markdown(self._DOC, "http://x", "m") is None
+        assert calls == [polish._SUMMARY_SCHEMA]
 
     def test_disabled_without_endpoint_or_model(self):
         assert polish.summarize_markdown(self._DOC, "", "llama3.2") is None

@@ -87,6 +87,15 @@ class TestShadowText:
         text = "Bookkeeping codes XXXX XXXX XXXX 1234 and primers AATT CCGG AACCGGTT.\n"
         assert fix_shadow_text(text, CleanupStats()) == text
 
+    def test_hex_colours_untouched(self):
+        # Review finding: "FFAABBCC" became "FABC" and a swatch label
+        # "FFEEDD" alone on its line became "FED".
+        text = "Set the ARGB value to FFAABBCC here\nFFEEDD\nSwatches AABBCC DDEEFF\n"
+        assert fix_shadow_text(text, CleanupStats()) == text
+
+    def test_hex_lettered_word_repaired_inside_a_shadow_run(self):
+        assert fix_shadow_text("BBEEDD RROOOOMM IIDDEEAASS\n", CleanupStats()) == "BED ROOM IDEAS\n"
+
     def test_short_doubled_words_repaired_in_company(self):
         assert fix_shadow_text("tthhee GG rriidd\n", CleanupStats()) == "the G rid\n"
 
@@ -195,6 +204,29 @@ class TestPageNoise:
         stats = CleanupStats()
         assert "xvii" in strip_page_noise(text, stats)
 
+    def test_repl_output_inside_fences_kept(self):
+        # Corpus finding (Clean Code in Python): a REPL's bare "5432" / "42"
+        # output lines were deleted from fenced listings as page numbers.
+        block = '```\n>>> os.getenv("DPORT", 5432)\n5432\n```\n\nProse.\n\n'
+        text = "".join(block.replace("5432", str(n)) for n in (5432, 42, 7, 99, 12, 8))
+        stats = CleanupStats()
+        assert strip_page_noise(text, stats) == text
+        assert stats.removed_noise_lines == 0
+
+    def test_layout_engine_output_keeps_repeated_lines(self):
+        # Corpus finding: pdflayout already removes furniture from the page
+        # margins, so on its output this pass only deleted content — step
+        # labels, citations ("Elsevier, 2007"), a chart's years.
+        text = "".join(f"Step {n % 3 + 1}\n\nDraw panel border {n}.\n\n" for n in range(8))
+        assert _clean(text, engine="pdflayout").count("Step 1") == text.count("Step 1")
+        assert _clean(text, engine="markitdown").count("Step 1") < text.count("Step 1")
+
+    def test_bare_page_numbers_outside_fences_still_removed(self):
+        text = "".join(f"Prose on page {n}.\n{n}\n" for n in range(10, 16)) + "```\n3\n```\n"
+        out = strip_page_noise(text, CleanupStats())
+        assert "\n11\n" not in out
+        assert out.endswith("```\n3\n```\n")
+
 
 # ---------------------------------------------------------------------------
 # plain-text TOC stripping
@@ -272,6 +304,21 @@ class TestPlainToc:
         text = "A heading\n\nSome text • 5\n\nMore text ..... 9\n"
         stats = CleanupStats()
         assert strip_plain_toc(text, stats) == text  # below the signal gate
+
+    def test_fenced_console_tables_untouched(self):
+        # Box-drawn console tables match the leader pattern; inside a fence
+        # they are output, and dropping a fence marker would unbalance the
+        # rest of the document.
+        table = "```\n┌──────┬──────┐\n│ id   │ name │\n├──────┼──────┤\n└──────┴──────┘\n```\n"
+        text = "Run the query:\n\n" + table + "\nThen again:\n\n" + table * 3
+        stats = CleanupStats()
+        assert strip_plain_toc(text, stats) == text
+        assert stats.toc_lines_removed == 0
+
+    def test_fenced_pipe_output_is_not_a_toc_table(self):
+        rows = "\n".join(f"| {n} |  | {n + 1} |" for n in range(1, 9))
+        text = f"```\n{rows}\n```\n"
+        assert _clean(text, fence_code=False, join_wrapped=False) == text
 
 
 # ---------------------------------------------------------------------------

@@ -995,7 +995,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         if not self.clean_var.get():
             return result.markdown
         if path not in self._clean_cache:
-            cleaned, stats = clean_markdown(result.markdown)
+            cleaned, stats = clean_markdown(result.markdown, engine=result.engine)
             self._clean_cache[path] = cleaned
             self._clean_stats[path] = stats
         return self._clean_cache[path]
@@ -1172,7 +1172,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 return
             try:
                 if clean_flag:
-                    cleaned, stats = clean_markdown(result.markdown)
+                    cleaned, stats = clean_markdown(result.markdown, engine=result.engine)
                     pack = (cleaned, stats, assess_markdown(cleaned))
                 else:
                     pack = (None, None, assess_markdown(result.markdown))

@@ -131,7 +131,7 @@ def _convert(args: argparse.Namespace) -> int:
 
         markdown = result.markdown
         if not args.no_clean:
-            markdown, stats = clean_markdown(markdown)
+            markdown, stats = clean_markdown(markdown, engine=result.engine)
             record["cleanup"] = stats.summary()
 
         if args.polish and settings.ollama_endpoint and settings.polish_model:

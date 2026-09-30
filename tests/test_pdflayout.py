@@ -145,6 +145,22 @@ class TestParagraphs:
         md = _extract(tmp_path, pages, name="b.pdf", anchors=True).markdown
         assert md.index("ends in the") < md.index("<!-- page 2 -->") < md.index("middle of")
 
+    def test_capitalised_continuation_after_a_dangling_word(self, tmp_path):
+        # Corpus finding (Drawing Comics Lab, UPoD "See also" lists): a
+        # sentence cut after "the"/"and" resumed with a proper noun.
+        pages = [
+            [Text("He has taught at Yale, Long Island University, and currently at the", 72, 100)],
+            [Text("University of Vermont.", 72, 700)],
+        ]
+        md = _extract(tmp_path, pages).markdown
+        assert "currently at the University of Vermont." in md
+
+    def test_capitalised_label_after_a_dangling_word_is_not_merged(self):
+        prev = "Systems with positive feedback loops will eventually collapse, or taper to an"
+        assert pdflayout._joined(prev, "Negative Feedback Loop") is None  # a figure label
+        assert pdflayout._joined(prev, "Above: The loop in a thermostat.") is None  # a caption
+        assert pdflayout._joined("The simplest use of yield from", "In its basic form, it works.") is None
+
     def test_new_sentence_after_a_break_is_not_merged(self, tmp_path):
         pages = [
             [Text("A complete paragraph that ends properly with a period.", 72, 100)],
@@ -320,8 +336,10 @@ class TestOutline:
     def test_title_from_metadata_when_sane(self, tmp_path):
         res = _extract(tmp_path, self._book(), title="A Real Book Title")
         assert res.title == "A Real Book Title"
+        # A filename is rejected; the first text page, set like a title
+        # page, names the book instead.
         res = _extract(tmp_path, self._book(), name="b.pdf", title="9781610581899.pdf")
-        assert res.title == ""
+        assert res.title == "A Cover Line"
 
 
 class TestFigureMarkers:
@@ -363,8 +381,79 @@ class TestDocumentRepair:
         out = pdflayout._repair_ligatures("An e\x07ective plan.", pdflayout.LayoutStats())
         assert out == "An effective plan."
 
+    def test_ligature_codes_differ_per_font(self):
+        # Corpus finding (Making and Breaking the Grid): every font subset
+        # picks its own code for "ff", so a code seen in one word only has
+        # no votes. A known word inside it ("different") vouches instead,
+        # and a surname fixed via one font's code resolves the others.
+        text = (
+            "A di\x81erent grid. An undi\x96erentiated field. "
+            "Ivan Chermaye\x81 and Tom Geismar; later Chermaye\x16 alone."
+        )
+        out = pdflayout._repair_ligatures(text, pdflayout.LayoutStats())
+        assert out == (
+            "A different grid. An undifferentiated field. "
+            "Ivan Chermayeff and Tom Geismar; later Chermayeff alone."
+        )
+
+    def test_ambiguous_word_follows_its_codes_other_words(self):
+        # "o?" is "off" or "oft" (both known): the code's unambiguous word
+        # ("le?" can only be "left") decides.
+        text = "The le\x05 side, o\x05 quoted. An oft repeated rule."
+        out = pdflayout._repair_ligatures(text, pdflayout.LayoutStats())
+        assert out == "The left side, oft quoted. An oft repeated rule."
+
+    def test_th_ligature_is_a_capitals(self):
+        text = "The Royal \x1featre opened; the theatre closed."
+        out = pdflayout._repair_ligatures(text, pdflayout.LayoutStats())
+        assert out == "The Royal Theatre opened; the theatre closed."
+
     def test_unresolvable_control_char_dropped(self):
         assert pdflayout._repair_ligatures("x\x05y", pdflayout.LayoutStats()) == "xy"
+
+    def test_cip_data_names_title_and_author(self):
+        # Corpus finding: 7 of 18 Quarto books carry only an ISBN filename
+        # as Title metadata and have no title-page bookmark.
+        page = [
+            pdflayout._Block("para", "Library of Congress Cataloging-in-Publication Data"),
+            pdflayout._Block(
+                "para",
+                "Names: Sandler, Lyle H., author. Title: Universal principles of storytelling "
+                "for designers : 100 key concepts / Lyle H. Sandler. Description: Beverly, MA.",
+            ),
+        ]
+        assert pdflayout._front_matter_meta([[], page]) == (
+            "Universal Principles of Storytelling for Designers",
+            "Lyle H. Sandler",
+        )
+
+    def test_title_above_a_copyright_notice(self):
+        page = [
+            pdflayout._Block("para", "Clean Code in Python"),
+            pdflayout._Block("para", "Second Edition"),
+            pdflayout._Block("para", "Copyright © 2020 Packt Publishing All rights reserved."),
+        ]
+        assert pdflayout._front_matter_meta([page]) == ("Clean Code in Python, Second Edition", "")
+
+    def test_unmarked_title_page(self):
+        title_page = [
+            pdflayout._Block("para", "Drawing Comics Lab", h=40),
+            pdflayout._Block("para", "Characters, Panels, Storytelling", h=14),
+            pdflayout._Block("para", "Robyn Chapman", h=12),
+        ]
+        page = pdflayout._unmarked_title_page([[], title_page, [pdflayout._Block("para", "x")]])
+        assert pdflayout._title_from_page(page) == "Drawing Comics Lab"
+        # A title ending in a colon continues in the (smaller) next block.
+        colon = [pdflayout._Block("para", "Design Elements:", h=46),
+                 pdflayout._Block("para", "Color Fundamentals", h=33)]
+        assert pdflayout._title_from_page(colon) == "Design Elements: Color Fundamentals"
+        # A first text page that is not a title page ends the search.
+        dedication = [pdflayout._Block("para", "Dedication To my teachers.", h=12)]
+        assert pdflayout._unmarked_title_page([[], dedication, title_page]) is None
+
+    def test_body_text_title_field_is_not_cip(self):
+        page = [pdflayout._Block("para", "Fill in Title: My form / Draft. Then save it.")]
+        assert pdflayout._front_matter_meta([page]) == ("", "")
 
     def test_inline_strings_are_repaired_and_yaml_safe(self):
         # Titles taken from a title page skip the body's text repairs unless
@@ -376,6 +465,12 @@ class TestDocumentRepair:
     def test_hyphen_resolution(self):
         text = "a devi\x02ation and a long\x02term view; long-term plans"
         assert pdflayout._resolve_hyphens(text) == "a deviation and a long-term view; long-term plans"
+
+    def test_number_compound_keeps_its_hyphen(self):
+        # Review finding: digits never reach the word group, so "24-" /
+        # "hour" came out as "24hour" and "3-" / "D" as "3D".
+        text = "a 24\x02hour day, 3\x02D art and 2019\x022020"
+        assert pdflayout._resolve_hyphens(text) == "a 24-hour day, 3-D art and 2019-2020"
 
     def test_dangling_hyphen_never_swallows_a_paragraph_gap(self):
         # Regression: a break left open at a paragraph's end once glued the

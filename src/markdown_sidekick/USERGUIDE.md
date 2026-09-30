@@ -63,7 +63,9 @@ can read when you need it.
   - **Output** — *One Markdown file* (one .md per source), *Chapter files*
     (each book becomes a folder of per-chapter files + index.md +
     manifest.json), or *AI-sized sections* (parts guaranteed to fit an AI's
-    context window, even for documents with no headings)
+    context window, even for documents with no headings; short chapters are
+    packed together, so a book of 130 one-page topics becomes a handful of
+    parts rather than 130 files)
   - **Optimize for** — sizes AI sections for Claude (~30k tokens), ChatGPT
     (~12k), Gemini (~60k), or a small Local LLM (~4k)
   - **💾 Save Markdown…** — a single file gets a save dialog; batches and
