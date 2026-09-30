@@ -34,14 +34,15 @@ can read when you need it.
 
 | Badge | Meaning |
 | ----- | ------- |
-| markitdown | Digital document, converted directly (fastest) |
+| pdflayout | Digital PDF read by its page layout: columns in order, printer's marks dropped, bookmarks as headings |
+| markitdown | Other digital documents (Word, PowerPoint, HTML, …), converted directly |
 | ocr | Image file read by local OCR |
 | ocr+text | PDF with scanned/vector pages: OCR where needed, text kept elsewhere |
 | whisper | Audio transcribed by the local Whisper model |
 | mineru | Converted by your optional MinerU server |
 | error | Conversion failed — click the row for a plain-English explanation, what to try, and a **↻ Retry** button (also on right-click) |
 
-- **OCR images & scanned PDFs** — untick to force everything through markitdown
+- **OCR images & scanned PDFs** — untick to skip OCR (text-layer extraction only)
 
 **Preview panel (right)**
 
@@ -62,7 +63,9 @@ can read when you need it.
   - **Output** — *One Markdown file* (one .md per source), *Chapter files*
     (each book becomes a folder of per-chapter files + index.md +
     manifest.json), or *AI-sized sections* (parts guaranteed to fit an AI's
-    context window, even for documents with no headings)
+    context window, even for documents with no headings; short chapters are
+    packed together, so a book of 130 one-page topics becomes a handful of
+    parts rather than 130 files)
   - **Optimize for** — sizes AI sections for Claude (~30k tokens), ChatGPT
     (~12k), Gemini (~60k), or a small Local LLM (~4k)
   - **💾 Save Markdown…** — a single file gets a save dialog; batches and
@@ -100,6 +103,13 @@ results always match the current configuration.
 
 When **Clean output** is on (the default), the raw conversion is tidied:
 
+- **Printer's marks removed** — InDesign slug lines ("…_001-077.indd 1
+  3/23/17"), job tickets ("Job No: … Title: …"), DTP stamps and "(RAY)(Text)"
+  operator tags from print-ready PDFs are stripped (the PDF layout reader
+  already leaves them out; this catches older or non-PDF conversions)
+- **Doubled "shadow" text repaired** — drop-shadow type extracted twice
+  ("DDrraawwiinngg") is restored ("Drawing"); ordinary words with repeated
+  letters are never touched
 - **Characters normalized** — PDF ligatures (ﬁ → fi, ﬂ → fl) are decomposed so
   text is searchable; soft hyphens and no-break spaces are fixed; runs of the
   � replacement character are scrubbed
@@ -127,6 +137,34 @@ When **Clean output** is on (the default), the raw conversion is tidied:
 The line beside the preview reports what was changed, e.g.
 *"Cleaned (276 fixes, 1,824 chars normalized)"*.
 Untick **Clean output** at any time to see or save the unmodified conversion.
+
+---
+
+## How PDFs are read
+
+Digital PDFs are read by their **page layout**, not as a stream of text:
+
+- **Columns in order** — multi-column pages are read one column at a time,
+  top to bottom, so paragraphs never come out sliced across columns into
+  tables, and margin notes land after the text they annotate instead of
+  inside its sentences. Genuine number tables stay Markdown tables.
+- **Printer's marks dropped** — print-ready PDFs carry job tickets, crop-mark
+  labels and even the facing page of a spread *outside the trimmed page*;
+  anything beyond the PDF's trim box is left out.
+- **Doubled type repaired** — drop-shadow and fake-bold lettering drawn twice
+  is read once.
+- **Bookmarks become headings** — the PDF's own table of contents (its
+  bookmarks) turns chapter and section titles into `#`/`##` headings, which
+  is what *Chapter files* export splits on. Cover, title, copyright and
+  contents bookmarks are treated as front matter.
+- **Code stays code** — text set in a fixed-width font becomes a fenced code
+  block with its indentation intact.
+- **Words stay whole** — words hyphenated across a line break are rejoined
+  (real compounds like "long-term" keep their hyphen), and ligatures a font
+  failed to label ("di?erent") are restored.
+
+If a particular PDF reads worse this way, untick **Column-aware PDF reading**
+in Settings → Conversion to use the simpler text-stream reader instead.
 
 ---
 
@@ -184,6 +222,7 @@ Settings are grouped into three tabs — **Conversion**, **Output**, and
 | --- | ------- | ------------ |
 | Conversion | OCR images & scanned PDFs | Master switch for the OCR engine |
 | Conversion | OCR device | *auto* uses your GPU (DirectML) when present — about 5× faster; *cpu*/*gpu* force one |
+| Conversion | Column-aware PDF reading | Read PDFs by page layout (see *How PDFs are read*); untick for the simpler text-stream reader |
 | Conversion | Transcribe audio files | Master switch for audio/video transcription |
 | Conversion | Whisper model | Speech model size (see above) |
 | Conversion | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
@@ -191,7 +230,7 @@ Settings are grouped into three tabs — **Conversion**, **Output**, and
 | Output | Clean output / Rendered preview | Default states for the preview toggles |
 | Output | YAML front matter | Saved files start with title/source/date/token metadata |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
-| Output | Extract PDF figures | Embedded images land in an assets/ folder with links |
+| Output | Extract PDF figures | On by default: images of at least 120 px land in an `images/` folder, linked right where they appear in the text |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
 | Local AI | Polish / caption / summary model | Optional local-LLM passes: artifact repair, figure alt-text, and a 2–3 sentence document summary written into the saved file's front matter (blank = that pass is off) |
 
@@ -201,9 +240,10 @@ probes localhost and never calls out to the internet.
 **AI-friendly export, in short:** big single files overflow AI context windows.
 With *Chapter files* or *AI-sized sections* selected in the export bar, a
 500-page book becomes a folder of
-chapter files (each with front matter saying which book and part it is), an
-`index.md`, and a `manifest.json` — ready for Claude, ChatGPT, Gemini, or any
-RAG pipeline. A **quality score** and estimated token count for the selected
+chapter files split at the book's own chapters (`00-front-matter.md`,
+`01-…`, each with front matter saying which book, author and part it is),
+an `images/` folder, an `index.md`, and a `manifest.json` (titles, token and
+image counts) — ready for Claude, ChatGPT, Gemini, or any RAG pipeline. A **quality score** and estimated token count for the selected
 file appear beside the preview.
 
 Settings persist between sessions in `settings.json` (see *Where files live*).
@@ -265,6 +305,8 @@ MarkdownSidekick.exe --cli convert book.pdf --split-chapters   (standalone app)
 `--ai-target` (Claude / ChatGPT / Gemini / "Local LLM") writes the same
 AI-sized book folders as the export bar — every part fits that platform's
 context budget. The MCP tools take a matching `max_tokens` argument.
+`--images` / `--no-images` override the figure-extraction setting, and
+`--no-layout` reads PDFs with the simpler text-stream reader.
 
 ---
 
@@ -318,7 +360,9 @@ Check Settings → *Transcribe audio files* is on. A silent file produces
 
 | Module | Role |
 | ------ | ---- |
-| converter.py | Routing: picks markitdown / OCR / whisper / MinerU per file |
+| converter.py | Routing: picks the PDF layout reader / markitdown / OCR / whisper / MinerU per file |
+| pdflayout.py | Digital-PDF reader: trim-box clipping, column order, bookmark headings |
+| figures.py | Figure extraction to images/ and in-place linking |
 | ocr.py | RapidOCR + pypdfium2: page triage, rendering, recognition |
 | audio.py | faster-whisper transcription, model management |
 | cleanup.py | Noise stripping, TOC removal, code fencing |
@@ -336,9 +380,9 @@ path when ≥ 15% of its pages look scanned.
 
 | Engine | Used for | License |
 | ------ | -------- | ------- |
-| Microsoft markitdown | Digital documents | MIT |
+| Microsoft markitdown | Digital documents (non-PDF) | MIT |
 | RapidOCR (ONNX) | OCR | Apache-2.0 |
-| pypdfium2 / PDFium | PDF rendering & triage | Apache/BSD |
+| pypdfium2 / PDFium | PDF layout reading, rendering, triage, figures | Apache/BSD |
 | faster-whisper + PyAV | Audio transcription | MIT/BSD |
 | MinerU (optional, external) | High-fidelity PDF | Apache-2.0-based |
 

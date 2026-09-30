@@ -35,6 +35,9 @@ class Settings:
     """All user-configurable options, with sensible defaults."""
 
     enable_ocr: bool = True
+    # Column-aware PDF reading (pdflayout): TrimBox clipping, reading order by
+    # column, bookmark headings. Off = the legacy markitdown PDF path.
+    pdf_layout: bool = True
     # OCR compute device: "auto" (DirectML GPU when present, else CPU),
     # "cpu", or "gpu". Kept as a plain tuple check in normalize() — settings
     # must not import ocr.py (it pulls numpy/pypdfium2 at module level).
@@ -54,7 +57,9 @@ class Settings:
     export_style: str = "single"
     ai_target: str = "Claude"  # which platform "ai" sections are sized for
     page_anchors: bool = False  # <!-- p.N --> comments on PDF conversions
-    extract_images: bool = False  # extract PDF figures to an assets/ folder
+    # Extract PDF figures (>=120 px) to an images/ folder at save time and
+    # link each one where it sits in the text.
+    extract_images: bool = True
     # -- optional local-LLM extras (blank endpoint = disabled) ----------------
     ollama_endpoint: str = ""  # e.g. http://localhost:11434
     polish_model: str = ""  # e.g. llama3.2 — repairs residual artifacts
@@ -95,6 +100,7 @@ class Settings:
         """Coerce every field to its declared type so bad/hand-edited input
         (wrong types, nulls) can never crash load or break routing."""
         self.enable_ocr = bool(self.enable_ocr)
+        self.pdf_layout = bool(self.pdf_layout)
         if self.ocr_device not in ("auto", "cpu", "gpu"):
             self.ocr_device = "auto"
         self.enable_audio = bool(self.enable_audio)

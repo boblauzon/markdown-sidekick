@@ -71,6 +71,7 @@ def _get_engine() -> ConversionEngine:
             whisper_model=s.whisper_model,
             mineru_endpoint=s.mineru_endpoint,
             page_anchors=s.page_anchors,
+            pdf_layout=s.pdf_layout,
         )
     return _engine
 
@@ -97,7 +98,7 @@ def _convert_cached(resolved: str, clean: bool) -> tuple[str | None, str | None]
                 return None, result.error
             markdown = result.markdown
             if clean:
-                markdown, _stats = clean_markdown(markdown)
+                markdown, _stats = clean_markdown(markdown, engine=result.engine)
     while len(_convert_cache) >= _CACHE_MAX:
         _convert_cache.pop(next(iter(_convert_cache)))
     _convert_cache[key] = markdown
@@ -200,7 +201,7 @@ def convert_outline(
     if conv_err is not None:
         return {"error": conv_err}
     assert markdown is not None
-    sections = export.split_for_ai(markdown, max_tokens=max_tokens)
+    sections = export.split_for_ai(markdown, max_tokens=max_tokens, pack=False)
     return {
         "title": export.document_title(markdown, os.path.basename(resolved)),
         "est_tokens": export.estimate_tokens(markdown),
@@ -230,7 +231,7 @@ def convert_section(
     if conv_err is not None:
         return f"Error converting '{os.path.basename(resolved)}': {conv_err}"
     assert markdown is not None
-    sections = export.split_for_ai(markdown, max_tokens=max_tokens)
+    sections = export.split_for_ai(markdown, max_tokens=max_tokens, pack=False)
     if not 0 <= section_index < len(sections):
         return f"Error: section_index must be 0..{len(sections) - 1}"
     return sections[section_index].markdown
@@ -269,7 +270,7 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
                 result = _get_engine().convert_file(tmp)
                 markdown = result.markdown
                 if result.ok and clean:
-                    markdown, _stats = clean_markdown(markdown)
+                    markdown, _stats = clean_markdown(markdown, engine=result.engine)
     if not result.ok:
         return f"Error converting '{url}': {result.error}"
     if len(markdown) > max_chars:
@@ -280,12 +281,13 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
 @mcp.tool
 def list_capabilities() -> dict:
     """Report which local conversion engines are available in this install."""
-    from . import audio, mineru, ocr
+    from . import audio, mineru, ocr, pdflayout
 
     s = Settings.load()
     return {
         "image_ocr": ocr.ocr_available(),
         "pdf_ocr": ocr.pdf_ocr_available(),
+        "pdf_layout": pdflayout.layout_available() and s.pdf_layout,
         "audio_transcription": audio.audio_available(),
         "mineru_endpoint": mineru.mineru_configured(s.mineru_endpoint),
         "whisper_model": s.whisper_model,

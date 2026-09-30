@@ -56,3 +56,22 @@ class TestLocalAIModels:
         assert Settings.load().summary_model == ""
         _write_settings(tmp_path, {"summary_model": 42})
         assert Settings.load().summary_model == "42"
+
+
+class TestPdfReading:
+    def test_layout_and_figures_default_on(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        s = Settings.load()  # no file yet: pure defaults
+        assert s.pdf_layout is True and s.extract_images is True
+
+    def test_saved_opt_out_is_kept(self, tmp_path, monkeypatch):
+        # Existing users who never enabled figure extraction keep their choice.
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        _write_settings(tmp_path, {"extract_images": False, "pdf_layout": False})
+        s = Settings.load()
+        assert s.extract_images is False and s.pdf_layout is False
+
+    def test_junk_pdf_layout_coerced_to_bool(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+        _write_settings(tmp_path, {"pdf_layout": 0})
+        assert Settings.load().pdf_layout is False

@@ -46,6 +46,19 @@ class TestSplit:
         assert any(t.startswith("B — Part 0") for t in titles)
         assert any(t.startswith("B — Part 2") for t in titles)
 
+    def test_part_divider_pages_fold_into_the_next_chapter(self):
+        md = (
+            "# Introduction\n\nWhy grids.\n\n# GETTING STARTED\n\n<!-- page 9 -->\n\n"
+            "# Elements of a Grid\n\nMargins and columns.\n\n# Gallery\n\n"
+            "![Figure 30.1](images/fig_p30_1.jpg)\n\n# Index\n\nterms\n"
+        )
+        secs = split_chapters(md)
+        # The empty divider joins the next chapter; a figures-only chapter
+        # is content and stays on its own.
+        assert [s.title for s in secs] == ["Introduction", "Elements of a Grid", "Gallery", "Index"]
+        assert secs[1].markdown.startswith("# GETTING STARTED")
+        assert "Margins and columns." in secs[1].markdown
+
     def test_slugify(self):
         assert slugify("Chapter 2: SOLID & Friends!") == "chapter-2-solid-friends"
 
@@ -99,8 +112,78 @@ class TestSplitForAi:
     def test_chaptered_book_uses_chapters(self):
         from markdown_sidekick.export import split_for_ai
 
-        secs = split_for_ai(_BOOK, max_tokens=30_000)
-        assert [s.title for s in secs][:2] == ["Front matter", "Chapter 1: Getting Started"]
+        # Chapters that can't share a part keep chapter boundaries as breaks
+        # (each ~20 tokens here); a roomier budget packs them.
+        secs = split_for_ai(_BOOK, max_tokens=25)
+        assert [s.title for s in secs] == [
+            "Front matter", "Chapter 1: Getting Started", "Chapter 2: Going Deeper"
+        ]
+        secs = split_for_ai(_BOOK, max_tokens=30)
+        assert [s.title for s in secs] == [
+            "Front matter – Chapter 1: Getting Started", "Chapter 2: Going Deeper"
+        ]
+
+    def test_small_chapters_are_packed_up_to_the_budget(self):
+        from markdown_sidekick.export import split_chapters, split_for_ai
+
+        # 60 one-page "principles" (the UPoD shape): one file each was 134
+        # parts at every budget. Packed, each part fills toward the budget.
+        book = "".join(f"# Principle {i}\n\n" + ("word " * 180) + "\n\n" for i in range(60))
+        secs = split_for_ai(book, max_tokens=2_000)
+        assert 5 <= len(secs) < 60
+        assert all(s.est_tokens <= 2_000 for s in secs)  # still a hard cap
+        assert secs[0].title.startswith("Principle 0 – Principle ")
+        # Parts break only at chapter boundaries, and nothing is lost.
+        assert all(s.markdown.startswith("# Principle ") for s in secs)
+        chapters = split_chapters(book, max_tokens=2_000)
+        assert sum(s.markdown.count("# Principle ") for s in secs) == len(chapters) == 60
+
+    def test_packing_never_splits_a_fence_or_joins_an_oversize_part(self):
+        from markdown_sidekick.export import split_for_ai
+
+        fenced = "```python\n" + ("x = 1\n" * 900) + "```\n"
+        book = "# A\n\nshort\n\n# B\n\n" + fenced + "\n# C\n\nshort\n\n# D\n\nshort\n"
+        secs = split_for_ai(book, max_tokens=500)
+        titles = [s.title for s in secs]
+        assert "B" in titles  # the indivisible listing stands alone
+        assert all(s.markdown.count("```") % 2 == 0 for s in secs)
+        assert titles[-1] == "C – D"
+
+    def test_heading_only_section_travels_with_what_follows(self):
+        from markdown_sidekick.export import Section, _pack
+
+        body = "word " * 300 + "\n"  # ~375 tokens
+        secs = [
+            Section("One", "# One\n\n" + body),
+            Section("Opener", "## Opener\n"),  # a chapter-opener page
+            Section("Two", "# Two\n\n" + body),
+        ]
+        assert [s.title for s in _pack(secs, max_tokens=400)] == ["One", "Opener – Two"]
+
+    def test_hard_split_never_ends_a_part_on_a_heading(self):
+        from markdown_sidekick.export import split_for_ai
+
+        text = ("prose " * 60 + "\n\n") * 3 + "## Next Topic\n\n" + ("prose " * 60 + "\n\n") * 3
+        for s in split_for_ai(text, max_tokens=250):
+            last = [l for l in s.markdown.strip().split("\n") if l.strip()][-1]
+            assert not last.startswith("#")
+
+    def test_whole_book_within_budget_is_one_file(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        res = export_book(_BOOK, tmp_path / "b", source="b.pdf", ai_sections=True)
+        assert [p.name for p in res.paths] == ["b.md"]
+
+    def test_packed_front_matter_part_is_not_numbered_00(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        book = "Preface text.\n\n" + "".join(
+            f"# Chapter {i}\n\n" + ("word " * 300) + "\n\n" for i in range(1, 7)
+        )
+        res = export_book(book, tmp_path / "b", source="b.pdf", ai_sections=True, max_tokens=900)
+        names = [p.name for p in res.paths]
+        assert names[0].startswith("01-front-matter-chapter-")
+        assert not any(n.startswith("00-") for n in names)
 
     def test_ai_targets_defined(self):
         from markdown_sidekick.export import AI_TARGETS
@@ -130,14 +213,57 @@ class TestExport:
     def test_export_book_writes_parts_index_manifest(self, tmp_path):
         res = export_book(_BOOK, tmp_path / "book", source="book.pdf", engine="ocr")
         assert len(res.paths) == 3
-        assert res.paths[1].name == "02-chapter-1-getting-started.md"
+        # Front matter is 00, so chapter N lands in the file numbered N.
+        assert [p.name for p in res.paths] == [
+            "00-front-matter.md",
+            "01-chapter-1-getting-started.md",
+            "02-chapter-2-going-deeper.md",
+        ]
         part = res.paths[1].read_text(encoding="utf-8")
-        assert "book:" in part and "part:" in part
+        assert "book:" in part and "part: 2 of 3" in part
         index = res.index_path.read_text(encoding="utf-8")
-        assert "[Chapter 1: Getting Started](02-chapter-1-getting-started.md)" in index
+        assert "[Chapter 1: Getting Started](01-chapter-1-getting-started.md)" in index
         manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
         assert manifest["source"] == "book.pdf"
         assert len(manifest["files"]) == 3
+
+    def test_book_without_lead_text_starts_at_01(self, tmp_path):
+        res = export_book("# A\n\na\n\n# B\n\nb\n", tmp_path / "b", source="s.pdf")
+        assert [p.name for p in res.paths] == ["01-a.md", "02-b.md"]
+
+    def test_pdf_title_and_author_win_over_guessing(self, tmp_path):
+        res = export_book(
+            _BOOK, tmp_path / "book", source="makingandbreakingthegrid.pdf",
+            title="Making and Breaking the Grid", author="Timothy Samara",
+        )
+        part = res.paths[1].read_text(encoding="utf-8")
+        assert "book: Making and Breaking the Grid" in part
+        assert "author: Timothy Samara" in part
+        manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
+        assert (manifest["title"], manifest["author"]) == (
+            "Making and Breaking the Grid", "Timothy Samara"
+        )
+        assert "*Timothy Samara*" in res.index_path.read_text(encoding="utf-8")
+        out = tmp_path / "one.md"
+        export_single("plain body\n", out, source="x.pdf", title="Real Title")
+        assert "title: Real Title" in out.read_text(encoding="utf-8")
+
+    def test_front_matter_values_are_yaml_safe(self):
+        fm = build_front_matter({"title": "Bad\x02 Title\x1a\n  here", "empty": "\x07"})
+        assert fm == "---\ntitle: Bad Title here\n---\n\n"
+
+    def test_image_counts_in_front_matter_and_manifest(self, tmp_path):
+        md = (
+            "# Chapter 1: Pictures\n\n![Figure 1.1](images/fig_p1_1.jpg)\n\n"
+            "![Figure 2.1](images/fig_p2_1.png)\n\n# Chapter 2: Words\n\nNo images.\n"
+        )
+        res = export_book(md, tmp_path / "b", source="s.pdf")
+        first = res.paths[0].read_text(encoding="utf-8")
+        assert "image_count: 2" in first
+        assert "image_count" not in res.paths[1].read_text(encoding="utf-8")
+        manifest = json.loads(res.manifest_path.read_text(encoding="utf-8"))
+        assert manifest["total_images"] == 2
+        assert [f["image_count"] for f in manifest["files"]] == [2, 0]
 
     def test_export_book_without_chapters_falls_back_to_single(self, tmp_path):
         res = export_book("no headings here\n", tmp_path / "b", source="x.pdf")
@@ -178,6 +304,25 @@ class TestQuality:
         r = assess_markdown("# T\n\nbody\n")
         assert "Quality" in r.summary()
         assert r.as_dict()["headings"] == 1
+
+    def test_prepress_and_shadow_residue_flagged(self):
+        doc = (
+            "# T\n\n700065 - Grid_001-077.indd 1 3/23/17 5:23 PM\n"
+            "Job No: 05-30592 Title: RP-Graphic Design\n"
+            "DDrraawwiinngg CCoommiiccss LLaabb\n\nThe bookkeeper agreed.\n"
+        )
+        r = assess_markdown(doc)
+        assert r.prepress_residue == 2
+        assert r.doubled_words == 3
+        assert any("prepress" in i for i in r.issues)
+        assert any("doubled" in i for i in r.issues)
+        assert r.as_dict()["prepress_residue"] == 2
+
+    def test_genuinely_doubled_text_is_not_shadow(self):
+        # Corpus finding: a placeholder "IIIIIIII" cost a book its score;
+        # hex colours are doubled on purpose too.
+        r = assess_markdown("# T\n\nSwatch FFEEDD beside IIIIIIII and AATTCCGG.\n")
+        assert r.doubled_words == 0
 
 
 class TestBinaryNoise:

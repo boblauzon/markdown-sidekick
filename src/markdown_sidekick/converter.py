@@ -20,7 +20,7 @@ except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
         "virtual environment or run: pip install \"markitdown[all]\""
     ) from exc
 
-from . import audio, mineru, ocr
+from . import audio, mineru, ocr, pdflayout
 
 
 # File extensions markitdown can meaningfully handle. Used to build the file
@@ -78,6 +78,10 @@ class ConversionResult:
     error: str | None = None
     output_path: Path | None = None
     engine: str = "markitdown"  # which pipeline produced the markdown
+    # Document metadata the PDF layout engine could vouch for ("" = unknown);
+    # export prefers these over guessing from the text.
+    doc_title: str = ""
+    doc_author: str = ""
 
     @property
     def ok(self) -> bool:
@@ -95,6 +99,7 @@ class ConversionEngine:
     Routing per file:
       * image file + OCR enabled  -> RapidOCR
       * scanned/mixed PDF + OCR   -> render scanned pages + OCR, keep text pages
+      * digital PDF               -> column-aware layout engine (pdflayout)
       * everything else           -> markitdown (best for clean digital docs)
     """
 
@@ -105,6 +110,12 @@ class ConversionEngine:
     whisper_model: str = "base"
     mineru_endpoint: str = ""  # blank = disabled
     page_anchors: bool = False  # emit <!-- page N --> markers for PDFs
+    # Column-aware PDF reading (pdflayout). Off = the legacy markitdown path,
+    # kept as an escape hatch for PDFs the geometric reader mishandles.
+    pdf_layout: bool = True
+    # Emit <!-- figure N.K --> markers where images sit, so figure extraction
+    # at export can link each image in place (set from Settings.extract_images).
+    figure_markers: bool = False
     _md: MarkItDown = field(init=False, repr=False)
     _ocr: "ocr.OcrEngine | None" = field(init=False, default=None, repr=False)
     _audio: "audio.AudioTranscriber | None" = field(init=False, default=None, repr=False)
@@ -163,26 +174,70 @@ class ConversionEngine:
                 except Exception:
                     pass  # fall back to local OCR / markitdown
 
+            inner_page = (
+                (lambda p, t: on_subprogress(source, p, t, "page"))
+                if on_subprogress is not None
+                else None
+            )
+            use_layout = self.pdf_layout and pdflayout.layout_available()
             if self.enable_ocr and ocr.pdf_ocr_available() and ext == ".pdf":
                 try:
                     analysis = ocr.analyze_pdf(source)
                     if analysis is not None and analysis.needs_ocr:
-                        inner = (
-                            (lambda p, t: on_subprogress(source, p, t, "page"))
-                            if on_subprogress is not None
-                            else None
-                        )
-                        md = self._ocr_engine().pdf_to_markdown(
-                            source, analysis, on_page=inner
-                        )
+                        engine = self._ocr_engine()
+                        if use_layout:
+                            # One pipeline for mixed PDFs: OCR supplies the
+                            # scanned pages' text, the layout reader the rest
+                            # (plus outline headings and figure markers).
+                            res = pdflayout.extract_markdown(
+                                source,
+                                anchors=True,
+                                figure_markers=self.figure_markers,
+                                ocr_pages=frozenset(analysis.scanned_pages),
+                                ocr_page=engine.ocr_page,
+                                on_page=inner_page,
+                            )
+                            return ConversionResult(
+                                source=source,
+                                markdown=res.markdown,
+                                engine="ocr+text",
+                                doc_title=res.title,
+                                doc_author=res.author,
+                            )
+                        md = engine.pdf_to_markdown(source, analysis, on_page=inner_page)
                         return ConversionResult(
                             source=source, markdown=md, engine="ocr+text"
                         )
                 except Exception:
                     pass  # fall back to markitdown
 
-            # Digital PDFs normally go to markitdown, but page anchors need
-            # per-page extraction — markitdown flattens page boundaries away.
+            # Digital PDFs: read the page geometry (columns, TrimBox, shadow
+            # layers, bookmarks) rather than markitdown's row clustering,
+            # which slices multi-column prose into tables.
+            if use_layout and ext == ".pdf":
+                try:
+                    res = pdflayout.extract_markdown(
+                        source,
+                        anchors=self.page_anchors,
+                        figure_markers=self.figure_markers,
+                        on_page=inner_page,
+                    )
+                    # A scanned PDF with OCR off has no text layer — let
+                    # markitdown have a go instead of returning husks.
+                    body = re.sub(r"<!-- (?:page|figure) [^>]*-->", "", res.markdown)
+                    if len(body.strip()) >= 50:
+                        return ConversionResult(
+                            source=source,
+                            markdown=res.markdown,
+                            engine="pdflayout",
+                            doc_title=res.title,
+                            doc_author=res.author,
+                        )
+                except Exception:
+                    pass  # fall back to markitdown
+
+            # Layout off (or failed): page anchors still need per-page
+            # extraction, which markitdown flattens away.
             if self.page_anchors and ext == ".pdf" and ocr.pdfium_available():
                 try:
                     inner = (

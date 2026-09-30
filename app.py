@@ -17,6 +17,35 @@ if not getattr(sys, "frozen", False):
     sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
 
 
+def _two_column_pdf() -> bytes:
+    """A one-page PDF whose content stream interleaves two columns row by
+    row — the layout engine must still read the left column first."""
+    rows = [("LEFT one", "RIGHT one"), ("LEFT two", "RIGHT two"), ("LEFT three", "RIGHT three")]
+    ops = []
+    for n, (left, right) in enumerate(rows):
+        y = 700 - 14 * n
+        ops.append(f"BT /F1 11 Tf 72 {y} Td ({left}) Tj ET BT /F1 11 Tf 330 {y} Td ({right}) Tj ET")
+    content = " ".join(ops).encode("ascii")
+    objs = [
+        b"<< /Type /Catalog /Pages 2 0 R >>",
+        b"<< /Type /Pages /Kids [4 0 R] /Count 1 >>",
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R "
+        b"/Resources << /Font << /F1 3 0 R >> >> >>",
+        b"<< /Length %d >>\nstream\n%s\nendstream" % (len(content), content),
+    ]
+    out = bytearray(b"%PDF-1.4\n")
+    offsets = []
+    for num, body in enumerate(objs, start=1):
+        offsets.append(len(out))
+        out += b"%d 0 obj\n%s\nendobj\n" % (num, body)
+    xref = len(out)
+    out += b"xref\n0 %d\n0000000000 65535 f \n" % (len(objs) + 1)
+    out += b"".join(b"%010d 00000 n \n" % off for off in offsets)
+    out += b"trailer\n<< /Size %d /Root 1 0 R >>\nstartxref\n%d\n%%%%EOF\n" % (len(objs) + 1, xref)
+    return bytes(out)
+
+
 def _selftest() -> int:
     """Exercise the real pipeline end-to-end; report to selftest_report.json."""
     import json
@@ -50,6 +79,19 @@ def _selftest() -> int:
                 img.save(png)
                 r2 = engine.convert_file(png)
                 report["checks"]["image_ocr"] = bool(r2.ok and r2.engine == "ocr")
+
+            # Column-aware PDF reading: left column before right, despite a
+            # row-interleaved content stream.
+            pdf = Path(td) / "columns.pdf"
+            pdf.write_bytes(_two_column_pdf())
+            r3 = ConversionEngine(enable_ocr=False).convert_file(pdf)
+            md3 = r3.markdown if r3.ok else ""
+            report["checks"]["pdf_layout"] = bool(
+                r3.engine == "pdflayout"
+                and "LEFT three" in md3
+                and "RIGHT one" in md3
+                and md3.index("LEFT three") < md3.index("RIGHT one")
+            )
 
             cleaned, _ = clean_markdown("import os\nx = 1\n")
             report["checks"]["cleanup"] = "```python" in cleaned

@@ -62,7 +62,9 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--quality", action="store_true", help="print a quality report per file")
     conv.add_argument("--json", action="store_true", help="emit one JSON object per file instead of text lines")
     conv.add_argument("--anchors", action="store_true", help="insert <!-- page N --> markers in PDF conversions (citation grounding)")
-    conv.add_argument("--images", action="store_true", help="extract PDF figures to an assets/ folder and link them")
+    conv.add_argument("--images", action="store_true", help="extract PDF figures (>=120 px) to an images/ folder and link each where it sits in the text (default: Settings > Output)")
+    conv.add_argument("--no-images", action="store_true", help="skip figure extraction even if enabled in Settings")
+    conv.add_argument("--no-layout", action="store_true", help="read PDFs with the legacy markitdown path instead of the column-aware layout engine")
     conv.add_argument("--polish", action="store_true", help="repair residual artifacts with the configured local AI (needs an endpoint + polish model in Settings > Local AI; Ollama or any OpenAI-compatible server)")
     conv.add_argument("--summarize", action="store_true", help="write a 2-3 sentence document summary into the front matter using the configured local AI (needs an endpoint + summary model in Settings > Local AI)")
     conv.add_argument("--no-ocr", action="store_true", help="disable the OCR route")
@@ -94,7 +96,11 @@ def _convert(args: argparse.Namespace) -> int:
         whisper_model=args.whisper_model or settings.whisper_model,
         mineru_endpoint=settings.mineru_endpoint,
         page_anchors=args.anchors or settings.page_anchors,
+        pdf_layout=settings.pdf_layout and not args.no_layout,
     )
+    want_images = (args.images or settings.extract_images) and not args.no_images
+    # Figure markers let extraction link each image where it sits.
+    engine.figure_markers = want_images
     files = _expand(args.files)
     if not files:
         print("No input files matched.", file=sys.stderr)
@@ -125,7 +131,7 @@ def _convert(args: argparse.Namespace) -> int:
 
         markdown = result.markdown
         if not args.no_clean:
-            markdown, stats = clean_markdown(markdown)
+            markdown, stats = clean_markdown(markdown, engine=result.engine)
             record["cleanup"] = stats.summary()
 
         if args.polish and settings.ollama_endpoint and settings.polish_model:
@@ -146,20 +152,27 @@ def _convert(args: argparse.Namespace) -> int:
             print("    summarizing…", file=sys.stderr, flush=True)
             summary = (
                 polish.summarize_markdown(
-                    markdown, settings.ollama_endpoint, settings.summary_model
+                    markdown,
+                    settings.ollama_endpoint,
+                    settings.summary_model,
+                    title=result.doc_title,
                 )
                 or ""
             )
             record["summary"] = summary
 
         out_dir = args.out if args.out is not None else path.parent
-        if (args.images or settings.extract_images) and path.suffix.lower() == ".pdf":
-            from . import figures
+        book = bool(args.split_chapters or args.ai_target)
+        from . import figures
 
-            asset_root = (
-                (out_dir / path.stem) if (args.split_chapters or args.ai_target) else out_dir
-            )
-            figs = figures.extract_pdf_figures(path, asset_root / "assets")
+        if want_images and path.suffix.lower() == ".pdf":
+            # Book folders keep images/ beside the parts; single files get a
+            # per-document subfolder so several conversions can share out_dir.
+            if book:
+                images_dir, rel_dir = out_dir / path.stem / "images", "images"
+            else:
+                images_dir, rel_dir = out_dir / "images" / path.stem, f"images/{path.stem}"
+            figs = figures.extract_pdf_figures(path, images_dir)
             if figs and settings.ollama_endpoint and settings.caption_model:
                 from . import polish
 
@@ -170,10 +183,12 @@ def _convert(args: argparse.Namespace) -> int:
                         )
                         or ""
                     )
+            markdown = figures.insert_figure_links(markdown, figs, rel_dir)
             if figs:
-                markdown = figures.insert_figure_links(markdown, figs)
                 record["figures"] = len(figs)
-        if args.split_chapters or args.ai_target:
+        else:
+            markdown = figures.strip_figure_markers(markdown)
+        if book:
             res = export.export_book(
                 markdown,
                 out_dir / path.stem,
@@ -185,6 +200,8 @@ def _convert(args: argparse.Namespace) -> int:
                 ),
                 ai_sections=args.ai_target is not None,
                 summary=summary,
+                title=result.doc_title,
+                author=result.doc_author,
             )
             written = [str(p) for p in res.paths]
             if res.index_path:
@@ -200,6 +217,8 @@ def _convert(args: argparse.Namespace) -> int:
                 engine=result.engine,
                 front_matter=not args.no_front_matter,
                 summary=summary,
+                title=result.doc_title,
+                author=result.doc_author,
             )
             written = [str(out_path)]
         record["written"] = written

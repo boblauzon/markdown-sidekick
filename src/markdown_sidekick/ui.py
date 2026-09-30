@@ -90,6 +90,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             whisper_model=self.settings.whisper_model,
             mineru_endpoint=self.settings.mineru_endpoint,
             page_anchors=self.settings.page_anchors,
+            pdf_layout=self.settings.pdf_layout,
+            figure_markers=self.settings.extract_images,
         )
         # Ordered mapping of source path -> result (None until converted).
         self.files: dict[Path, ConversionResult | None] = {}
@@ -508,6 +510,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         # (otherwise they accumulate on the root across opens).
         ocr_v = tk.BooleanVar(dlg, value=self.settings.enable_ocr)
         ocr_device_v = tk.StringVar(dlg, value=self.settings.ocr_device)
+        layout_v = tk.BooleanVar(dlg, value=self.settings.pdf_layout)
         audio_v = tk.BooleanVar(dlg, value=self.settings.enable_audio)
         clean_v = tk.BooleanVar(dlg, value=self.settings.clean_output)
         rendered_v = tk.BooleanVar(dlg, value=self.settings.rendered_preview)
@@ -567,9 +570,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             text="auto = GPU (DirectML) when present — measured ~6x faster",
             style="PanelMuted.TLabel",
         ).grid(row=2, column=2, sticky="w", padx=(8, 0), pady=(4, 0))
-        check(conv, "Transcribe audio files", audio_v, 3)
+        check(conv, "Column-aware PDF reading (recommended)", layout_v, 3)
+        check(conv, "Transcribe audio files", audio_v, 4)
         ttk.Label(conv, text="Whisper model", style="Panel.TLabel").grid(
-            row=4, column=0, sticky="w", pady=(8, 0)
+            row=5, column=0, sticky="w", pady=(8, 0)
         )
         ttk.Combobox(
             conv,
@@ -577,19 +581,19 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             values=list(WHISPER_MODELS),
             state="readonly",
             width=12,
-        ).grid(row=4, column=1, sticky="w", pady=(8, 0), padx=(12, 0))
-        section(conv, "High-fidelity (optional)", 5)
+        ).grid(row=5, column=1, sticky="w", pady=(8, 0), padx=(12, 0))
+        section(conv, "High-fidelity (optional)", 6)
         ttk.Label(conv, text="MinerU endpoint URL", style="Panel.TLabel").grid(
-            row=6, column=0, sticky="w"
+            row=7, column=0, sticky="w"
         )
         ttk.Entry(conv, textvariable=endpoint_v, width=34).grid(
-            row=6, column=1, columnspan=2, sticky="w", padx=(12, 0)
+            row=7, column=1, columnspan=2, sticky="w", padx=(12, 0)
         )
         ttk.Label(
             conv,
             text="e.g. http://127.0.0.1:2364  (blank = off)",
             style="PanelMuted.TLabel",
-        ).grid(row=7, column=1, columnspan=2, sticky="w", padx=(12, 0))
+        ).grid(row=8, column=1, columnspan=2, sticky="w", padx=(12, 0))
 
         # -- Output tab -------------------------------------------------------
         out_tab = tab("Output")
@@ -617,7 +621,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         section(out_tab, "AI-friendly export", 5)
         check(out_tab, "YAML front matter on saved files", front_v, 6)
         check(out_tab, "Page anchors (<!-- page N -->) in PDF conversions", anchors_v, 7)
-        check(out_tab, "Extract PDF figures to assets/ on save", images_v, 8)
+        check(out_tab, "Extract PDF figures to images/ on save", images_v, 8)
 
         # -- Local AI tab -----------------------------------------------------
         ai = tab("Local AI")
@@ -742,6 +746,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         def save() -> None:
             self.settings.enable_ocr = ocr_v.get()
             self.settings.ocr_device = ocr_device_v.get()
+            self.settings.pdf_layout = layout_v.get()
             self.settings.enable_audio = audio_v.get()
             self.settings.whisper_model = model_v.get()
             self.settings.mineru_endpoint = endpoint_v.get()
@@ -791,6 +796,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.engine.whisper_model = s.whisper_model
         self.engine.mineru_endpoint = s.mineru_endpoint
         self.engine.page_anchors = s.page_anchors
+        self.engine.pdf_layout = s.pdf_layout
+        self.engine.figure_markers = s.extract_images
         self.ocr_var.set(s.enable_ocr and ocr_available())
         self.clean_var.set(s.clean_output)
         self.rendered_var.set(s.rendered_preview)
@@ -899,7 +906,9 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
     def _evict_all_caches(self) -> None:
         """Wholesale version of :meth:`_evict_caches` — one owner for the
         cache set, so a new derived cache can't be missed at a clear site."""
-        self._evict_all_caches()
+        self._clean_cache.clear()
+        self._clean_stats.clear()
+        self._quality_cache.clear()
 
     def _reset_to_pending(self, path: Path) -> None:
         """Return a file to the un-converted state (shared by retry/reconvert)."""
@@ -986,7 +995,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         if not self.clean_var.get():
             return result.markdown
         if path not in self._clean_cache:
-            cleaned, stats = clean_markdown(result.markdown)
+            cleaned, stats = clean_markdown(result.markdown, engine=result.engine)
             self._clean_cache[path] = cleaned
             self._clean_stats[path] = stats
         return self._clean_cache[path]
@@ -1104,7 +1113,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.preview.configure(state="disabled")
 
     def copy_preview(self) -> None:
-        content = self._current_export_text
+        from .figures import strip_figure_markers
+
+        # Figure markers only mean something to a save with figure extraction.
+        content = strip_figure_markers(self._current_export_text)
         if not content.strip():
             return
         self.clipboard_clear()
@@ -1160,7 +1172,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 return
             try:
                 if clean_flag:
-                    cleaned, stats = clean_markdown(result.markdown)
+                    cleaned, stats = clean_markdown(result.markdown, engine=result.engine)
                     pack = (cleaned, stats, assess_markdown(cleaned))
                 else:
                     pack = (None, None, assess_markdown(result.markdown))
@@ -1311,55 +1323,98 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         )
         if not dest:
             return
+        dest_path = Path(dest)
         result = self.files.get(path)
+        text = self._with_figures(
+            path, text, dest_path.parent / "images" / dest_path.stem, f"images/{dest_path.stem}"
+        )
         summary = ""
         if self.settings.export_front_matter:
-            summary = self._summarize_for_export(text, path.name)
+            summary = self._summarize_for_export(text, path.name, result)
         md_export.export_single(
             text,
-            Path(dest),
+            dest_path,
             source=path.name,
             engine=result.engine if result else "",
             front_matter=self.settings.export_front_matter,
             summary=summary,
+            title=result.doc_title if result else "",
+            author=result.doc_author if result else "",
         )
-        self.status_var.set(f"Saved {Path(dest).name}.")
+        self.status_var.set(f"Saved {dest_path.name}.")
 
-    def _summarize_for_export(self, text: str, name: str) -> str:
-        """Document summary from the configured local AI, or "" when off/failed.
+    def _run_blocking(self, fn, status: str):
+        """Run ``fn`` on a worker thread and return its result (None if it
+        raised or the window closed).
 
-        The request runs on a worker thread; this side only pumps Tk and
-        polls a plain list (the app's threading rule), so the window keeps
-        painting while a slow model thinks. The busy flag locks the action
-        buttons meanwhile so a stray click can't re-enter save.
+        This side only pumps Tk and polls a plain list (the app's threading
+        rule), so the window keeps painting while slow work runs — a local
+        model thinking, or hundreds of figures being written. The busy flag
+        locks the action buttons meanwhile so a stray click can't re-enter
+        save.
         """
-        endpoint, model = self.settings.ollama_endpoint, self.settings.summary_model
-        if not endpoint or not model:
-            return ""
-        from . import polish
+        box: list = []
 
-        box: list[str | None] = []
-        threading.Thread(
-            target=lambda: box.append(polish.summarize_markdown(text, endpoint, model)),
-            daemon=True,
-        ).start()
+        def target() -> None:
+            try:
+                box.append((True, fn()))
+            except Exception:  # never fatal: callers degrade to "no extra"
+                box.append((False, None))
+
+        threading.Thread(target=target, daemon=True).start()
         was_busy = self._busy
         self._set_busy(True)
-        self.status_var.set(f"Summarizing {name} with {model}…")
+        self.status_var.set(status)
         self.configure(cursor="watch")
         try:
             while not box:
                 self.update()
                 time.sleep(0.05)
         except tk.TclError:  # window closed mid-wait
-            return ""
+            return None
         finally:
             try:
                 self.configure(cursor="")
                 self._set_busy(was_busy)
+                if not was_busy:
+                    # Files added while pumping queued as pending (busy
+                    # blocked their conversion); pick them up once idle —
+                    # a later wait in the same save is busy again, so this
+                    # only fires after the save completes.
+                    self.after_idle(self._convert_pending)
             except tk.TclError:
                 pass
-        return box[0] or ""
+        ok, value = box[0]
+        return value if ok else None
+
+    def _summarize_for_export(
+        self, text: str, name: str, result: ConversionResult | None = None
+    ) -> str:
+        """Document summary from the configured local AI, or "" when off/failed."""
+        endpoint, model = self.settings.ollama_endpoint, self.settings.summary_model
+        if not endpoint or not model:
+            return ""
+        from . import polish
+
+        title = result.doc_title if result else ""
+        summary = self._run_blocking(
+            lambda: polish.summarize_markdown(text, endpoint, model, title=title),
+            f"Summarizing {name} with {model}…",
+        )
+        return summary or ""
+
+    def _with_figures(self, path: Path, text: str, images_dir: Path, rel_dir: str) -> str:
+        """Extract the PDF's figures into ``images_dir`` and link them in
+        place (Settings → Output); otherwise just drop the figure markers."""
+        from . import figures
+
+        if not (self.settings.extract_images and path.suffix.lower() == ".pdf"):
+            return figures.strip_figure_markers(text)
+        figs = self._run_blocking(
+            lambda: figures.extract_pdf_figures(path, images_dir),
+            f"Extracting figures from {path.name}…",
+        )
+        return figures.insert_figure_links(text, figs or [], rel_dir)
 
     def _save_batch(self, converted: list[Path]) -> None:
         # Always show the dialog (pre-filled with the default folder) — silent
@@ -1382,7 +1437,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 continue
             result = self.files.get(path)
             engine = result.engine if result else ""
-            book_dir = out
+            title = result.doc_title if result else ""
+            author = result.doc_author if result else ""
             if split:
                 # Disambiguate same-stem sources so one book folder can never
                 # silently overwrite another's chapters/index/manifest.
@@ -1394,19 +1450,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     folder = f"{path.stem}-{n}"
                 used_names.add(folder)
                 book_dir = out / folder
-            # Optional AI-friendly extras (controlled from Settings).
-            if self.settings.extract_images and path.suffix.lower() == ".pdf":
-                from . import figures
-
-                figs = figures.extract_pdf_figures(path, book_dir / "assets")
-                if figs:
-                    text = figures.insert_figure_links(text, figs)
-            # A book folder always has somewhere to put the summary (index +
-            # manifest); a single file only has its front matter.
-            summary = ""
-            if split or self.settings.export_front_matter:
-                summary = self._summarize_for_export(text, path.name)
-            if split:
+                text = self._with_figures(path, text, book_dir / "images", "images")
+                # A book folder always has somewhere to put the summary (index +
+                # manifest), whether or not parts carry front matter.
+                summary = self._summarize_for_export(text, path.name, result)
                 res = md_export.export_book(
                     text,
                     book_dir,
@@ -1416,6 +1463,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     max_tokens=max_tokens if style == "ai" else md_export.DEFAULT_MAX_TOKENS,
                     ai_sections=style == "ai",
                     summary=summary,
+                    title=title,
+                    author=author,
                 )
                 saved += len(res.paths)
                 continue
@@ -1428,6 +1477,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     n += 1
                 dest = candidate
             used_names.add(dest.name)
+            text = self._with_figures(path, text, out / "images" / dest.stem, f"images/{dest.stem}")
+            summary = ""
+            if self.settings.export_front_matter:
+                summary = self._summarize_for_export(text, path.name, result)
             md_export.export_single(
                 text,
                 dest,
@@ -1435,6 +1488,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 engine=engine,
                 front_matter=self.settings.export_front_matter,
                 summary=summary,
+                title=title,
+                author=author,
             )
             saved += 1
         self.status_var.set(f"Saved {saved} Markdown file(s) to {out}.")
