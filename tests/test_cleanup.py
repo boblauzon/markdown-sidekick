@@ -56,6 +56,34 @@ class TestNormalizeCharacters:
         assert "(cid:" not in out
         assert stats.chars_normalized == 2
 
+    def test_form_feed_page_breaks_become_paragraph_breaks(self):
+        # markitdown's PDF path (pdfminer) starts every page with \f.
+        stats = CleanupStats()
+        out = normalize_characters("Page one text.\n\n\fPage two text.\n", stats)
+        assert out == "Page one text.\n\nPage two text.\n"
+        assert stats.chars_normalized == 1
+        # No newline around it: split, never glued ("end.Next").
+        assert normalize_characters("end.\fNext", CleanupStats()) == "end.\n\nNext"
+        # An empty page (\f\f, or \f on its own line) is still one break.
+        stats = CleanupStats()
+        out = normalize_characters("a\n\f\n\f\nb\n", stats)
+        assert out == "a\n\nb\n"
+        assert stats.chars_normalized == 2
+
+    def test_form_feed_end_to_end(self):
+        text = "Page one text.\n\n\fPage two text.\n\n\fPage three text.\n\n\f"
+        out, stats = clean_markdown(text, engine="markitdown")
+        assert out == "Page one text.\n\nPage two text.\n\nPage three text.\n"
+        assert stats.chars_normalized == 3
+
+    def test_form_feed_inside_fence_keeps_code_and_markers(self):
+        text = "```python\ndef f():\n\f    return 1\n\f```\n\nAfter.\n"
+        out, _ = clean_markdown(text, engine="markitdown")
+        assert "\f" not in out
+        assert "def f():\n\n    return 1\n\n```" in out  # indentation intact
+        assert out.count("```") == 2
+        assert out.endswith("After.\n")
+
 
 # ---------------------------------------------------------------------------
 # doubled "shadow" text (Quarto design-book corpus)
