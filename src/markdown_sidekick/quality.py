@@ -13,6 +13,7 @@ import re
 import unicodedata
 from dataclasses import dataclass, field
 
+from . import debuglog
 from .cleanup import is_shadow_word
 
 # ~4 characters per token is a good cross-model estimate for English prose;
@@ -128,6 +129,12 @@ class QualityReport:
 
 def assess_markdown(text: str) -> QualityReport:
     """Score converted Markdown; deductions mirror the cleanup pass targets."""
+    report = _assess(text)
+    debuglog.event("quality", **report.as_dict())
+    return report
+
+
+def _assess(text: str) -> QualityReport:
     r = QualityReport()
     if not text:
         r.score = 0

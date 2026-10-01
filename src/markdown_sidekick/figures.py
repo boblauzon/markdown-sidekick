@@ -23,9 +23,12 @@ from __future__ import annotations
 
 import hashlib
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import quote
+
+from . import debuglog, errors
 
 try:
     import pypdfium2 as pdfium
@@ -106,7 +109,8 @@ def page_images(page, clip=None):
                     continue  # off the trimmed page (a spread's facing page)
             k += 1
             yield k, obj, (x0, y0, x1, y1)
-    except Exception:
+    except Exception as exc:
+        debuglog.exception("figures.page_images", exc)  # this page yields no figures
         return
 
 
@@ -208,6 +212,9 @@ def extract_pdf_figures(pdf_path: str | Path, images_dir: Path) -> list[FigureRe
 
     figures: list[FigureRef] = []
     seen: set[str] = set()
+    failed: list[str] = []
+    first_exc: Exception | None = None
+    started = time.perf_counter()
     pdf = pdfium.PdfDocument(str(pdf_path))
     try:
         scanned = _is_scan(pdf)
@@ -228,8 +235,10 @@ def extract_pdf_figures(pdf_path: str | Path, images_dir: Path) -> list[FigureRe
                         seen.add(digest)
                         images_dir.mkdir(parents=True, exist_ok=True)
                         saved = _save_image(obj, images_dir / f"fig_p{i + 1}_{k}", raw)
-                    except Exception:
-                        continue  # one bad image must not kill the run
+                    except Exception as exc:  # one bad image must not kill the run
+                        failed.append(f"page {i + 1} image {k}: {type(exc).__name__}: {exc}")
+                        first_exc = first_exc or exc
+                        continue
                     if saved is not None:
                         path, width, height = saved
                         figures.append(FigureRef(i + 1, path, width, height, index=k))
@@ -237,6 +246,22 @@ def extract_pdf_figures(pdf_path: str | Path, images_dir: Path) -> list[FigureRe
                 page.close()
     finally:
         pdf.close()
+    if failed:
+        errors.report(
+            "MS-402",
+            exc=first_exc,
+            detail=f"{len(failed)} image(s) couldn't be saved",
+            where=f"figures {Path(pdf_path).name}",
+            failures=failed[:20],
+        )
+    debuglog.event(
+        "figures.done",
+        file=Path(pdf_path).name,
+        count=len(figures),
+        failed=len(failed),
+        scan_dominated=scanned,
+        ms=round((time.perf_counter() - started) * 1000),
+    )
     return figures
 
 

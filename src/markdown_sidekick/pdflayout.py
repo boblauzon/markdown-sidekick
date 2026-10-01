@@ -40,12 +40,15 @@ from __future__ import annotations
 import ctypes
 import math
 import re
+import time
 import unicodedata
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from statistics import median
 from typing import Callable
+
+from . import debuglog
 
 try:
     import pypdfium2 as pdfium
@@ -1003,7 +1006,8 @@ def read_outline(pdf) -> list[OutlineEntry]:
             if page is None or not title:
                 continue
             raw.append(OutlineEntry(bm.level, title, page))
-    except Exception:
+    except Exception as exc:
+        debuglog.exception("pdflayout.outline", exc)  # no bookmarks -> no chapter headings
         return []
     # An entry repeating an earlier (title, page) is a second index into the
     # same content (e.g. "Contents by Category"); a container whose entries
@@ -1450,6 +1454,8 @@ def extract_markdown(
     order, for :func:`figures.insert_figure_links` to replace at export.
     """
     stats = LayoutStats()
+    trace = debuglog.enabled()
+    marks = [("open", time.perf_counter())]
     pdf = pdfium.PdfDocument(str(path))
     try:
         total = len(pdf)
@@ -1490,10 +1496,11 @@ def extract_markdown(
             if on_page is not None:
                 on_page(i + 1, total)
 
+        marks.append(("read_pages", time.perf_counter()))
         # Phase 2: running headers/footers are judged across the document.
         text_pages = [p for p in raw_pages if not isinstance(p, str)]
         # Physical page numbers: OCR'd pages are absent here but still count.
-        _strip_furniture(
+        furniture = _strip_furniture(
             [(i, *p) for i, p in enumerate(raw_pages) if not isinstance(p, str)]
         )
         mono_chars = all_chars = 0
@@ -1505,6 +1512,7 @@ def extract_markdown(
                         mono_chars += len(s.text)
         fence_mono = all_chars == 0 or mono_chars < _MONO_BODY_SHARE * all_chars
 
+        marks.append(("furniture", time.perf_counter()))
         # Phase 3: reading order per page.
         page_leaves: list[list] = []
         for raw_page in raw_pages:
@@ -1524,6 +1532,7 @@ def extract_markdown(
                 _xy_cut(fg, leaves)
             page_leaves.append(leaves)
 
+        marks.append(("reading_order", time.perf_counter()))
         pages: list[list[_Block]] = []
         for i, leaves in enumerate(page_leaves):
             blocks: list[_Block] = []
@@ -1539,12 +1548,14 @@ def extract_markdown(
                 blocks = _place_headings(blocks, by_page[i], stats)
             pages.append(blocks)
 
+        marks.append(("blocks", time.perf_counter()))
         meta = {}
         try:
             meta = pdf.get_metadata_dict()
-        except Exception:
-            pass
+        except Exception as exc:
+            debuglog.exception("pdflayout.metadata", exc)
         title = _sane_meta(meta.get("Title"))
+        title_source = "metadata" if title else ""
         if not title:
             for p in sorted(title_pages):
                 if p < len(pages):
@@ -1552,16 +1563,22 @@ def extract_markdown(
                     # give the title the same repairs the body gets below.
                     title = _clean_inline(_title_from_page(pages[p]))
                     if title:
+                        title_source = "title_bookmark"
                         break
         author = _sane_meta(meta.get("Author"))
         if not (title and author):
             # Many print PDFs carry only an ISBN filename as metadata; the
             # copyright page still names the book (and often its author).
             fm_title, fm_author = _front_matter_meta(pages[:_FRONT_MATTER_PAGES])
+            if not title and _sane_meta(fm_title):
+                title_source = "copyright_page"
             title = title or _sane_meta(fm_title)
             author = author or _sane_meta(fm_author)
         if not title and (page := _unmarked_title_page(pages)) is not None:
             title = _sane_meta(_title_from_page(page))
+            title_source = "first_page" if title else ""
+        if trace:
+            page_summary = _page_summary(raw_pages, pages)
     finally:
         pdf.close()
 
@@ -1584,7 +1601,39 @@ def extract_markdown(
     text = _LONE_SURROGATE_RE.sub("", text)  # an unpaired half can't be encoded
     text = _repair_ligatures(text, stats)
     text = _resolve_hyphens(text)
+    if trace:
+        marks.append(("assemble", time.perf_counter()))
+        debuglog.event(
+            "pdflayout.done",
+            phases_ms={
+                name: round((t - marks[n][1]) * 1000, 1)
+                for n, (name, t) in enumerate(marks[1:])
+            },
+            stats=vars(stats),
+            outline_entries=len(outline),
+            chapter_level=chapter_level,
+            furniture_removed=furniture,
+            mono_share=round(mono_chars / all_chars, 3) if all_chars else 0,
+            fence_mono=fence_mono,
+            ocr_pages=len(ocr_pages) if ocr_page is not None else 0,
+            title=title,
+            title_source=title_source,
+            author=author,
+            pages=page_summary,
+        )
     return LayoutResult(text.strip() + "\n", title=title, author=author, stats=stats)
+
+
+def _page_summary(raw_pages: list, pages: list[list[_Block]]) -> list[list]:
+    """Per page, compactly: [page, source, segments, {block kind: count}] —
+    enough to find the page where reading order or a table went wrong."""
+    out = []
+    for i, blocks in enumerate(pages):
+        raw = raw_pages[i] if i < len(raw_pages) else ""
+        source = "ocr" if isinstance(raw, str) else "text"
+        segs = 0 if isinstance(raw, str) else len(raw[0])
+        out.append([i + 1, source, segs, dict(Counter(b.kind for b in blocks))])
+    return out
 
 
 # A paragraph cut off by a column or page break: the first block ends

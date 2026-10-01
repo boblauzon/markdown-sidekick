@@ -29,9 +29,9 @@ os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")  # Literal: stable|pre
 
 from fastmcp import FastMCP
 
-from . import export
+from . import debuglog, errors, export
 from .cleanup import clean_markdown
-from .converter import ConversionEngine
+from .converter import ConversionEngine, ConversionResult
 from .quality import assess_markdown
 from .settings import Settings
 
@@ -76,6 +76,30 @@ def _get_engine() -> ConversionEngine:
     return _engine
 
 
+def _coded(incident: errors.Incident, subject: str = "") -> str:
+    """An error as the AI client should relay it: the code, what happened,
+    the next step, and the reference of its error-log entry."""
+    lead = f" {subject}:" if subject else ":"
+    detail = f" Technical details: {incident.detail}" if incident.detail else ""
+    return (
+        f"Error {incident.code}{lead} {incident.title} Next step: {incident.next_step} "
+        f"(ref {incident.ref}).{detail}"
+    )
+
+
+def _conversion_error(result: ConversionResult) -> str:
+    code = result.error_code or errors.classify_conversion(result.error or "")
+    incident = errors.Incident(
+        errors.CATALOG.get(code, errors.CATALOG["MS-199"]), result.error_ref or "—", result.error or ""
+    )
+    return _coded(incident, f"converting '{result.source.name}'")
+
+
+# Warnings from the conversion behind each cached result (a better route
+# failed and a lesser one produced the text) — relayed with the Markdown.
+_convert_notes: dict[str, list[str]] = {}
+
+
 # Conversions are expensive (OCR can take minutes); outline + section reads of
 # the same document must not re-convert. Tiny keyed cache, newest-4.
 _CACHE_MAX = 4
@@ -95,10 +119,14 @@ def _convert_cached(resolved: str, clean: bool) -> tuple[str | None, str | None]
         with contextlib.redirect_stdout(sys.stderr):
             result = _get_engine().convert_file(resolved)
             if not result.ok:
-                return None, result.error
+                return None, _conversion_error(result)
             markdown = result.markdown
             if clean:
-                markdown, _stats = clean_markdown(markdown, engine=result.engine)
+                with debuglog.file_context(Path(resolved)):
+                    markdown, _stats = clean_markdown(markdown, engine=result.engine)
+    _convert_notes[resolved] = [
+        f"{w.code}: {w.title} Next step: {w.next_step} (ref {w.ref})" for w in result.warnings
+    ]
     while len(_convert_cache) >= _CACHE_MAX:
         _convert_cache.pop(next(iter(_convert_cache)))
     _convert_cache[key] = markdown
@@ -108,9 +136,11 @@ def _convert_cached(resolved: str, clean: bool) -> tuple[str | None, str | None]
 def _resolve(file_path: str) -> tuple[str | None, str | None]:
     resolved = os.path.abspath(os.path.expanduser(file_path))
     if not os.path.exists(resolved):
-        return None, f"Error: local file not found at '{resolved}'"
+        incident = errors.report("MS-103", where="mcp", detail=f"no file at '{resolved}'")
+        return None, _coded(incident)
     if os.path.isdir(resolved):
-        return None, f"Error: '{resolved}' is a directory, not a file"
+        incident = errors.report("MS-104", where="mcp", detail=f"'{resolved}' is a directory")
+        return None, _coded(incident)
     return resolved, None
 
 
@@ -146,14 +176,14 @@ def convert_local_file(
     markdown, conv_err = _convert_cached(resolved, clean)
     if conv_err is not None:
         logger.warning("Conversion failed: %s", conv_err)
-        return f"Error converting '{os.path.basename(resolved)}': {conv_err}"
+        return conv_err
     assert markdown is not None
     logger.info("Converted (%d chars)", len(markdown))
 
     report = assess_markdown(markdown)
-    noise_note = ""
+    noise_note = "".join(f"> ⚠ Note — {note}\n\n" for note in _convert_notes.get(resolved, []))
     if report.binary_noise:
-        noise_note = (
+        noise_note += (
             "> ⚠ Warning: this output looks like binary noise (mostly unreadable "
             "characters). The source file may be corrupt or in a format the "
             "converter does not actually understand — treat the content below "
@@ -162,12 +192,18 @@ def convert_local_file(
 
     if save_to:
         out_path = os.path.abspath(os.path.expanduser(save_to))
-        export.export_single(
-            markdown,
-            Path(out_path),
-            source=os.path.basename(resolved),
-            front_matter=Settings.load().export_front_matter,
-        )
+        try:
+            export.export_single(
+                markdown,
+                Path(out_path),
+                source=os.path.basename(resolved),
+                front_matter=Settings.load().export_front_matter,
+            )
+        except OSError as exc:
+            return _coded(
+                errors.report(errors.classify_os_error(exc), exc=exc, where="mcp save_to", target=out_path),
+                f"saving to '{out_path}'",
+            )
         return f"Saved Markdown to {out_path}. {report.summary()}"
 
     if len(markdown) > max_chars:
@@ -203,6 +239,7 @@ def convert_outline(
     assert markdown is not None
     sections = export.split_for_ai(markdown, max_tokens=max_tokens, pack=False)
     return {
+        "warnings": _convert_notes.get(resolved, []),
         "title": export.document_title(markdown, os.path.basename(resolved)),
         "est_tokens": export.estimate_tokens(markdown),
         "quality": assess_markdown(markdown).as_dict(),
@@ -229,11 +266,17 @@ def convert_section(
         return err
     markdown, conv_err = _convert_cached(resolved, clean)
     if conv_err is not None:
-        return f"Error converting '{os.path.basename(resolved)}': {conv_err}"
+        return conv_err
     assert markdown is not None
     sections = export.split_for_ai(markdown, max_tokens=max_tokens, pack=False)
     if not 0 <= section_index < len(sections):
-        return f"Error: section_index must be 0..{len(sections) - 1}"
+        return _coded(
+            errors.report(
+                "MS-132",
+                where="mcp convert_section",
+                detail=f"section_index {section_index} is outside 0..{len(sections) - 1}",
+            )
+        )
     return sections[section_index].markdown
 
 
@@ -251,16 +294,16 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
 
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in ("http", "https"):
-        return "Error: only http/https URLs are supported."
+        return _coded(errors.report("MS-131", where="mcp convert_url", detail=f"scheme '{parsed.scheme}'"))
     suffix = Path(parsed.path).suffix.lower() or ".html"
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "MarkdownSidekick/1.0"})
         with urllib.request.urlopen(req, timeout=60) as resp:
             data = resp.read(_URL_MAX_BYTES + 1)
         if len(data) > _URL_MAX_BYTES:
-            return "Error: download exceeds the 50 MB limit."
+            return _coded(errors.report("MS-131", where="mcp convert_url", detail="over 50 MB", url=url))
     except Exception as exc:
-        return f"Error downloading '{url}': {type(exc).__name__}: {exc}"
+        return _coded(errors.report("MS-130", exc=exc, where="mcp convert_url", url=url))
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / f"download{suffix}"
@@ -272,7 +315,7 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
                 if result.ok and clean:
                     markdown, _stats = clean_markdown(markdown, engine=result.engine)
     if not result.ok:
-        return f"Error converting '{url}': {result.error}"
+        return _conversion_error(result)
     if len(markdown) > max_chars:
         markdown = markdown[:max_chars] + f"\n\n_(Truncated at {max_chars:,} characters.)_"
     return markdown
@@ -295,6 +338,12 @@ def list_capabilities() -> dict:
 
 
 def main() -> None:
+    errors.install_crash_hooks()
+    settings = Settings.load()
+    if settings.debug_mode or debuglog.debug_requested():
+        # Files only — stdout stays reserved for JSON-RPC.
+        session = debuglog.enable("mcp", snapshots=settings.debug_snapshots)
+        logger.info("Debug trace: %s", session)
     mcp.run(show_banner=False)  # stdio transport by default
 
 

@@ -6,6 +6,8 @@ Usage:
     python app.py --selftest  # verify the conversion pipeline, write a JSON
                               # report next to this file (used to validate
                               # frozen/PyInstaller builds), exit 0/1.
+    python app.py --debug     # any of the above with debug mode on for this
+                              # run (a detailed trace under the log folder)
 """
 
 import os
@@ -53,6 +55,11 @@ def _selftest() -> int:
 
     report: dict = {"ok": False, "checks": {}}
     out_path = Path(tempfile.gettempdir()) / "markdown_sidekick_selftest.json"
+    # The selftest's logs go to their own folder (not the user's), and the
+    # whole run is traced: every check doubles as a test of debug mode.
+    log_root = Path(tempfile.mkdtemp(prefix="ms-selftest-logs-"))
+    previous_log_dir = os.environ.get("MARKDOWN_SIDEKICK_LOG_DIR")
+    os.environ["MARKDOWN_SIDEKICK_LOG_DIR"] = str(log_root)
     try:
         from markdown_sidekick import audio, ocr
         from markdown_sidekick.cleanup import clean_markdown
@@ -62,6 +69,9 @@ def _selftest() -> int:
         report["checks"]["pdf_ocr_available"] = ocr.pdf_ocr_available()
         report["checks"]["audio_available"] = audio.audio_available()
 
+        from markdown_sidekick import debuglog, diagnostics
+
+        debuglog.enable("selftest")
         with tempfile.TemporaryDirectory() as td:
             html = Path(td) / "t.html"
             html.write_text("<h1>Self Test</h1><p><b>bold</b> works.</p>", encoding="utf-8")
@@ -108,6 +118,18 @@ def _selftest() -> int:
             )
             report["checks"]["quality"] = assess_markdown("# T\n\nbody\n").score > 0
 
+            # A failure must get its code and an error-log entry, and the
+            # debug trace must read back as a digest.
+            missing = engine.convert_file(Path(td) / "missing.pdf")
+            debuglog.disable()
+            logged = diagnostics.load_errors(None)
+            report["checks"]["error_codes"] = bool(
+                missing.error_code == "MS-103"
+                and any(r.get("ref") == missing.error_ref for r in logged)
+            )
+            digest = diagnostics.summarize(sessions=1)
+            report["checks"]["debug_trace"] = "MS-103" in digest and "t.html" in digest
+
         from markdown_sidekick.guide import load_user_guide
 
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
@@ -123,6 +145,20 @@ def _selftest() -> int:
         report["ok"] = all(v for v in report["checks"].values() if isinstance(v, bool))
     except Exception as exc:  # the report must always be written
         report["error"] = f"{type(exc).__name__}: {exc}"
+    finally:
+        try:
+            from markdown_sidekick import debuglog
+
+            debuglog.disable()
+        except Exception:
+            pass
+        if previous_log_dir is None:
+            os.environ.pop("MARKDOWN_SIDEKICK_LOG_DIR", None)
+        else:
+            os.environ["MARKDOWN_SIDEKICK_LOG_DIR"] = previous_log_dir
+        import shutil
+
+        shutil.rmtree(log_root, ignore_errors=True)
     out_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     return 0 if report["ok"] else 1
 
@@ -143,6 +179,10 @@ def _run_mcp() -> None:
 
 
 if __name__ == "__main__":
+    if "--debug" in sys.argv:
+        # Debug mode for this run, whichever front-end starts (debuglog.ENV_DEBUG).
+        sys.argv.remove("--debug")
+        os.environ["MARKDOWN_SIDEKICK_DEBUG"] = "1"
     if "--mcp" in sys.argv:
         _run_mcp()
         sys.exit(0)

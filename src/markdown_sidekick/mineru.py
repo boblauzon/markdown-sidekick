@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from . import debuglog
+
 # Response keys different MinerU versions use for the Markdown payload.
 _MD_KEYS = ("md_content", "markdown", "md", "content")
 _DEFAULT_TIMEOUT = 300
@@ -37,9 +39,11 @@ def convert_via_mineru(
                 data={"return_md": "true"},
                 timeout=timeout,
             )
-    except Exception:
+    except Exception as exc:
+        debuglog.exception("mineru.request", exc, url=url)
         return None
     if response.status_code != 200:
+        debuglog.event("mineru.request", level="error", url=url, status=response.status_code)
         return None
     # Prefer a JSON payload; fall back to a raw Markdown body.
     try:

@@ -15,7 +15,7 @@ support development at [ko-fi.com/roblauzon](https://ko-fi.com/roblauzon) ☕
 2. **Click a file** to see its Markdown in the preview pane.
 3. Pick an **Output** shape next to the Save button — *One Markdown file*,
    *Chapter files (book folder)*, or *AI-sized sections* (with an **Optimize
-   for** picker: Claude, ChatGPT, Gemini, Local LLM).
+   for** picker: Claude, ChatGPT, Gemini, Gemini Notebook, Local LLM).
 4. **💾 Save Markdown…** — one file gets a save dialog, several get a folder.
    (Or **Copy** the previewed file straight to the clipboard.)
 
@@ -67,7 +67,9 @@ can read when you need it.
     packed together, so a book of 130 one-page topics becomes a handful of
     parts rather than 130 files)
   - **Optimize for** — sizes AI sections for Claude (~30k tokens), ChatGPT
-    (~12k), Gemini (~60k), or a small Local LLM (~4k)
+    (~12k), Gemini (~60k), or a small Local LLM (~4k). **Gemini Notebook**
+    (formerly NotebookLM) instead writes a folder of sources ready to upload
+    — see *Exporting for Gemini Notebook* below
   - **💾 Save Markdown…** — a single file gets a save dialog; batches and
     split modes ask for a folder (pre-filled with your default output folder)
     and offer to open it afterwards
@@ -215,8 +217,8 @@ Notes:
 
 ## Settings (⚙ in the header)
 
-Settings are grouped into three tabs — **Conversion**, **Output**, and
-**Local AI**:
+Settings are grouped into four tabs — **Conversion**, **Output**,
+**Local AI**, and **Diagnostics**:
 
 | Tab | Setting | What it does |
 | --- | ------- | ------------ |
@@ -228,11 +230,14 @@ Settings are grouped into three tabs — **Conversion**, **Output**, and
 | Conversion | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
 | Output | Default output folder | Pre-selected in every save dialog |
 | Output | Clean output / Rendered preview | Default states for the preview toggles |
-| Output | YAML front matter | Saved files start with title/source/date/token metadata |
+| Output | Front matter / source header | Saved files start with title/source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | On by default: images of at least 120 px land in an `images/` folder, linked right where they appear in the text |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
 | Local AI | Polish / caption / summary model | Optional local-LLM passes: artifact repair, figure alt-text, and a 2–3 sentence document summary written into the saved file's front matter (blank = that pass is off) |
+| Diagnostics | Record a detailed trace | Debug mode: logs everything each conversion did (see *Debug mode and diagnostic reports*) |
+| Diagnostics | Also keep raw and cleaned Markdown | In debug mode, saves both versions of every conversion for quality comparison |
+| Diagnostics | Create diagnostic report… / Open log folder | Zip the logs for a bug report, or browse them |
 
 Everything on the Local AI tab talks only to your own machine — detection
 probes localhost and never calls out to the internet.
@@ -245,6 +250,32 @@ chapter files split at the book's own chapters (`00-front-matter.md`,
 an `images/` folder, an `index.md`, and a `manifest.json` (titles, token and
 image counts) — ready for Claude, ChatGPT, Gemini, or any RAG pipeline. A **quality score** and estimated token count for the selected
 file appear beside the preview.
+
+**Exporting for Gemini Notebook.** Gemini Notebook (formerly NotebookLM)
+doesn't paste files into a chat — every uploaded file becomes a *source* it
+searches and cites. Choose *AI-sized sections* → **Optimize for: Gemini
+Notebook** and the book folder is shaped for that:
+
+- **One source per chapter**, so you can tick a single chapter to scope a
+  chat, study guide or Audio Overview to it. Chapters are packed together
+  (evenly, as few per source as possible) only when a book would otherwise
+  take more than 25 sources — half of a free notebook's 50, leaving room for
+  a second book.
+- **Every source fits the 500,000-word limit**, whatever the language:
+  anything longer is split.
+- **Filenames start with the book's short title**
+  (`pragmatic-programmer-03-….md`), so sources from several books stay
+  distinguishable in the notebook's source list.
+- **A one-line header instead of YAML** — the book, author and part. The
+  first source also carries the AI summary and the list of parts. (YAML
+  would be read as text, and its conversion date could be quoted as the
+  book's date.) Settings → Output → *Front matter / source header* turns it
+  off.
+- **Image links become their captions** (`[Figure 3.1]`) — a notebook can't
+  open links to local files. Upload a key figure from `images/` as its own
+  source if you need it (each image counts as a source).
+- **No index.md or manifest.json** — select every file in the folder and
+  drop them into the notebook.
 
 Settings persist between sessions in `settings.json` (see *Where files live*).
 
@@ -302,11 +333,15 @@ markdown-sidekick-cli convert book.pdf --ai-target Claude
 MarkdownSidekick.exe --cli convert book.pdf --split-chapters   (standalone app)
 ```
 
-`--ai-target` (Claude / ChatGPT / Gemini / "Local LLM") writes the same
-AI-sized book folders as the export bar — every part fits that platform's
-context budget. The MCP tools take a matching `max_tokens` argument.
+`--ai-target` (Claude / ChatGPT / Gemini / "Gemini Notebook" / "Local LLM")
+writes the same AI-sized book folders as the export bar — every part fits
+that platform's context budget (for Gemini Notebook: one upload-ready source
+per chapter). The MCP tools take a matching `max_tokens` argument.
 `--images` / `--no-images` override the figure-extraction setting, and
-`--no-layout` reads PDFs with the simpler text-stream reader.
+`--no-layout` reads PDFs with the simpler text-stream reader. Failures print
+their error code, the next step and the log reference; `--debug` traces the
+run and `diagnostics` summarises the logs (see *Debug mode and diagnostic
+reports*).
 
 ---
 
@@ -316,13 +351,18 @@ context budget. The MCP tools take a matching `max_tokens` argument.
 | ---- | ----- |
 | Settings | `%LOCALAPPDATA%\MarkdownSidekick\settings.json` |
 | Whisper models | `%LOCALAPPDATA%\MarkdownSidekick\models\` |
-| Your output | Wherever you save it — nothing else is written |
+| Error log (always on) | `%LOCALAPPDATA%\MarkdownSidekick\logs\errors.jsonl` |
+| Debug traces (debug mode only) | `%LOCALAPPDATA%\MarkdownSidekick\logs\sessions\` |
+| Your output | Wherever you save it |
 
 Deleting the `MarkdownSidekick` app-data folder resets the app completely.
 
 ---
 
 ## Troubleshooting
+
+An error message in the app always carries a code (`MS-…`) and its next
+step — see *Error codes* below for the full list.
 
 **"Failed to load Python DLL … build\…" when launching the exe**
 You launched the exe from the `build\` folder of a source checkout. Only
@@ -351,6 +391,162 @@ MinerU endpoint. Build from source if your policy requires it.
 **Audio file won't transcribe**
 Check Settings → *Transcribe audio files* is on. A silent file produces
 "(No speech detected.)" rather than an error.
+
+---
+
+## Error codes — what went wrong and what to do
+
+Every problem Markdown Sidekick reports follows the same pattern:
+
+1. **What happened**, in plain words.
+2. **What to do next** — and, when the app can do it for you, a button that
+   does it (*Turn on OCR & retry*, *Choose another folder…*, *Open Local AI
+   settings*).
+3. **An error code and a reference**, e.g. `Error MS-102 · Ref 7F3A2C`. The
+   code says what kind of problem it is (the tables below); the reference
+   points at the exact entry in the error log, which holds the technical
+   details.
+
+Where you see it:
+
+- **A file that failed to convert** shows its message in the preview, with
+  the fix button, *Retry* and *Copy details* underneath. Its row reads
+  `error MS-…`.
+- **A file that converted, but not as well as it could have** (a better
+  reader failed and a simpler one took over) is marked ⚠ in the list and
+  explained in a bar above the progress line when you select it.
+- **Something that stops what you were doing** (a save that fails) opens a
+  small dialog with the fix as its default button.
+- **Something that doesn't stop you** (the AI summary was skipped, your
+  settings file was reset) appears in the same bar, which you can dismiss.
+
+*Copy details* puts everything a bug report needs on the clipboard: the
+code, the reference, the technical message, your app version and system.
+
+All errors are **recorded automatically** in
+`%LOCALAPPDATA%\MarkdownSidekick\logs\errors.jsonl` — no setting needed.
+The log stays on your PC, holds the last few megabytes, and never contains
+your documents' text (file names and paths, yes).
+
+**Converting a file**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-101 | This document is password-protected or encrypted. | Remove the protection (open it and print or export it to a new file), then retry. | Retry |
+| MS-102 | The file is locked or in use by another program. | Close the program that has it open (often a PDF reader or Office), then retry. | Retry |
+| MS-103 | The file can't be found — it may have been moved, renamed, or deleted. | Add the file again from its current location. | Remove from list |
+| MS-104 | That's a folder, not a file. | Add the files inside it instead. | Add files… |
+| MS-105 | No conversion engine understands this file type. | Export the content as PDF, DOCX, HTML, or another supported format, then add that file. | — |
+| MS-106 | The conversion finished but produced no text. | The file may be corrupt, image-only, or a binary format with the wrong extension. Re-export it in a supported format, then add it again. | — |
+| MS-107 | The file appears to be corrupt or incomplete. | Re-download or re-export the file, then retry. | Retry |
+| MS-108 | The file is too large to convert with the memory available. | Close other programs (or split the document into parts), then retry. | Retry |
+| MS-109 | The audio/video stream couldn't be decoded. | Convert it to a common format (MP3, WAV, or MP4), then add that file. | — |
+| MS-110 | This file has no text layer — it's a scan or an image — and OCR is turned off. | Turn on OCR so the text can be read from the images. | Turn on OCR & retry |
+| MS-111 | The speech-recognition model couldn't be downloaded. | Connect to the internet once so the model can download (it's kept afterwards), then retry. | Retry |
+| MS-112 | The transcription engine failed on this file. | Choose a smaller Whisper model in Settings → Conversion, then retry. | Open Conversion settings |
+| MS-113 | The OCR engine failed. | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
+| MS-114 | The MinerU server didn't return a result, so the PDF was converted locally. *(warning)* | Check the server is running at the endpoint in Settings → Conversion, or clear the endpoint to stop using it. | Open Conversion settings |
+| MS-115 | Audio/video transcription is turned off. | Turn on transcription to convert this file. | Turn on transcription & retry |
+| MS-120 | The column-aware PDF reader failed, so the basic reader was used — columns and tables may be out of order. *(warning)* | Retry. If it happens again, report it with this error's reference. | Retry |
+| MS-121 | OCR failed on this PDF's scanned pages, so only its text layer was kept. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
+| MS-122 | OCR failed on this image, so only basic image information was extracted. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
+| MS-123 | Transcription failed, so only basic file information was extracted. *(warning)* | Choose a smaller Whisper model in Settings → Conversion, then retry. | Open Conversion settings |
+| MS-124 | The page-by-page PDF reader failed, so this PDF has no page anchors. *(warning)* | Retry. If it happens again, report it with this error's reference. | Retry |
+| MS-125 | This file couldn't be opened as a PDF (it may be damaged, or not a PDF at all), so only its raw text was converted. *(warning)* | Re-download or re-export the PDF, then retry. | Retry |
+| MS-130 | The address couldn't be downloaded. | Check the address and your internet connection, then retry. | Retry |
+| MS-131 | That link can't be converted: only http/https downloads up to 50 MB are supported. | Download the file yourself and convert the local copy. | — |
+| MS-132 | There is no section with that number. | Get the section list from convert_outline and use one of its indexes (with the same max_tokens). | — |
+| MS-199 | The conversion engine reported an unexpected error. | Retry. If it keeps failing, report it — the technical details say why. | Retry |
+
+**Saving**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-201 | Markdown Sidekick isn't allowed to write to that folder. | Choose a different folder, such as Documents. | Choose another folder… |
+| MS-202 | The disk is full. | Free up space, or choose a folder on another drive. | Choose another folder… |
+| MS-203 | The save location's path is too long for Windows. | Choose a folder with a shorter path, such as C:\Markdown. | Choose another folder… |
+| MS-204 | A file being saved is open in another program. | Close the program that has it open (often a Markdown editor), then save again. | Save again |
+| MS-299 | The Markdown couldn't be saved. | Try saving to a different folder. If it keeps failing, report it with this error's reference. | Choose another folder… |
+
+**Local AI (optional extras — the save itself still succeeds)**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-301 | The local AI didn't answer, so its step (summary, captions or polish) was skipped. *(warning)* | Start your local AI app (Ollama, LM Studio…), or clear the model in Settings → Local AI to stop using it. | Open Local AI settings |
+| MS-302 | The local AI doesn't have the chosen model, so its step was skipped. *(warning)* | Download the model (e.g. ollama pull llama3.2) or pick an installed one in Settings → Local AI. | Open Local AI settings |
+| MS-303 | The local AI took too long, so its step was skipped. *(warning)* | Pick a smaller or faster model in Settings → Local AI. | Open Local AI settings |
+| MS-304 | The AI summary didn't pass the quality checks, so it was left out. *(note)* | Nothing needs fixing. For better summaries, try another summary model in Settings → Local AI. | Open Local AI settings |
+| MS-399 | The local AI step failed and was skipped. *(warning)* | Check the endpoint and model in Settings → Local AI. | Open Local AI settings |
+
+**Figures**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-401 | Figures couldn't be extracted, so the Markdown was saved without them. *(warning)* | Save again, or turn off figure extraction in Settings → Output. | Open Output settings |
+| MS-402 | Some figures couldn't be saved; the rest of the document is complete. *(warning)* | If the missing figures matter, report the file with this error's reference. | — |
+
+**Settings**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-501 | Your settings file couldn't be read, so the defaults were loaded. *(warning)* | The old file was kept as settings.json.bad — check your choices in Settings. | Open Settings |
+| MS-502 | Your settings couldn't be saved. | Make sure the folder %LOCALAPPDATA%\MarkdownSidekick isn't read-only or full, then save again. | — |
+
+**Clipboard, folders, reports, help**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-601 | The clipboard is busy — another program is using it. *(warning)* | Wait a moment, then copy again. | Copy again |
+| MS-602 | Windows couldn't open that folder. *(warning)* | Open it yourself — its path is in the details. | — |
+| MS-603 | The diagnostic report couldn't be created. | Choose another folder for the report, or open the log folder and send the files from there. | Open log folder |
+| MS-604 | The built-in user guide couldn't be loaded — a file is missing from this installation. | Reinstall Markdown Sidekick to restore it. | — |
+
+**Unexpected errors**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-900 | Markdown Sidekick hit an unexpected error and had to stop. | Restart the app. The details are in the error log — send them to support. | Open log folder |
+| MS-901 | Something went wrong inside Markdown Sidekick, but it recovered. | Carry on. If anything looks wrong, restart the app and report this error's reference. | Open log folder |
+| MS-902 | Conversion stopped unexpectedly. | The files that didn't finish are marked as failed — retry them, or restart the app. | Retry failed files |
+| MS-903 | The preview couldn't be drawn for this file. *(warning)* | Show the raw Markdown instead — Copy and Save still work. | Show raw Markdown |
+
+---
+
+## Debug mode and diagnostic reports
+
+The error log records what *failed*. **Debug mode** records everything the
+app *did* — useful when output looks wrong, a conversion is slow, or you are
+asked for more detail on a bug report.
+
+Turn it on in **Settings → Diagnostics → Record a detailed trace** (the
+title bar shows *DEBUG MODE* while it is on), or for one run with
+`MarkdownSidekick.exe --debug`. Each run then writes a folder under
+`%LOCALAPPDATA%\MarkdownSidekick\logs\sessions\` with:
+
+| File | What it holds |
+| ---- | ------------- |
+| `events.jsonl` | A timeline: your system and settings, every file converted, which reader was tried and why it was or wasn't used, time per page, each cleanup pass (how long it took, how many lines it removed, samples of them), quality scores, saves, local-AI calls, anything the window did that took over a second |
+| `snapshots\` | Each conversion's raw and cleaned Markdown side by side (only with *Also keep each conversion's raw and cleaned Markdown* ticked) |
+| `faulthandler.log` | Stack dumps if the app crashed hard or froze for 20 seconds |
+
+**Create diagnostic report…** (same tab) zips the error log, the most recent
+debug sessions, your settings and a readable `summary.md` into one file to
+attach to a bug report. Read the summary yourself first if you like: it
+lists problems, then the slowest steps, then quality findings.
+
+Privacy: nothing is ever uploaded. Traces contain file names and paths; the
+snapshots contain your documents' text, so untick that option (or leave
+snapshots out with `diagnostics --no-snapshots`) before sharing a report
+about a confidential document. The 15 most recent sessions are kept; older
+ones are deleted automatically. Debug mode slows conversion very slightly.
+
+From the command line:
+
+```
+markdown-sidekick-cli convert book.pdf --debug      (trace this run)
+markdown-sidekick-cli diagnostics                   (print the summary)
+markdown-sidekick-cli diagnostics --report r.zip    (write the shareable zip)
+```
 
 ---
 

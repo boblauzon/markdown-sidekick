@@ -12,6 +12,8 @@ import sys
 from importlib import resources
 from pathlib import Path
 
+from . import errors
+
 KOFI_URL = "https://ko-fi.com/roblauzon"
 
 
@@ -73,8 +75,9 @@ def load_user_guide() -> str:
             .joinpath("USERGUIDE.md")
             .read_text(encoding="utf-8")
         )
-    except Exception:
+    except Exception as exc:
+        incident = errors.report("MS-604", exc=exc, where="user guide")
         return (
-            "# User Guide\n\nThe bundled guide could not be loaded.\n\n"
-            f"Documentation and support: {KOFI_URL}\n"
+            f"# User Guide\n\n{incident.title}\n\n{incident.next_step}\n\n"
+            f"{incident.reference()}\n\nDocumentation and support: {KOFI_URL}\n"
         )

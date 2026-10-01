@@ -13,9 +13,11 @@ downloaded once on first use to a local cache under %LOCALAPPDATA%.
 from __future__ import annotations
 
 import importlib.util
+import time
 from pathlib import Path
 from typing import Callable
 
+from . import debuglog
 from .settings import app_data_dir
 
 _FASTER_WHISPER_AVAILABLE = importlib.util.find_spec("faster_whisper") is not None
@@ -118,8 +120,8 @@ class AudioTranscriber:
 
             if ctranslate2.get_cuda_device_count() > 0:
                 return "cuda", "float16"
-        except Exception:
-            pass
+        except Exception as exc:
+            debuglog.exception("whisper.hardware_probe", exc)
         return "cpu", "int8"
 
     def _ensure_model_dir(self) -> str:
@@ -143,14 +145,18 @@ class AudioTranscriber:
 
     def _load_model(self):
         if self._model is None:
-            from faster_whisper import WhisperModel
+            with debuglog.span("whisper.model_load", model=self.model_size) as sp:
+                from faster_whisper import WhisperModel
 
-            self._device, self._compute_type = self._detect_hardware()
-            self._model = WhisperModel(
-                self._ensure_model_dir(),
-                device=self._device,
-                compute_type=self._compute_type,
-            )
+                self._device, self._compute_type = self._detect_hardware()
+                sp["device"], sp["compute_type"] = self._device, self._compute_type
+                model_dir = self._ensure_model_dir()
+                sp["model_dir"] = model_dir
+                self._model = WhisperModel(
+                    model_dir,
+                    device=self._device,
+                    compute_type=self._compute_type,
+                )
         return self._model
 
     def transcribe_to_markdown(
@@ -164,6 +170,7 @@ class AudioTranscriber:
         """
         source = Path(path)
         model = self._load_model()
+        started = time.perf_counter()
         segments, info = model.transcribe(
             str(source),
             beam_size=5,
@@ -195,6 +202,19 @@ class AudioTranscriber:
                 # VAD can make info.duration < the last segment end; keep the
                 # reported total >= current so progress never exceeds 100%.
                 on_progress(float(seg.end), max(duration, float(seg.end)))
+        elapsed = time.perf_counter() - started
+        debuglog.event(
+            "whisper.done",
+            model=self.model_size,
+            device=self._device,
+            compute_type=self._compute_type,
+            audio_s=round(duration, 1),
+            ms=round(elapsed * 1000),
+            realtime_factor=round(elapsed / duration, 3) if duration else None,
+            segments=len(collected),
+            language=language,
+            language_probability=prob,
+        )
         body: list[str] = []
         for start, paragraph in group_paragraphs(collected):
             body.append(f"**[{_short_stamp(start)}]** {paragraph}")

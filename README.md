@@ -77,11 +77,16 @@ available inside the app via the **❓ Help** button.
 - **AI-friendly export** (Settings → *AI-friendly export*):
   - **YAML front matter** on saved files (title, author, source, date, token
     and image counts; title/author come from the PDF itself when trustworthy)
+    — a plain one-line book/part header for Gemini Notebook
   - **Export bar** in the main window: choose *One Markdown file*, *Chapter
     files* (book folder with `index.md` + `manifest.json`), or **AI-sized
     sections** with an *Optimize for* picker (Claude / ChatGPT / Gemini /
-    Local LLM) that guarantees every part fits that platform's context window
-    and packs short chapters together up to that budget
+    Gemini Notebook / Local LLM) that guarantees every part fits that
+    platform's context window and packs short chapters together up to that
+    budget. **Gemini Notebook** (formerly NotebookLM) gets an upload-ready
+    folder instead: one source per chapter (packed only past 25 sources),
+    each under the 500,000-word source limit, filenames prefixed with the
+    book's title, image links reduced to captions, no index/manifest
   - **Page anchors** — optional `<!-- page N -->` markers in PDF conversions so
     AI answers can cite the printed page
   - **Figure extraction** (on by default) — embedded PDF images of at least
@@ -115,6 +120,21 @@ available inside the app via the **❓ Help** button.
   | Images     | PNG, JPG, GIF, BMP, TIFF *(metadata / OCR where available)* |
   | Audio      | MP3, WAV, M4A *(transcription — see notes)* |
   | Archives   | ZIP *(contents are converted recursively)* |
+
+- **Clear errors, and logs when you need them**:
+  - Every error has a **code** (`MS-102`), says **what happened** and **what to do
+    next** in plain words, and — where the app can do it — offers the fix as a button
+    (*Turn on OCR & retry*, *Use CPU for OCR & retry*, *Choose another folder…*).
+    *Copy details* puts a ready-to-send report on the clipboard. The full list is in
+    the in-app guide under *Error codes*.
+  - A file that converted through a **fallback** (say the column-aware PDF reader
+    failed and the basic one took over) is flagged ⚠ instead of passing silently.
+  - An **error log** is always kept (`%LOCALAPPDATA%\MarkdownSidekick\logs\errors.jsonl`);
+    nothing is ever uploaded.
+  - **Debug mode** (Settings → *Diagnostics*, or `--debug`) records a full trace of each
+    run — routing decisions, per-page timings, what each cleanup pass removed, quality
+    scores, UI stalls — plus raw/cleaned Markdown snapshots, and **Create diagnostic
+    report…** zips it all with a readable summary for a bug report.
 
 ## Getting it running — pick the option that fits you
 
@@ -196,7 +216,10 @@ You can also run it as a module:
 from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
 (AI-sized book folders — every part fits the platform's budget), `--quality`,
 `--anchors`, `--images` / `--no-images`, `--no-layout`, `--polish`, `--summarize`,
-`--no-clean`, `--no-front-matter`, `--json`, `--out DIR`.
+`--no-clean`, `--no-front-matter`, `--json`, `--out DIR`, `--debug`. Failures print an
+error code (`MS-…`), the next step, and the reference of their error-log entry;
+`markdown-sidekick-cli diagnostics` summarises the logs (add `--report out.zip` for a
+shareable bundle).
 
 ## How to use
 
@@ -206,7 +229,7 @@ from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
    see styled output or untick it for raw Markdown; **Clean output** toggles the
    tidy-up pass.
 3. Pick the **Output** shape (single file / chapter files / AI-sized sections
-   with a Claude-ChatGPT-Gemini-Local picker), then **💾 Save Markdown…** — or
+   with a Claude / ChatGPT / Gemini / Gemini Notebook / Local picker), then **💾 Save Markdown…** — or
    **Copy** the previewed file. Both use whatever **Clean output** is set to.
 
 ## Project layout
@@ -229,8 +252,12 @@ Markdown_Sidekick/
 │     ├─ audio.py               # local audio transcription (faster-whisper)
 │     ├─ mineru.py              # optional MinerU endpoint client (high-fidelity)
 │     ├─ settings.py            # persisted user settings (JSON)
+│     ├─ errors.py              # error codes: what happened + next step + one-click fix
+│     ├─ debuglog.py            # always-on error log + opt-in debug trace
+│     ├─ diagnostics.py         # log digest + shareable diagnostic report
 │     ├─ mcp_server.py          # MCP server (convert_local_file tool)
 │     ├─ mdrender.py            # lightweight Markdown -> Tk renderer
+│     ├─ errorview.py           # error dialog + notice bar
 │     └─ ui.py                  # Tkinter GUI
 ├─ run_mcp.py                   # launch the MCP server (stdio)
 └─ README.md
