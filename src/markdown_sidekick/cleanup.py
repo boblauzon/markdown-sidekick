@@ -128,6 +128,15 @@ _CHAR_MAP = {
 _CHAR_TRANSLATION = str.maketrans(_CHAR_MAP)
 # pdfminer's placeholder for a glyph with no Unicode mapping — never text.
 _CID_RE = re.compile(r"\(cid:\d+\)")
+# pdfminer ends every page with a form feed, so markitdown's PDF output starts
+# each page's first line with one ("…\n\n\fPage two"). It is a page break: the
+# whole break — blank lines around it, runs of empty pages — becomes one
+# paragraph break. Deleting the \f alone would glue "end of page" to "next
+# page" when no newline precedes it. Trailing spaces after the \f go only when
+# they run to the line end; indentation of the next page's first line stays.
+# Like the rest of this pass it applies inside fences too — only whitespace
+# changes, and a fence marker after the break still starts its own line.
+_FORM_FEED_RE = re.compile(r"(?:[ \t]*\n)*(?:[ \t]*\f(?:[ \t]*\n)*)+")
 
 
 def normalize_characters(text: str, stats: CleanupStats) -> str:
@@ -136,6 +145,9 @@ def normalize_characters(text: str, stats: CleanupStats) -> str:
     if "(cid:" in text:
         text, n = _CID_RE.subn("", text)
         stats.chars_normalized += n
+    if "\f" in text:
+        stats.chars_normalized += text.count("\f")
+        text = _FORM_FEED_RE.sub("\n\n", text)
     return text
 
 
