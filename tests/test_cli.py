@@ -66,6 +66,18 @@ class TestConvert:
             body = p.read_text(encoding="utf-8").split("---\n", 2)[-1]
             assert estimate_tokens(body) <= AI_TARGETS["Local LLM"]
 
+    def test_gemini_notebook_target_writes_only_sources(self, html_doc, tmp_path):
+        rc = cli.main(
+            ["convert", str(html_doc), "--out", str(tmp_path / "out"), "--ai-target", "Gemini Notebook"]
+        )
+        assert rc == 0
+        book = tmp_path / "out" / "sample"
+        # Every file is a source to upload: no index.md / manifest.json.
+        names = sorted(p.name for p in book.iterdir())
+        assert [n.split("-", 1)[1] for n in names] == ["01-alpha.md", "02-beta.md"]
+        text = (book / names[0]).read_text(encoding="utf-8")
+        assert not text.startswith("---") and "part 1 of 2" in text
+
     def test_json_output_with_quality(self, html_doc, tmp_path, capsys):
         rc = cli.main(
             ["convert", str(html_doc), "--out", str(tmp_path / "o"), "--json", "--quality"]

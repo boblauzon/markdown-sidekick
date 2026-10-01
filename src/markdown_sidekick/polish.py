@@ -31,6 +31,8 @@ from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Callable
 
+from . import debuglog, errors
+
 _TIMEOUT_S = 180
 # A structured-output request failing faster than this was rejected by the
 # server (worth a plain-text retry); slower, it timed out.
@@ -113,7 +115,39 @@ _INTRO_HEADING_RE = re.compile(
 )
 
 
-def _post_json(url: str, payload: dict, timeout: int = _TIMEOUT_S) -> dict | None:
+# The most recent failed model call (an errors.Incident), for the caller to
+# surface: generation degrades to "no extra" rather than raising, so the
+# save still succeeds — but the user is told why the extra is missing.
+_last_failure: "errors.Incident | None" = None
+# The most recent request exception, reported or not (see _post_json).
+_last_exc: tuple[Exception, str, str, int] | None = None
+
+
+def take_last_failure() -> "errors.Incident | None":
+    """The incident behind the most recent skipped AI step (then cleared)."""
+    global _last_failure
+    incident, _last_failure = _last_failure, None
+    return incident
+
+
+def _report_request_failure() -> None:
+    """Log the most recent failed request as a coded incident."""
+    global _last_failure
+    if _last_exc is not None:
+        exc, url, model, ms = _last_exc
+        _last_failure = errors.report(
+            errors.classify_http(exc), exc=exc, where="local AI request", url=url, model=model, ms=ms
+        )
+
+
+def _post_json(
+    url: str, payload: dict, timeout: int = _TIMEOUT_S, report: bool = True
+) -> dict | None:
+    """POST JSON; None on any failure. ``report=False`` defers logging to a
+    caller that may still recover (the summary's plain-text retry)."""
+    global _last_exc
+    started = time.perf_counter()
+    model = payload.get("model", "")
     try:
         req = urllib.request.Request(
             url,
@@ -121,8 +155,23 @@ def _post_json(url: str, payload: dict, timeout: int = _TIMEOUT_S) -> dict | Non
             headers={"Content-Type": "application/json"},
         )
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8"))
-    except Exception:
+            raw = resp.read()
+        data = json.loads(raw.decode("utf-8"))
+        debuglog.event(
+            "llm.http",
+            url=url,
+            model=model,
+            ok=True,
+            bytes=len(raw),
+            ms=round((time.perf_counter() - started) * 1000),
+        )
+        return data
+    except Exception as exc:
+        # Generation calls only (probes use _get_json): a failure here is a
+        # real error — the user asked for this model.
+        _last_exc = (exc, url, model, round((time.perf_counter() - started) * 1000))
+        if report:
+            _report_request_failure()
         return None
 
 
@@ -171,7 +220,10 @@ def _get_json(url: str, timeout: float) -> dict | None:
         with urllib.request.urlopen(url, timeout=timeout) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         return data if isinstance(data, dict) else None
-    except Exception:
+    except Exception as exc:
+        # A probe of a port nobody may be listening on: expected, so not an
+        # error — but Detect's reasoning belongs in the debug trace.
+        debuglog.event("llm.probe", url=url, ok=False, error=f"{type(exc).__name__}: {exc}")
         return None
 
 
@@ -272,6 +324,7 @@ def _generate(
     images: list[str] | None = None,
     protocol: str | None = None,
     schema: dict | None = None,
+    report: bool = True,
 ) -> str | None:
     """Generate via whichever protocol the endpoint speaks.
 
@@ -281,13 +334,13 @@ def _generate(
     ``response_format``)."""
     endpoint = endpoint.rstrip("/")
     if (protocol or _resolve_protocol(endpoint)) == "openai":
-        return _generate_openai(endpoint, model, prompt, images, schema)
+        return _generate_openai(endpoint, model, prompt, images, schema, report)
     payload: dict = {"model": model, "prompt": prompt, "stream": False}
     if images:
         payload["images"] = images
     if schema:
         payload["format"] = schema
-    data = _post_json(f"{endpoint}/api/generate", payload)
+    data = _post_json(f"{endpoint}/api/generate", payload, report=report)
     if not data:
         return None
     text = data.get("response")
@@ -300,6 +353,7 @@ def _generate_openai(
     prompt: str,
     images: list[str] | None = None,
     schema: dict | None = None,
+    report: bool = True,
 ) -> str | None:
     """OpenAI-compatible /v1/chat/completions (LM Studio, Jan, LocalAI, …)."""
     if images:
@@ -319,7 +373,7 @@ def _generate_openai(
             "type": "json_schema",
             "json_schema": {"name": "result", "schema": schema, "strict": True},
         }
-    data = _post_json(f"{endpoint}/v1/chat/completions", payload)
+    data = _post_json(f"{endpoint}/v1/chat/completions", payload, report=report)
     if not data:
         return None
     try:
@@ -503,19 +557,32 @@ def summarize_markdown(text: str, endpoint: str, model: str, title: str = "") ->
     sentence boundary — a bad summary is worse than none, so the caller
     simply omits the field.
     """
+    global _last_failure
     if not endpoint or not model or not text.strip():
         return None
     protocol = _resolve_protocol(endpoint)
     prompt = _SUMMARY_PROMPT + _summary_source(text, title)
     started = time.monotonic()
-    reply = _generate(endpoint, model, prompt, protocol=protocol, schema=_SUMMARY_SCHEMA)
+    reply = _generate(
+        endpoint, model, prompt, protocol=protocol, schema=_SUMMARY_SCHEMA, report=False
+    )
     # A server without structured-output support rejects the request at
     # once; a slow failure is a timeout, and retrying would double the wait.
     if reply is None and time.monotonic() - started < _SCHEMA_REJECT_S:
         reply = _generate(endpoint, model, prompt, protocol=protocol)
+    elif reply is None:
+        _report_request_failure()  # no retry after a slow failure: report it now
     if reply is None:
         return None
+    raw = reply
     reply = _unwrap_json_summary(reply)
-    if reply is None:
-        return None
-    return _clean_summary(reply)
+    summary = _clean_summary(reply) if reply is not None else None
+    if summary is None:
+        _last_failure = errors.report(
+            "MS-304",
+            where="summary quality checks",
+            model=model,
+            reply=debuglog.sample(raw),
+        )
+    debuglog.event("llm.summary", model=model, accepted=summary is not None, chars=len(raw))
+    return summary

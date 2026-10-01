@@ -16,6 +16,11 @@ Splitting happens on ``#`` headings (which the PDF layout engine derives from
 the PDF's bookmarks, and the cleanup pipeline restores for older book
 conversions); a chapter that still exceeds the token budget is sub-split at
 its ``##`` boundaries. All writes are UTF-8.
+
+The Gemini Notebook target (``notebook=True``) writes an upload-ready folder
+instead: one source file per chapter named after the book, a short readable
+header in place of YAML, image links reduced to their captions, and no
+index.md / manifest.json (see :func:`split_for_notebook`).
 """
 
 from __future__ import annotations
@@ -26,19 +31,40 @@ from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 
+from . import debuglog
+
 _CHARS_PER_TOKEN = 4
 DEFAULT_MAX_TOKENS = 30_000
 
+# Gemini Notebook (formerly NotebookLM) is not a chat window: each uploaded
+# file becomes a *source* it retrieves from and cites, so its limits shape
+# the export rather than a context budget:
+#  - 500,000 words per source. A word is at least one character, so a part of
+#    at most 480k characters (120k est. tokens) can never exceed it whatever
+#    the script (CJK counts each character as a word); the remaining 20k
+#    characters absorb the source header.
+#  - sources per notebook (50 on the free plan). A chapter is the useful unit
+#    — a notebook can scope a chat, study guide or Audio Overview to the
+#    sources selected — so chapters are packed together only when a document
+#    would otherwise take more than NOTEBOOK_MAX_SOURCES, which leaves room
+#    for a second book on the free plan.
+NOTEBOOK_SOURCE_TOKENS = 120_000
+NOTEBOOK_MAX_SOURCES = 25
+
 # Per-platform section budgets (est. tokens). Sized so several sections fit
-# in the platform's context window with room for the conversation itself.
+# in the platform's context window with room for the conversation itself —
+# except notebook targets, whose budget is the per-source cap above.
 # "Claude" shares DEFAULT_MAX_TOKENS: the default budget IS the Claude budget,
 # and the two must not drift apart.
 AI_TARGETS: dict[str, int] = {
     "Claude": DEFAULT_MAX_TOKENS,
     "ChatGPT": 12_000,
     "Gemini": 60_000,
+    "Gemini Notebook": NOTEBOOK_SOURCE_TOKENS,
     "Local LLM": 4_000,
 }
+# Targets exported as notebook sources (export_book(notebook=True)).
+NOTEBOOK_TARGETS = frozenset({"Gemini Notebook"})
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
@@ -62,15 +88,20 @@ def slugify(title: str, max_len: int = 60) -> str:
     return slug[:max_len].rstrip("-") or "section"
 
 
+def _one_line(value: str) -> str:
+    """A metadata string made safe for a single header line."""
+    # YAML rejects control characters, and a lone surrogate can't be written
+    # as UTF-8 — neither may reach the file from any source.
+    return re.sub(r"\s*[\r\n]+\s*", " ", _YAML_HOSTILE_RE.sub("", value)).strip()
+
+
 def build_front_matter(fields: dict[str, object]) -> str:
     """Minimal YAML front matter. Values are scalars; strings are quoted only
     when they contain YAML-significant characters."""
     lines = ["---"]
     for key, value in fields.items():
         if isinstance(value, str):
-            # YAML rejects control characters, and a lone surrogate can't be
-            # written as UTF-8 — neither may reach the file from any source.
-            value = re.sub(r"\s*[\r\n]+\s*", " ", _YAML_HOSTILE_RE.sub("", value)).strip()
+            value = _one_line(value)
         if value is None or value == "":
             continue
         if isinstance(value, str) and re.search(r"[:#\[\]{}\"'|>&%@`,]", value):
@@ -278,6 +309,38 @@ def _pack(sections: list[Section], max_tokens: int) -> list[Section]:
     return packed
 
 
+def split_for_notebook(
+    markdown: str,
+    max_tokens: int = NOTEBOOK_SOURCE_TOKENS,
+    max_sources: int = NOTEBOOK_MAX_SOURCES,
+) -> list[Section]:
+    """Split into Gemini Notebook sources: one per chapter where possible.
+
+    Every part fits ``max_tokens`` with the guarantees of :func:`split_for_ai`
+    (only an indivisible fenced block can exceed it). Chapters stay separate —
+    each a source that can be selected on its own — unless that would take
+    more than ``max_sources`` sources; then consecutive chapters are packed
+    with the SMALLEST budget that brings the count within the limit, keeping
+    parts as fine-grained and even as the limit allows. A document too big
+    for that even at ``max_tokens`` takes as many sources as the cap needs.
+    """
+    sections = split_for_ai(markdown, max_tokens, pack=False)
+    if len(sections) <= max_sources:
+        return sections
+    best = _pack(sections, max_tokens)
+    if len(best) > max_sources:
+        return best
+    lo, hi = 1, max_tokens  # invariant: packing at hi fits (best is that packing)
+    while lo < hi:
+        mid = (lo + hi) // 2
+        packed = _pack(sections, mid)
+        if len(packed) <= max_sources:
+            best, hi = packed, mid
+        else:
+            lo = mid + 1
+    return best
+
+
 def _is_lead(title: str) -> bool:
     """Is this part purely the text before the first chapter?"""
     return title == _LEAD_TITLE or title.startswith(f"{_LEAD_TITLE} (part ")
@@ -344,6 +407,90 @@ def document_title(markdown: str, fallback: str) -> str:
     return fallback
 
 
+_IMAGE_ALT_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
+_CODE_SPAN_RE = re.compile(r"(`+[^`]*`+)")
+
+
+def _figure_note(m: re.Match[str]) -> str:
+    alt = m.group(1).strip()
+    if not alt:
+        return "[Figure]"
+    return f"[{alt}]" if alt.lower().startswith("figure") else f"[Figure: {alt}]"
+
+
+def notebook_figures(markdown: str) -> str:
+    """Reduce image links to a ``[Figure …]`` note for a notebook source.
+
+    A notebook source is the uploaded .md alone: a relative image link can't
+    resolve there and a remote one isn't fetched, so the link is noise while
+    its alt text (the figure label, or an AI caption) is content. Code —
+    fenced or inline — is untouched: a Markdown tutorial's ``![alt](url)`` is
+    an example, not an image.
+    """
+    if "![" not in markdown:
+        return markdown
+    lines = markdown.split("\n")
+    is_fence, in_fence = _fence_map(lines)
+    for i, line in enumerate(lines):
+        if is_fence[i] or in_fence[i] or "![" not in line:
+            continue
+        parts = _CODE_SPAN_RE.split(line)  # odd indices are code spans
+        parts[::2] = [_IMAGE_ALT_RE.sub(_figure_note, p) for p in parts[::2]]
+        lines[i] = "".join(parts)
+    return "\n".join(lines)
+
+
+def _notebook_header(
+    book: str,
+    author: str,
+    *,
+    part: str = "",
+    summary: str = "",
+    contents: list[str] | None = None,
+) -> str:
+    """A short plain-Markdown header for a notebook source.
+
+    It replaces YAML front matter, which a notebook reads as body text: the
+    machine fields are retrieval noise, and ``converted: <date>`` gets cited
+    as the book's date. What a source needs is which book (and part) it is —
+    a notebook often holds several. The first part also carries the summary
+    and the list of parts, since there is no index.md to hold them.
+    """
+    book, author, summary = _one_line(book), _one_line(author), _one_line(summary)
+    lines = [f"*{book}*" + (f" by {author}" if author else "") + (f" — {part}" if part else "")]
+    if summary:
+        lines += ["", f"Summary: {summary}"]
+    if contents:
+        lines += ["", f"This document is split into {len(contents)} sources:", ""]
+        lines += [f"{n}. {_one_line(t)}" for n, t in enumerate(contents, start=1)]
+    return "\n".join(lines) + "\n\n---\n\n"
+
+
+_SUBTITLE_SEP_RE = re.compile(r"\s*[:–—]\s+|\s+-\s+")
+_EDITION_RE = re.compile(
+    r",?\s*\(?\b(?:\d+(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|"
+    r"seventh|eighth|ninth|tenth)\s+edition\b\)?",
+    re.IGNORECASE,
+)
+_LEADING_ARTICLE_RE = re.compile(r"^(?:the|an?)-(?=.)")
+
+
+def _source_prefix(title: str, max_len: int = 40) -> str:
+    """The book's short slug that starts each source's filename — a notebook
+    lists every book's sources side by side by name, truncating long ones, so
+    only the main title (no subtitle, edition or leading article) is used,
+    cut at a word boundary. (Not much shorter: a series' titles share their
+    first words — "Universal Principles of Branding" / "… of Design".)"""
+    main = _SUBTITLE_SEP_RE.split(title, maxsplit=1)[0] or title
+    main = _EDITION_RE.sub("", main).strip() or main
+    main = re.sub(r"['’]", "", main)  # "Programmer's" -> programmers, not programmer-s
+    slug = _LEADING_ARTICLE_RE.sub("", slugify(main, max_len=200))
+    if len(slug) <= max_len:
+        return slug
+    cut = slug[: max_len + 1]
+    return cut.rsplit("-", 1)[0] if "-" in cut else slug[:max_len]
+
+
 def export_single(
     markdown: str,
     out_path: Path,
@@ -354,6 +501,7 @@ def export_single(
     summary: str = "",
     title: str = "",
     author: str = "",
+    notebook: bool = False,
 ) -> ExportResult:
     """Write one decorated Markdown file.
 
@@ -361,9 +509,15 @@ def export_single(
     front-matter field; blank means the field is simply absent. ``title`` /
     ``author`` come from the source's own metadata when the converter could
     vouch for them; a blank title falls back to the document's first heading.
+    ``notebook`` writes a Gemini Notebook source (see :func:`export_book`).
     """
     content = markdown
-    if front_matter:
+    if notebook:
+        content = notebook_figures(markdown)
+        if front_matter:
+            book = title or document_title(markdown, Path(source).stem)
+            content = _notebook_header(book, author, summary=summary) + content
+    elif front_matter:
         content = build_front_matter(
             {
                 "title": title or document_title(markdown, Path(source).stem),
@@ -378,6 +532,14 @@ def export_single(
         ) + markdown
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(content, encoding="utf-8")
+    debuglog.event(
+        "export.single",
+        path=str(out_path),
+        notebook=notebook,
+        front_matter=front_matter,
+        est_tokens=estimate_tokens(content),
+        summary=bool(summary),
+    )
     return ExportResult(paths=[out_path])
 
 
@@ -393,6 +555,7 @@ def export_book(
     summary: str = "",
     title: str = "",
     author: str = "",
+    notebook: bool = False,
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -406,10 +569,20 @@ def export_book(
     part's front matter as ``book_summary`` (the parts describe the whole
     book, not themselves). Text before the first chapter heading is written
     as ``00-front-matter.md`` so chapter N lands in a file numbered N.
+
+    ``notebook=True`` writes Gemini Notebook sources instead: parts from
+    :func:`split_for_notebook` with ``max_tokens`` as the per-source cap,
+    filenames prefixed with the book's slug, a readable header in place of
+    YAML (summary and list of parts on the first part only), image links
+    reduced to their captions, and no index.md or manifest.json — every file
+    in the folder is a source to upload.
     """
     stem = Path(source).stem
     title = title or document_title(markdown, stem)
-    if ai_sections:
+    if notebook:
+        markdown = notebook_figures(markdown)
+        sections = split_for_notebook(markdown, max_tokens)
+    elif ai_sections:
         sections = split_for_ai(markdown, max_tokens)
     else:
         sections = split_chapters(markdown, max_tokens=max_tokens)
@@ -424,6 +597,7 @@ def export_book(
             summary=summary,
             title=title,
             author=author,
+            notebook=notebook,
         )
 
     result = ExportResult()
@@ -434,15 +608,26 @@ def export_book(
     # (Only a part that is purely front matter: a packed "Front matter –
     # Chapter 2" part is 01 like any other.)
     first = 0 if _is_lead(sections[0].title) else 1
+    prefix = f"{_source_prefix(title)}-" if notebook else ""
     for n, sec in enumerate(sections, start=1):
-        name = f"{n - 1 + first:02d}-{slugify(sec.title or 'section')}"
+        name = f"{prefix}{n - 1 + first:02d}-{slugify(sec.title or 'section')}"
         while name in used_names:  # duplicate section titles
             name += "-b"
         used_names.add(name)
         path = out_dir / f"{name}.md"
         images = count_images(sec.markdown)
         content = sec.markdown
-        if front_matter:
+        if notebook:
+            if front_matter:
+                part = f"part {n} of {total}" + (f": {sec.title}" if sec.title else "")
+                content = _notebook_header(
+                    title,
+                    author,
+                    part=part,
+                    summary=summary if n == 1 else "",
+                    contents=[s.title or _LEAD_TITLE for s in sections] if n == 1 else None,
+                ) + sec.markdown
+        elif front_matter:
             content = build_front_matter(
                 {
                     "title": sec.title or title,
@@ -467,6 +652,17 @@ def export_book(
                 "image_count": images,
             }
         )
+    debuglog.event(
+        "export.book",
+        dir=str(out_dir),
+        mode="notebook" if notebook else "ai" if ai_sections else "chapters",
+        max_tokens=max_tokens,
+        parts=[[f["file"], f["est_tokens"]] for f in manifest_files],
+        total_est_tokens=estimate_tokens(markdown),
+        summary=bool(summary),
+    )
+    if notebook:
+        return result  # every file is a source to upload: no index or manifest
 
     index_lines = [f"# {title}", ""]
     if author:

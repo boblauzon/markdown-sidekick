@@ -15,8 +15,11 @@ toggled, so the UI can expose them individually later if desired.
 from __future__ import annotations
 
 import re
+import time
 from collections import Counter
-from dataclasses import dataclass, fields
+from dataclasses import asdict, dataclass, fields
+
+from . import debuglog
 
 # A "running header/footer" is a short line that recurs across many pages.
 _HEADER_MIN_REPEATS = 4
@@ -1389,6 +1392,26 @@ def collapse_blank_runs(text: str, stats: CleanupStats) -> str:
 # "Elsevier, 2007" citations, a chart's years, "See also" entries.
 _FURNITURE_FREE_ENGINES = frozenset({"pdflayout"})
 
+_PASS_SAMPLES = 12
+
+
+def _pass_record(name: str, before: str, after: str, seconds: float) -> dict:
+    """What one cleanup pass did, for the debug trace: its time, and the
+    lines it removed or rewrote (with samples) — the evidence for judging
+    whether a pass ever deletes real content."""
+    record: dict = {"pass": name, "ms": round(seconds * 1000, 1)}
+    if before == after:
+        return record
+    old, new = before.split("\n"), after.split("\n")
+    gone = Counter(line for line in old if line.strip()) - Counter(
+        line for line in new if line.strip()
+    )
+    record["chars_delta"] = len(after) - len(before)
+    record["lines_delta"] = len(new) - len(old)
+    record["lines_gone"] = sum(gone.values())
+    record["samples"] = [debuglog.sample(line) for line in list(gone.elements())[:_PASS_SAMPLES]]
+    return record
+
 
 def clean_markdown(
     text: str,
@@ -1414,34 +1437,62 @@ def clean_markdown(
     stats = CleanupStats()
     if not text:
         return text, stats
+    trace = debuglog.enabled()
+    passes: list[dict] = []
+    started, chars_in = time.perf_counter(), len(text)
+    lines_in = text.count("\n") + 1 if trace else 0
+
+    def run(fn, *args) -> None:
+        nonlocal text
+        if not trace:
+            text = fn(text, *args)
+            return
+        before, t0 = text, time.perf_counter()
+        text = fn(text, *args)
+        passes.append(_pass_record(fn.__name__, before, text, time.perf_counter() - t0))
+
     if normalize_chars:
-        text = normalize_characters(text, stats)
+        run(normalize_characters, stats)
     # De-double before slug stripping: shadowed job tickets ("JJoobb::…")
     # only match the slug patterns once repaired.
     if fix_shadow:
-        text = fix_shadow_text(text, stats)
+        run(fix_shadow_text, stats)
     if strip_slugs:
-        text = strip_prepress(text, stats)
+        run(strip_prepress, stats)
     # Titles must be harvested before the TOC (their source) is stripped.
     titles = _harvest_section_titles(text) if promote_headings else {}
     if strip_noise and engine not in _FURNITURE_FREE_ENGINES:
-        text = strip_page_noise(text, stats)
+        run(strip_page_noise, stats)
     if strip_toc:
-        text = strip_toc_tables(text, stats)
-        text = strip_plain_toc(text, stats)
+        run(strip_toc_tables, stats)
+        run(strip_plain_toc, stats)
     if promote_headings:
-        text = promote_chapter_headings(text, titles, stats)
+        run(promote_chapter_headings, titles, stats)
     if strip_boilerplate:
-        text = strip_repeated_blocks(text, stats)
+        run(strip_repeated_blocks, stats)
     if fence_code:
-        text = repair_fences(text, stats)
-        text = fence_code_blocks(text, stats)
+        run(repair_fences, stats)
+        run(fence_code_blocks, stats)
     if bullets:
-        text = normalize_bullets(text, stats)
+        run(normalize_bullets, stats)
     if join_wrapped:
-        text = join_wrapped_lines(text, stats)
+        run(join_wrapped_lines, stats)
     if normalize_chars:
-        text = scrub_replacement_runs(text, stats)
+        run(scrub_replacement_runs, stats)
     if collapse_blanks:
-        text = collapse_blank_runs(text, stats)
+        run(collapse_blank_runs, stats)
+    if trace:
+        out = text.strip() + "\n"
+        debuglog.event(
+            "cleanup.done",
+            engine=engine,
+            chars_in=chars_in,
+            lines_in=lines_in,
+            chars_out=len(out),
+            ms=round((time.perf_counter() - started) * 1000, 1),
+            passes=passes,
+            stats=asdict(stats),
+            harvested_titles=len(titles),
+        )
+        debuglog.snapshot("cleaned", out)
     return text.strip() + "\n", stats

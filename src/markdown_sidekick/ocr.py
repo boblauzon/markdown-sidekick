@@ -22,6 +22,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from . import debuglog
+
 # RapidOCR pulls in onnxruntime + opencv, which are slow to import. Detect it
 # cheaply with find_spec and only import it lazily on first OCR use, so the app
 # launches fast when no OCR is needed.
@@ -121,7 +123,8 @@ def _page_has_visual_content(page) -> bool:
                 path_count += 1
         coverage = image_area / page_area
         return coverage >= _IMAGE_COVERAGE_THRESHOLD or path_count >= _MIN_VECTOR_PATHS
-    except Exception:
+    except Exception as exc:
+        debuglog.exception("pdf.analysis.page", exc)  # page judged "not scanned"
         return False
 
 
@@ -174,23 +177,24 @@ class OcrEngine:
 
     def _rapidocr(self):
         if self._engine is None:
-            from rapidocr import RapidOCR
+            with debuglog.span("ocr.engine_init", device_setting=self.device) as sp:
+                from rapidocr import RapidOCR
 
-            device = self.device
-            if device == "auto":
-                # RapidOCR's own default stays on the CPU even when DirectML
-                # is available (measured 3.5s vs 0.7s/page) — resolve "auto"
-                # ourselves from the installed onnxruntime build.
-                import onnxruntime
+                device = self.device
+                if device == "auto" or debuglog.enabled():
+                    # RapidOCR's own default stays on the CPU even when DirectML
+                    # is available (measured 3.5s vs 0.7s/page) — resolve "auto"
+                    # ourselves from the installed onnxruntime build.
+                    import onnxruntime
 
-                device = (
-                    "gpu"
-                    if "DmlExecutionProvider" in onnxruntime.get_available_providers()
-                    else "cpu"
+                    providers = onnxruntime.get_available_providers()
+                    sp["providers"] = providers
+                    if device == "auto":
+                        device = "gpu" if "DmlExecutionProvider" in providers else "cpu"
+                sp["device"] = device
+                self._engine = RapidOCR(
+                    params={"EngineConfig.onnxruntime.use_dml": device == "gpu"}
                 )
-            self._engine = RapidOCR(
-                params={"EngineConfig.onnxruntime.use_dml": device == "gpu"}
-            )
         return self._engine
 
     def _recognise(self, image) -> str:

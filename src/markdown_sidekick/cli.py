@@ -6,9 +6,11 @@ conversions can be scripted from shells, CI, or AI agents:
     markdown-sidekick-cli convert book.pdf --split-chapters --quality
     markdown-sidekick-cli convert docs\\*.docx --out md\\
     markdown-sidekick-cli capabilities
+    markdown-sidekick-cli diagnostics            (digest of the error log + debug traces)
 
 Progress goes to stderr; per-file result lines go to stdout. Exit code is 0
-when every file converted, 1 otherwise.
+when every file converted, 1 otherwise. Every failure carries an error code
+(errors.py) and is recorded in the error log; ``--debug`` adds a full trace.
 """
 
 from __future__ import annotations
@@ -19,9 +21,9 @@ import json
 import sys
 from pathlib import Path
 
-from . import export
+from . import debuglog, errors, export
 from .cleanup import clean_markdown
-from .converter import ConversionEngine, default_output_path, explain_error
+from .converter import ConversionEngine, ConversionResult, default_output_path
 from .quality import assess_markdown
 from .settings import Settings
 
@@ -55,10 +57,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="write AI-sized book folders: every part fits this platform's "
         "context budget, even for heading-less documents "
-        "(implies --split-chapters; overrides --max-tokens)",
+        "(implies --split-chapters; overrides --max-tokens). "
+        "'Gemini Notebook' writes upload-ready sources instead: one per "
+        "chapter, within the per-source limit, no index/manifest",
     )
     conv.add_argument("--no-clean", action="store_true", help="skip the cleanup pass")
-    conv.add_argument("--no-front-matter", action="store_true", help="omit YAML front matter")
+    conv.add_argument("--no-front-matter", action="store_true", help="omit YAML front matter (the source header for Gemini Notebook)")
     conv.add_argument("--quality", action="store_true", help="print a quality report per file")
     conv.add_argument("--json", action="store_true", help="emit one JSON object per file instead of text lines")
     conv.add_argument("--anchors", action="store_true", help="insert <!-- page N --> markers in PDF conversions (citation grounding)")
@@ -70,8 +74,16 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--no-ocr", action="store_true", help="disable the OCR route")
     conv.add_argument("--no-audio", action="store_true", help="disable audio/video transcription")
     conv.add_argument("--whisper-model", default=None, help="whisper model size (tiny/base/small/medium)")
+    conv.add_argument("--debug", action="store_true", help="record a detailed trace of this run (timings, routing decisions, cleanup passes) under the log folder; see the diagnostics command")
 
     sub.add_parser("capabilities", help="report which local engines are available")
+    diag = sub.add_parser(
+        "diagnostics",
+        help="print a digest of the error log and recent debug traces (problems, performance, quality)",
+    )
+    diag.add_argument("--sessions", type=int, default=1, help="how many of the newest debug sessions to include (default 1)")
+    diag.add_argument("--report", type=Path, default=None, help="also write a shareable .zip (digest + logs + settings) to this path")
+    diag.add_argument("--no-snapshots", action="store_true", help="leave the Markdown snapshots (document text) out of the --report zip")
     return parser
 
 
@@ -83,13 +95,68 @@ def _print_capabilities() -> int:
         "pdf_ocr": ocr.pdf_ocr_available(),
         "audio": audio.audio_available(),
         "settings": str(Settings.config_path()),
+        "logs": str(debuglog.log_dir()),
     }
     print(json.dumps(info, indent=2))
     return 0
 
 
+def _diagnostics(args: argparse.Namespace) -> int:
+    from . import diagnostics
+
+    # The digest uses characters a legacy console code page can't encode.
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    print(diagnostics.summarize(sessions=args.sessions))
+    if args.report is not None:
+        try:
+            path = diagnostics.build_report(
+                args.report, sessions=max(args.sessions, 5), include_snapshots=not args.no_snapshots
+            )
+        except Exception as exc:
+            _print_incident(errors.report("MS-603", exc=exc, where="diagnostics --report"))
+            return 1
+        print(f"Report written: {path}", file=sys.stderr)
+    return 0
+
+
+def _print_incident(incident: errors.Incident, subject: str = "", label: str = "ERROR ") -> None:
+    """What happened, the next step, and where the details are."""
+    lead = f"{subject} — " if subject else ""
+    print(f"{label} [{incident.code}] {lead}{incident.detail}".rstrip(" —"))
+    print(f"       {incident.title}")
+    print(f"       Next step: {incident.next_step}")
+    print(f"       Ref {incident.ref} · details in {incident.log_path or debuglog.error_log_path()}")
+
+
+def _incident_fields(incident: errors.Incident) -> dict:
+    return {
+        "error_code": incident.code,
+        "error_ref": incident.ref,
+        "error_title": incident.title,
+        "next_step": incident.next_step,
+        "error_hint": f"{incident.title} {incident.next_step}",
+        "error_log": str(incident.log_path or debuglog.error_log_path()),
+    }
+
+
+def _conversion_incident(result: ConversionResult) -> errors.Incident:
+    """The incident convert_file logged for a failed result, for display."""
+    code = result.error_code or errors.classify_conversion(result.error or "")
+    return errors.Incident(
+        errors.CATALOG.get(code, errors.CATALOG["MS-199"]),
+        result.error_ref or "—",
+        result.error or "",
+        log_path=debuglog.error_log_path(),
+    )
+
+
 def _convert(args: argparse.Namespace) -> int:
     settings = Settings.load()
+    if args.debug or settings.debug_mode or debuglog.debug_requested():
+        session = debuglog.enable("cli", snapshots=settings.debug_snapshots)
+        if session is not None:
+            print(f"Debug trace: {session}", file=sys.stderr)
     engine = ConversionEngine(
         enable_ocr=settings.enable_ocr and not args.no_ocr,
         enable_audio=settings.enable_audio and not args.no_audio,
@@ -119,115 +186,39 @@ def _convert(args: argparse.Namespace) -> int:
         record: dict = {"source": str(path), "engine": result.engine, "ok": result.ok}
         if not result.ok:
             failures += 1
+            incident = _conversion_incident(result)
             record["error"] = result.error
-            what, fix = explain_error(result.error or "")
-            record["error_hint"] = f"{what} {fix}"
+            record.update(_incident_fields(incident))
             if args.json:
                 print(json.dumps(record, ensure_ascii=False))
             else:
-                print(f"ERROR  {path} — {result.error}")
-                print(f"       {what} {fix}")
+                _print_incident(incident, str(path))
             continue
-
-        markdown = result.markdown
-        if not args.no_clean:
-            markdown, stats = clean_markdown(markdown, engine=result.engine)
-            record["cleanup"] = stats.summary()
-
-        if args.polish and settings.ollama_endpoint and settings.polish_model:
-            from . import polish
-
-            markdown, chunks_changed = polish.polish_markdown(
-                markdown,
-                settings.ollama_endpoint,
-                settings.polish_model,
-                on_progress=lambda n, t: print(f"    polish {n}/{t}", file=sys.stderr, flush=True),
-            )
-            record["polished_chunks"] = chunks_changed
-
-        summary = ""
-        if args.summarize and settings.ollama_endpoint and settings.summary_model:
-            from . import polish
-
-            print("    summarizing…", file=sys.stderr, flush=True)
-            summary = (
-                polish.summarize_markdown(
-                    markdown,
-                    settings.ollama_endpoint,
-                    settings.summary_model,
-                    title=result.doc_title,
+        notes = list(result.warnings)  # coded problems that didn't stop the file
+        try:
+            with debuglog.file_context(path):
+                written, report = _write_outputs(
+                    path, result, args, settings, want_images, record, notes
                 )
-                or ""
-            )
-            record["summary"] = summary
-
-        out_dir = args.out if args.out is not None else path.parent
-        book = bool(args.split_chapters or args.ai_target)
-        from . import figures
-
-        if want_images and path.suffix.lower() == ".pdf":
-            # Book folders keep images/ beside the parts; single files get a
-            # per-document subfolder so several conversions can share out_dir.
-            if book:
-                images_dir, rel_dir = out_dir / path.stem / "images", "images"
+        except Exception as exc:
+            # Writing failed (or, rarely, a post-processing step crashed):
+            # code it, log it, and carry on with the next file.
+            failures += 1
+            code = errors.classify_os_error(exc) if isinstance(exc, OSError) else "MS-901"
+            incident = errors.report(code, exc=exc, where=f"save {path.name}", file=str(path))
+            record["ok"] = False
+            record["error"] = incident.detail
+            record.update(_incident_fields(incident))
+            if args.json:
+                print(json.dumps(record, ensure_ascii=False))
             else:
-                images_dir, rel_dir = out_dir / "images" / path.stem, f"images/{path.stem}"
-            figs = figures.extract_pdf_figures(path, images_dir)
-            if figs and settings.ollama_endpoint and settings.caption_model:
-                from . import polish
-
-                for fig in figs:
-                    fig.caption = (
-                        polish.caption_image(
-                            fig.path, settings.ollama_endpoint, settings.caption_model
-                        )
-                        or ""
-                    )
-            markdown = figures.insert_figure_links(markdown, figs, rel_dir)
-            if figs:
-                record["figures"] = len(figs)
-        else:
-            markdown = figures.strip_figure_markers(markdown)
-        if book:
-            res = export.export_book(
-                markdown,
-                out_dir / path.stem,
-                source=path.name,
-                engine=result.engine,
-                front_matter=not args.no_front_matter,
-                max_tokens=(
-                    export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
-                ),
-                ai_sections=args.ai_target is not None,
-                summary=summary,
-                title=result.doc_title,
-                author=result.doc_author,
-            )
-            written = [str(p) for p in res.paths]
-            if res.index_path:
-                written.append(str(res.index_path))
-            if res.manifest_path:
-                written.append(str(res.manifest_path))
-        else:
-            out_path = default_output_path(path, out_dir)
-            export.export_single(
-                markdown,
-                out_path,
-                source=path.name,
-                engine=result.engine,
-                front_matter=not args.no_front_matter,
-                summary=summary,
-                title=result.doc_title,
-                author=result.doc_author,
-            )
-            written = [str(out_path)]
-        record["written"] = written
-
-        report = assess_markdown(markdown)
-        if args.quality:
-            record["quality"] = report.as_dict()
-        if report.binary_noise:
-            record["warning"] = "output looks like binary noise; source file may be corrupt or unsupported"
+                _print_incident(incident, str(path))
+            continue
+        if notes:
+            record["warnings"] = [
+                {"code": n.code, "ref": n.ref, "title": n.title, "next_step": n.next_step}
+                for n in notes
+            ]
 
         if args.json:
             print(json.dumps(record, ensure_ascii=False))
@@ -238,14 +229,153 @@ def _convert(args: argparse.Namespace) -> int:
                 print(f"       {report.summary()}")
             if report.binary_noise:
                 print(f"warn   {path.name}: output looks like binary noise; source file may be corrupt or unsupported")
+            for note in notes:
+                print(f"warn   [{note.code}] {path.name}: {note.title}")
+                print(f"       Next step: {note.next_step} (ref {note.ref})")
     return 1 if failures else 0
+
+
+def _write_outputs(
+    path: Path,
+    result: ConversionResult,
+    args: argparse.Namespace,
+    settings: Settings,
+    want_images: bool,
+    record: dict,
+    notes: list,
+):
+    """Clean, enrich and save one converted file; returns (written, quality).
+
+    ``notes`` collects coded problems that leave the output usable (a skipped
+    AI step); anything that stops the save raises.
+    """
+    markdown = result.markdown
+    if not args.no_clean:
+        markdown, stats = clean_markdown(markdown, engine=result.engine)
+        record["cleanup"] = stats.summary()
+
+    if args.polish and settings.ollama_endpoint and settings.polish_model:
+        from . import polish
+
+        markdown, chunks_changed = polish.polish_markdown(
+            markdown,
+            settings.ollama_endpoint,
+            settings.polish_model,
+            on_progress=lambda n, t: print(f"    polish {n}/{t}", file=sys.stderr, flush=True),
+        )
+        record["polished_chunks"] = chunks_changed
+        if (failure := polish.take_last_failure()) is not None:
+            notes.append(failure)
+
+    summary = ""
+    if args.summarize and settings.ollama_endpoint and settings.summary_model:
+        from . import polish
+
+        print("    summarizing…", file=sys.stderr, flush=True)
+        summary = (
+            polish.summarize_markdown(
+                markdown,
+                settings.ollama_endpoint,
+                settings.summary_model,
+                title=result.doc_title,
+            )
+            or ""
+        )
+        record["summary"] = summary
+        if not summary and (failure := polish.take_last_failure()) is not None:
+            notes.append(failure)
+
+    out_dir = args.out if args.out is not None else path.parent
+    book = bool(args.split_chapters or args.ai_target)
+    from . import figures
+
+    if want_images and path.suffix.lower() == ".pdf":
+        # Book folders keep images/ beside the parts; single files get a
+        # per-document subfolder so several conversions can share out_dir.
+        if book:
+            images_dir, rel_dir = out_dir / path.stem / "images", "images"
+        else:
+            images_dir, rel_dir = out_dir / "images" / path.stem, f"images/{path.stem}"
+        try:
+            figs = figures.extract_pdf_figures(path, images_dir)
+        except Exception as exc:  # the Markdown is still worth saving
+            figs = []
+            notes.append(errors.report("MS-401", exc=exc, where=f"figures {path.name}", file=str(path)))
+        if figs and settings.ollama_endpoint and settings.caption_model:
+            from . import polish
+
+            for fig in figs:
+                fig.caption = (
+                    polish.caption_image(
+                        fig.path, settings.ollama_endpoint, settings.caption_model
+                    )
+                    or ""
+                )
+            if (failure := polish.take_last_failure()) is not None:
+                notes.append(failure)
+        markdown = figures.insert_figure_links(markdown, figs, rel_dir)
+        if figs:
+            record["figures"] = len(figs)
+    else:
+        markdown = figures.strip_figure_markers(markdown)
+    if book:
+        res = export.export_book(
+            markdown,
+            out_dir / path.stem,
+            source=path.name,
+            engine=result.engine,
+            front_matter=not args.no_front_matter,
+            max_tokens=(
+                export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
+            ),
+            ai_sections=args.ai_target is not None,
+            summary=summary,
+            title=result.doc_title,
+            author=result.doc_author,
+            notebook=args.ai_target in export.NOTEBOOK_TARGETS,
+        )
+        written = [str(p) for p in res.paths]
+        if res.index_path:
+            written.append(str(res.index_path))
+        if res.manifest_path:
+            written.append(str(res.manifest_path))
+    else:
+        out_path = default_output_path(path, out_dir)
+        export.export_single(
+            markdown,
+            out_path,
+            source=path.name,
+            engine=result.engine,
+            front_matter=not args.no_front_matter,
+            summary=summary,
+            title=result.doc_title,
+            author=result.doc_author,
+        )
+        written = [str(out_path)]
+    record["written"] = written
+
+    report = assess_markdown(markdown)
+    if args.quality:
+        record["quality"] = report.as_dict()
+    if report.binary_noise:
+        record["warning"] = "output looks like binary noise; source file may be corrupt or unsupported"
+    return written, report
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
-    if args.command == "capabilities":
-        return _print_capabilities()
-    return _convert(args)
+    errors.install_crash_hooks()
+    try:
+        if args.command == "capabilities":
+            return _print_capabilities()
+        if args.command == "diagnostics":
+            return _diagnostics(args)
+        return _convert(args)
+    except Exception as exc:  # a bug, not a bad input: code it and say where to look
+        _print_incident(errors.report("MS-900", exc=exc, where=f"cli {args.command}"))
+        return 2
+    finally:
+        debuglog.disable()
 
 
 if __name__ == "__main__":

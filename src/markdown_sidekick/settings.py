@@ -12,9 +12,14 @@ import os
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
+from . import errors
 from .export import AI_TARGETS
 
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
+
+# The incident from the last load of an unreadable settings file (MS-501),
+# for the GUI to surface once at startup; None when the file was fine.
+LOAD_INCIDENT: "errors.Incident | None" = None
 
 
 def app_data_dir(*parts: str) -> Path:
@@ -65,6 +70,10 @@ class Settings:
     polish_model: str = ""  # e.g. llama3.2 — repairs residual artifacts
     caption_model: str = ""  # e.g. llava — alt-text for extracted figures
     summary_model: str = ""  # e.g. llama3.2 — 2-3 sentence summary in front matter
+    # -- diagnostics (the error log itself is always on) ---------------------
+    debug_mode: bool = False  # detailed session trace under logs/sessions
+    # In debug mode, also keep each conversion's raw + cleaned Markdown.
+    debug_snapshots: bool = True
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -73,7 +82,13 @@ class Settings:
 
     @classmethod
     def load(cls) -> "Settings":
-        """Load settings, tolerating a missing, corrupt, or wrong-typed file."""
+        """Load settings, tolerating a missing, corrupt, or wrong-typed file.
+
+        An unreadable file is copied to settings.json.bad before the defaults
+        take over (the next save would otherwise destroy the user's choices
+        for good) and reported as MS-501.
+        """
+        global LOAD_INCIDENT
         path = _config_path()
         if not path.exists():
             return cls()
@@ -87,7 +102,15 @@ class Settings:
             settings = cls(**{k: v for k, v in data.items() if k in known})
             settings.normalize()
             return settings
-        except Exception:
+        except Exception as exc:
+            backup = path.with_name(path.name + ".bad")
+            try:
+                backup.write_bytes(path.read_bytes())
+            except OSError:
+                backup = None
+            LOAD_INCIDENT = errors.report(
+                "MS-501", exc=exc, where="settings load", file=str(path), backup=str(backup)
+            )
             return cls()
 
     def save(self) -> None:
@@ -121,3 +144,5 @@ class Settings:
         self.polish_model = str(self.polish_model or "").strip()
         self.caption_model = str(self.caption_model or "").strip()
         self.summary_model = str(self.summary_model or "").strip()
+        self.debug_mode = bool(self.debug_mode)
+        self.debug_snapshots = bool(self.debug_snapshots)

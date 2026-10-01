@@ -188,8 +188,123 @@ class TestSplitForAi:
     def test_ai_targets_defined(self):
         from markdown_sidekick.export import AI_TARGETS
 
-        assert set(AI_TARGETS) >= {"Claude", "ChatGPT", "Gemini", "Local LLM"}
+        assert set(AI_TARGETS) >= {"Claude", "ChatGPT", "Gemini", "Gemini Notebook", "Local LLM"}
         assert all(v > 0 for v in AI_TARGETS.values())
+
+
+class TestGeminiNotebook:
+    def test_target_is_registered_within_the_source_word_limit(self):
+        from markdown_sidekick import export
+
+        assert export.NOTEBOOK_TARGETS <= set(export.AI_TARGETS)
+        # A word is at least one character: a part of <= 480k characters can
+        # never pass the 500,000-words-per-source limit, whatever the script,
+        # and the remaining 20k characters absorb the source header.
+        assert export.AI_TARGETS["Gemini Notebook"] * 4 <= 480_000
+
+    def test_one_source_per_chapter(self):
+        from markdown_sidekick.export import split_for_notebook
+
+        # Chapters that the chat targets would pack together stay separate:
+        # each is a source the notebook can be scoped to on its own.
+        secs = split_for_notebook(_BOOK)
+        assert [s.title for s in secs] == [
+            "Front matter", "Chapter 1: Getting Started", "Chapter 2: Going Deeper"
+        ]
+
+    def test_packs_only_as_much_as_the_source_limit_needs(self):
+        from markdown_sidekick.export import NOTEBOOK_MAX_SOURCES, split_for_notebook
+
+        book = "".join(f"# Principle {i}\n\n" + ("word " * 180) + "\n\n" for i in range(60))
+        secs = split_for_notebook(book)
+        # Within the limit, but not collapsed into a handful of huge parts.
+        assert NOTEBOOK_MAX_SOURCES // 2 < len(secs) <= NOTEBOOK_MAX_SOURCES
+        sizes = [s.markdown.count("# Principle ") for s in secs]
+        assert max(sizes) - min(sizes) <= 1  # evenly packed
+        assert sum(sizes) == 60 and all(s.markdown.startswith("# Principle ") for s in secs)
+
+    def test_parts_respect_the_per_source_cap(self):
+        from markdown_sidekick.export import split_for_notebook
+
+        text = "\n\n".join("Paragraph %d. %s" % (i, "word " * 200) for i in range(40))
+        secs = split_for_notebook(text, max_tokens=2000)
+        assert len(secs) > 1
+        assert all(s.est_tokens <= 2000 for s in secs)
+        # Too big for the source limit even at the cap: the cap wins.
+        secs = split_for_notebook(text, max_tokens=2000, max_sources=2)
+        assert len(secs) > 2 and all(s.est_tokens <= 2000 for s in secs)
+
+    def test_export_writes_upload_ready_sources(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        md = _BOOK.replace("More prose.", "More prose.\n\n![Figure 2.1](images/fig_p2_1.jpg)")
+        res = export_book(
+            md, tmp_path / "b", source="book.pdf", notebook=True,
+            title="The Grid Book: A Subtitle", author="Ann Author", summary="About grids.",
+        )
+        # Only sources in the folder, named after the book (a notebook lists
+        # every book's sources side by side).
+        assert res.index_path is None and res.manifest_path is None
+        assert sorted(p.name for p in (tmp_path / "b").iterdir()) == [
+            "grid-book-00-front-matter.md",
+            "grid-book-01-chapter-1-getting-started.md",
+            "grid-book-02-chapter-2-going-deeper.md",
+        ]
+        first, second, third = (p.read_text(encoding="utf-8") for p in res.paths)
+        # A readable header, not YAML (a "converted:" date would be cited as
+        # the book's date); summary and part list only on the first source.
+        assert not first.startswith("---")
+        assert first.startswith("*The Grid Book: A Subtitle* by Ann Author — part 1 of 3")
+        assert "Summary: About grids." in first
+        assert "2. Chapter 1: Getting Started" in first
+        assert second.startswith(
+            "*The Grid Book: A Subtitle* by Ann Author — part 2 of 3: Chapter 1: Getting Started"
+        )
+        assert "Summary:" not in second and "converted:" not in second
+        assert "# not a heading\nx = 1" in second  # fences intact
+        # Image links can't resolve in a notebook: keep the label as text.
+        assert "[Figure 2.1]" in third and "](images/" not in third
+
+    def test_front_matter_off_writes_bare_content(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        res = export_book(_BOOK, tmp_path / "b", source="b.pdf", notebook=True, front_matter=False)
+        assert res.paths[1].read_text(encoding="utf-8").startswith("# Chapter 1")
+
+    def test_unsplit_document_is_one_source_with_header(self, tmp_path):
+        from markdown_sidekick.export import export_book
+
+        res = export_book("# Memo\n\nShort body.\n", tmp_path / "b", source="memo.docx", notebook=True)
+        assert [p.name for p in res.paths] == ["memo.md"]
+        text = res.paths[0].read_text(encoding="utf-8")
+        assert text.startswith("*Memo*\n\n---\n\n# Memo")
+
+    def test_figure_notes_leave_code_alone(self):
+        from markdown_sidekick.export import notebook_figures
+
+        md = (
+            "![Figure 3.1](images/fig_p3_1.jpg)\n\n![A bar chart of sales](x.png)\n\n"
+            "![](y.png) and `![inline](code.png)` here\n\n```md\n![example](z.png)\n```\n"
+        )
+        assert notebook_figures(md) == (
+            "[Figure 3.1]\n\n[Figure: A bar chart of sales]\n\n"
+            "[Figure] and `![inline](code.png)` here\n\n```md\n![example](z.png)\n```\n"
+        )
+
+    def test_source_prefix_is_the_short_main_title(self):
+        from markdown_sidekick.export import _source_prefix
+
+        assert _source_prefix("The Pragmatic Programmer: Your Journey to Mastery") == "pragmatic-programmer"
+        assert _source_prefix("Clean Code - A Handbook") == "clean-code"
+        assert _source_prefix("Clean Code in Python, Second Edition") == "clean-code-in-python"
+        assert _source_prefix("Microservices with Go, 2nd Edition") == "microservices-with-go"
+        assert _source_prefix("An Extraordinarily Long Title About Many Different Things") == (
+            "extraordinarily-long-title-about-many"
+        )
+        # A series stays distinguishable: its titles share the first words.
+        assert _source_prefix("Universal Principles of Branding") == "universal-principles-of-branding"
+        assert _source_prefix("The C++ Programmer's Mindset") == "c-programmers-mindset"
+        assert _source_prefix("The") == "the"
 
 
 class TestFrontMatter:
