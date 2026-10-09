@@ -9,9 +9,15 @@ from __future__ import annotations
 import os
 import re
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
+
+# markitdown's audio converter imports pydub, which warns on import when no
+# ffmpeg is on PATH. Audio goes through faster-whisper and PyAV's bundled
+# FFmpeg instead, so the warning is noise on every CLI run and MCP start.
+warnings.filterwarnings("ignore", message=r"Couldn't find ff(?:mpeg|probe)", category=RuntimeWarning)
 
 try:
     from markitdown import MarkItDown
@@ -21,7 +27,7 @@ except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
         "virtual environment or run: pip install \"markitdown[all]\""
     ) from exc
 
-from . import audio, debuglog, errors, mineru, ocr, pdflayout
+from . import audio, debuglog, errors, metadata, mineru, ocr, pdflayout
 
 
 # File extensions markitdown can meaningfully handle. Used to build the file
@@ -83,6 +89,11 @@ class ConversionResult:
     # export prefers these over guessing from the text.
     doc_title: str = ""
     doc_author: str = ""
+    # Where doc_title came from (metadata.py's title_source vocabulary) and
+    # the rest of the source's own metadata: subtitle, authors (list),
+    # publisher, date, language, identifier — whichever are known.
+    title_source: str = ""
+    doc_meta: dict = field(default_factory=dict)
     # Failure diagnosis (errors.py): the code shown to the user and the
     # reference of its error-log entry. Blank while ok.
     error_code: str = ""
@@ -98,6 +109,36 @@ class ConversionResult:
     @property
     def title(self) -> str:
         return self.source.name
+
+
+def _attach_metadata(result: ConversionResult) -> None:
+    """Fill the result's title/author/metadata from the source file's own
+    package metadata (an epub's OPF), and tidy whatever a route supplied.
+
+    The package metadata outranks a route's guess: it is what the publisher
+    wrote. Entities are decoded and "Title: Subtitle" is split everywhere,
+    so front matter reads the same whichever route converted the file.
+    """
+    meta = metadata.read_metadata(result.source)
+    if meta.get("title"):
+        result.doc_title = meta.pop("title")
+        result.title_source = "opf"
+        authors = meta.get("authors") or []
+        result.doc_author = ", ".join(authors)
+        result.doc_meta = meta
+        return
+    title = metadata.clean_value(result.doc_title)
+    if not title:
+        result.doc_title, result.title_source = "", ""
+        return
+    title, subtitle = metadata.split_subtitle(metadata.tidy_title(title))
+    result.doc_title = title
+    if subtitle:
+        result.doc_meta["subtitle"] = subtitle
+    names = metadata.split_authors([metadata.clean_value(result.doc_author)])
+    result.doc_author = ", ".join(names)
+    if len(names) > 1:
+        result.doc_meta["authors"] = names
 
 
 @dataclass
@@ -168,6 +209,8 @@ class ConversionEngine:
                 debuglog.event("convert.start", **self._describe(source))
             failures: list[tuple[str, BaseException]] = []
             result = self._convert(source, on_subprogress, failures)
+            if result.ok:
+                _attach_metadata(result)
             self._diagnose(result, failures)
             if debuglog.enabled():
                 debuglog.event(
@@ -181,6 +224,7 @@ class ConversionEngine:
                     chars=len(result.markdown),
                     lines=result.markdown.count("\n"),
                     title=result.doc_title,
+                    title_source=result.title_source,
                     author=result.doc_author,
                     ms=round((time.perf_counter() - started) * 1000),
                     **(debuglog.memory() or {}),
@@ -290,6 +334,7 @@ class ConversionEngine:
                                     engine="ocr+text",
                                     doc_title=res.title,
                                     doc_author=res.author,
+                                    title_source=res.title_source,
                                 )
                             else:
                                 md = engine.pdf_to_markdown(
@@ -330,6 +375,7 @@ class ConversionEngine:
                             engine="pdflayout",
                             doc_title=res.title,
                             doc_author=res.author,
+                            title_source=res.title_source,
                         )
                 except Exception as exc:
                     failures.append(("pdflayout", exc))

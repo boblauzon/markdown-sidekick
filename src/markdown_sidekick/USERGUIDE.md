@@ -230,7 +230,7 @@ Settings are grouped into four tabs — **Conversion**, **Output**,
 | Conversion | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
 | Output | Default output folder | Pre-selected in every save dialog |
 | Output | Clean output / Rendered preview | Default states for the preview toggles |
-| Output | Front matter / source header | Saved files start with title/source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
+| Output | Front matter / source header | Saved files start with the book's own title, subtitle, authors, publisher, date, language and ISBN (from an epub's package or a PDF's metadata/title page — `title_source` says which) plus source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | On by default: images of at least 120 px land in an `images/` folder, linked right where they appear in the text |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
@@ -330,8 +330,18 @@ There is also a **command line** for scripts and automation:
 ```
 markdown-sidekick-cli convert book.pdf --split-chapters --quality
 markdown-sidekick-cli convert book.pdf --ai-target Claude
-MarkdownSidekick.exe --cli convert book.pdf --split-chapters   (standalone app)
+MarkdownSidekick-cli.exe convert book.pdf --split-chapters   (standalone app)
 ```
+
+`MarkdownSidekick-cli.exe` sits next to `MarkdownSidekick.exe` in the install
+folder. It is the same program built as a console app, so a terminal (or a
+script, or an AI agent) waits for it and sees its output. `MarkdownSidekick.exe
+--help` prints the usage and exits — a command-line option never opens the
+window.
+
+Every saved file is read back before it counts as saved. If antivirus removes
+or blocks it you get `MS-205`; if a synced folder (OneDrive, Dropbox) can't
+hand it back you get `MS-206` — never a silent "Saved".
 
 `--ai-target` (Claude / ChatGPT / Gemini / "Gemini Notebook" / "Local LLM")
 writes the same AI-sized book folders as the export bar — every part fits
@@ -466,6 +476,8 @@ your documents' text (file names and paths, yes).
 | MS-202 | The disk is full. | Free up space, or choose a folder on another drive. | Choose another folder… |
 | MS-203 | The save location's path is too long for Windows. | Choose a folder with a shorter path, such as C:\Markdown. | Choose another folder… |
 | MS-204 | A file being saved is open in another program. | Close the program that has it open (often a Markdown editor), then save again. | Save again |
+| MS-205 | Windows Security (or another antivirus) blocked a saved file, so it is missing. | Check your antivirus's protection history. If you trust the document (security books often quote malware samples), add an exclusion for the output folder in your antivirus yourself, then save again. | Save again |
+| MS-206 | A saved file couldn't be read back, so it may be missing or incomplete. | If the folder is synced (OneDrive, Dropbox), let syncing settle or choose a folder that isn't synced, then save again. Antivirus can also remove a file right after it is written. | Choose another folder… |
 | MS-299 | The Markdown couldn't be saved. | Try saving to a different folder. If it keeps failing, report it with this error's reference. | Choose another folder… |
 
 **Local AI (optional extras — the save itself still succeeds)**

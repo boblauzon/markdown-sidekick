@@ -248,6 +248,22 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "save_again",
     ),
     ErrorSpec(
+        "MS-205",
+        "Windows Security (or another antivirus) blocked a saved file, so it is missing.",
+        "Check your antivirus's protection history. If you trust the document (security "
+        "books often quote malware samples), add an exclusion for the output folder in "
+        "your antivirus yourself, then save again.",
+        "save_again",
+    ),
+    ErrorSpec(
+        "MS-206",
+        "A saved file couldn't be read back, so it may be missing or incomplete.",
+        "If the folder is synced (OneDrive, Dropbox), let syncing settle or choose a "
+        "folder that isn't synced, then save again. Antivirus can also remove a file "
+        "right after it is written.",
+        "choose_folder",
+    ),
+    ErrorSpec(
         "MS-299",
         "The Markdown couldn't be saved.",
         "Try saving to a different folder. If it keeps failing, report it with this error's reference.",
@@ -597,8 +613,13 @@ def is_network_error(exc: BaseException | str) -> bool:
 
 def classify_os_error(exc: BaseException) -> str:
     """The saving code for an exception raised while writing files."""
+    ms_code = getattr(exc, "ms_code", "")  # export.SaveVerificationError
+    if ms_code:
+        return ms_code
     winerror = getattr(exc, "winerror", None)
     err = getattr(exc, "errno", None)
+    if winerror in (225, 226):  # ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED
+        return "MS-205"
     if winerror in (32, 33):  # sharing / lock violation: the file is open
         return "MS-204"
     if winerror in (39, 112) or err == errno.ENOSPC:

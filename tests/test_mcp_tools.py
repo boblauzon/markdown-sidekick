@@ -56,6 +56,20 @@ class TestConvertLocalFile:
         assert "Saved Markdown to" in out and "Quality" in out
         assert dest.exists()
 
+    def test_save_to_writes_the_books_own_title(self, tmp_path):
+        # The library run's top defect: every saved epub was titled after its
+        # filename because save_to never received the converter's metadata.
+        from test_library_trust import _GROKKING, make_epub
+
+        src = make_epub(tmp_path / "Grokking_Algorithms.epub", _GROKKING)
+        dest = tmp_path / "out" / "grokking.md"
+        out = _text(_call("convert_local_file", file_path=str(src), save_to=str(dest)))
+        assert "verified on disk" in out and "Title: Grokking Algorithms." in out
+        header = dest.read_text(encoding="utf-8").split("---")[1]
+        assert "title: Grokking Algorithms\n" in header
+        assert "title_source: opf" in header
+        assert "isbn:9781617292231" in header
+
     def test_missing_file(self):
         out = _text(_call("convert_local_file", file_path="Z:/nope/missing.pdf"))
         assert out.startswith("Error")
