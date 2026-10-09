@@ -213,3 +213,53 @@ class TestCli:
     def test_nothing_found_is_an_error(self, tmp_path, capsys):
         (tmp_path / "empty").mkdir()
         assert cli.main(["batch", str(tmp_path / "empty"), "--out", str(tmp_path / "o"), "--quiet"]) == 1
+
+
+class TestCloudPlaceholders:
+    """OneDrive / Dropbox Files On-Demand: a placeholder is downloaded before
+    conversion; one that can't be is reported as input_not_local (MS-116)."""
+
+    def test_placeholder_attributes(self, tmp_path, monkeypatch):
+        f = _html(tmp_path / "a.html", "A")
+        assert not batch.is_placeholder(f)
+
+        class FakeStat:
+            st_file_attributes = 0x400000  # FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+
+        monkeypatch.setattr(batch.os, "stat", lambda p: FakeStat())
+        assert batch.is_placeholder(f)
+
+    def test_undownloadable_input_is_a_coded_row(self, tmp_path, monkeypatch):
+        lib = tmp_path / "lib"
+        _html(lib / "cloud.html", "Cloud Page")
+        _html(lib / "local.html", "Local Page")
+        monkeypatch.setattr(batch, "is_placeholder", lambda p: Path(p).name == "cloud.html")
+        monkeypatch.setattr(
+            batch, "_hydrate", lambda p: OSError(22, "[WinError 362] The cloud file provider is not running")
+        )
+        summary = run_batch([lib], _opts(tmp_path))
+        assert (summary.converted, summary.failed) == (1, 1)
+        failed = next(r for r in summary.rows if r.status == "failed")
+        assert (failed.reason, failed.code) == ("input_not_local", "MS-116")
+        assert failed.error_ref
+
+    def test_hydrate_retries_then_succeeds(self, tmp_path, monkeypatch):
+        f = _html(tmp_path / "a.html", "A")
+        monkeypatch.setattr(batch, "_HYDRATE_DELAYS", (0, 0))
+        calls = {"n": 0}
+        real_open = open
+
+        def flaky(path, mode="r", *a, **kw):
+            calls["n"] += 1
+            if calls["n"] < 2:
+                raise OSError(22, "Invalid argument")
+            return real_open(path, mode, *a, **kw)
+
+        monkeypatch.setattr(batch, "open", flaky, raising=False)
+        assert batch._hydrate(f) is None and calls["n"] == 2
+
+    def test_cloud_errors_classify_as_ms_116(self):
+        from markdown_sidekick import errors
+
+        assert errors.classify_conversion("OSError: [WinError 362] The cloud file provider is not running") == "MS-116"
+        assert errors.classify_conversion("[WinError 395] Access to the cloud file is denied") == "MS-116"

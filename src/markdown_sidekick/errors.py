@@ -156,6 +156,13 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "enable_audio",
     ),
     ErrorSpec(
+        "MS-116",
+        "This file is online-only (OneDrive, Dropbox, iCloud…) and couldn't be downloaded.",
+        "Make sure the sync app is running and signed in, or mark the file "
+        "\"Always keep on this device\" in File Explorer, then convert it again.",
+        "retry",
+    ),
+    ErrorSpec(
         "MS-120",
         "The column-aware PDF reader failed, so the basic reader was used — "
         "columns and tables may be out of order.",
@@ -563,6 +570,10 @@ _CONVERSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), code)
     for pattern, code in (
         (r"password|encrypt|decrypt", "MS-101"),
+        # ERROR_CLOUD_FILE_* (WinError 358-404): the sync provider couldn't
+        # deliver a placeholder's contents. Before MS-102, whose "Permission
+        # denied" a cloud access-denied would otherwise match.
+        (r"WinError (?:3[5-9]\d|40[0-4])\b|cloud file|cloud operation|CloudFileUnavailable", "MS-116"),
         (
             r"WinError 32|being used by another process|Errno 13|Permission denied|"
             r"PermissionError",

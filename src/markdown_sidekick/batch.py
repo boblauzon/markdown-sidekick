@@ -424,12 +424,50 @@ def _init_worker(config: dict, figure_markers: bool, quiet_stdout: bool = False)
     _engine.figure_markers = figure_markers
 
 
+# Windows attributes of a cloud placeholder whose contents aren't on this
+# disk: RECALL_ON_DATA_ACCESS (OneDrive Files On-Demand), RECALL_ON_OPEN,
+# OFFLINE.
+_PLACEHOLDER_ATTRS = 0x400000 | 0x40000 | 0x1000
+_HYDRATE_DELAYS = (1.0, 3.0, 6.0)
+
+
+def is_placeholder(path: Path) -> bool:
+    try:
+        attrs = getattr(os.stat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attrs & _PLACEHOLDER_ATTRS)
+
+
+def _hydrate(path: Path) -> OSError | None:
+    """Read an online-only file once, so its sync provider downloads it
+    before a converter opens it (a provider that's slow to start fails the
+    first read; retried with backoff). Returns the last error, if any."""
+    last: OSError | None = None
+    for delay in (*_HYDRATE_DELAYS, None):
+        try:
+            with open(path, "rb") as fh:
+                while fh.read(1 << 20):
+                    pass
+            return None
+        except OSError as exc:
+            last = exc
+            if delay is None:
+                break
+            time.sleep(delay)
+    return last
+
+
 def _convert_job(source: str, clean: bool) -> dict:
     """Convert one file; returns plain data (it crosses a process boundary)."""
     from .cleanup import clean_markdown
     from .quality import assess_markdown
 
     started = time.perf_counter()
+    if is_placeholder(Path(source)) and (exc := _hydrate(Path(source))) is not None:
+        incident = errors.report("MS-116", exc=exc, where="batch download", file=source)
+        return {"ok": False, "engine": "", "error": f"{type(exc).__name__}: {exc}", "error_code": "MS-116",
+                "error_ref": incident.ref, "warnings": [], "seconds": time.perf_counter() - started}
     result = _engine.convert_file(source)
     out: dict = {
         "ok": result.ok,
@@ -683,7 +721,8 @@ def _finish_job(job: _Job, data: dict | None, exc: BaseException | None, options
     if not data["ok"]:
         code = data.get("error_code") or errors.classify_conversion(data.get("error", ""))
         spec = errors.CATALOG.get(code, errors.CATALOG["MS-199"])
-        row.status, row.reason, row.code = "failed", "conversion_failed", spec.code
+        reason = "input_not_local" if spec.code == "MS-116" else "conversion_failed"
+        row.status, row.reason, row.code = "failed", reason, spec.code
         row.message, row.error_ref = f"{spec.title} {spec.next_step}", data.get("error_ref", "")
         return row
 

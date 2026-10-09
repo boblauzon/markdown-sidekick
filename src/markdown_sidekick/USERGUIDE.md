@@ -503,6 +503,7 @@ your documents' text (file names and paths, yes).
 | MS-113 | The OCR engine failed. | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
 | MS-114 | The MinerU server didn't return a result, so the PDF was converted locally. *(warning)* | Check the server is running at the endpoint in Settings → Conversion, or clear the endpoint to stop using it. | Open Conversion settings |
 | MS-115 | Audio/video transcription is turned off. | Turn on transcription to convert this file. | Turn on transcription & retry |
+| MS-116 | This file is online-only (OneDrive, Dropbox, iCloud…) and couldn't be downloaded. | Make sure the sync app is running and signed in, or mark the file "Always keep on this device" in File Explorer, then convert it again. | Retry |
 | MS-120 | The column-aware PDF reader failed, so the basic reader was used — columns and tables may be out of order. *(warning)* | Retry. If it happens again, report it with this error's reference. | Retry |
 | MS-121 | OCR failed on this PDF's scanned pages, so only its text layer was kept. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
 | MS-122 | OCR failed on this image, so only basic image information was extracted. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
