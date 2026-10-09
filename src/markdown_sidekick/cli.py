@@ -97,6 +97,9 @@ def _build_parser() -> argparse.ArgumentParser:
     bat.add_argument("--no-skip-existing", action="store_true", help="convert everything again, even sources unchanged since the last run")
     bat.add_argument("--overwrite", action="store_true", help="allow replacing files this batch didn't write (default: pick a free name instead)")
     bat.add_argument("--workers", type=int, default=None, help=f"parallel conversions (default {batch.default_workers()}: cores minus one, at most 4)")
+    bat.add_argument("--no-dedupe", action="store_true", help="convert every copy, even when the same book is there as epub and pdf or in several folders")
+    bat.add_argument("--prefer", default="", metavar="EXTS", help="formats to keep when a book is held in several, best first (default epub,azw3,mobi,pdf)")
+    bat.add_argument("--dry-run", action="store_true", help="show what would be converted, skipped and de-duplicated; convert and write nothing")
     bat.add_argument("--images", action="store_true", help="extract PDF figures to images/ folders")
     bat.add_argument("--no-clean", action="store_true", help="skip the cleanup pass")
     bat.add_argument("--no-front-matter", action="store_true", help="omit YAML front matter")
@@ -286,6 +289,8 @@ def _batch(args: argparse.Namespace) -> int:
         include=tuple(args.include),
         exclude=tuple(args.exclude),
         engine=batch.engine_config(settings, no_ocr=args.no_ocr, no_audio=args.no_audio),
+        dedupe=not args.no_dedupe,
+        prefer=tuple(e.strip() for e in args.prefer.split(",") if e.strip()),
     )
     for stream in (sys.stdout, sys.stderr):  # titles carry characters a legacy code page can't encode
         if hasattr(stream, "reconfigure"):
@@ -300,6 +305,10 @@ def _batch(args: argparse.Namespace) -> int:
         code = f" [{row.code}]" if row.code else ""
         print(f"[{done}/{total}] {row.status:<9}{why}{code}{extra}  {name}", file=sys.stderr, flush=True)
 
+    if args.dry_run:
+        plan = batch.plan_batch(args.inputs, options)
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+        return 0 if plan["total"] else 1
     summary = batch.run_batch(args.inputs, options, on_progress=progress)
     print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
     if summary.total == 0:

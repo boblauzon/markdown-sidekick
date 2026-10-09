@@ -130,7 +130,8 @@ class TestRun:
         out = tmp_path / "out"
         out.mkdir()
         (out / "Grokking Algorithms.md").write_text("the user's own notes\n", encoding="utf-8")
-        summary = run_batch([lib], _opts(tmp_path, naming="title"))
+        # Same ISBN: dedupe would (rightly) keep one; this is about naming.
+        summary = run_batch([lib], _opts(tmp_path, naming="title", dedupe=False))
         assert summary.converted == 2
         names = sorted(p.name for p in out.glob("*.md"))
         assert names == [

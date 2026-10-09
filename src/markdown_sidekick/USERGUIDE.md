@@ -383,6 +383,17 @@ MarkdownSidekick-cli.exe batch "D:\eBooks" --out "D:\eBooks-md" --naming title
 - **Re-runs are quick:** sources that haven't changed since the last run
   (same size, date and settings, outputs still there) are skipped without
   being opened, so adding five books doesn't redo five hundred.
+- **One copy per book:** when a book is there more than once — as an epub
+  and a PDF, or copied into several bundle folders — only one copy is
+  converted (epub first, then PDF; change the order with `--prefer pdf,epub`)
+  and the others are listed as duplicates of it. Copies count as the same
+  book when they are identical files, share an ISBN, or have the same title
+  or file name with nothing contradicting it: different editions ("Third
+  Edition" / "Fourth Edition") and volumes are never merged. `--no-dedupe`
+  converts every copy.
+- `--dry-run` shows what a run would do — how many books convert, what is
+  skipped and why, which files are duplicates of which — without converting
+  or writing anything.
 - `--style chapters` or `--style ai --ai-target Claude` writes a folder per
   book instead of one file; `--workers N` sets how many files convert at
   once (default: cores minus one, at most 4). The summary printed at the end

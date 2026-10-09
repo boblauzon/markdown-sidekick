@@ -110,8 +110,9 @@ available inside the app via the **❓ Help** button.
   (CLI) or `convert_batch` + `batch_status` (MCP): one run converts a folder
   tree into a mirrored output folder, names files after the book's real title
   without ever overwriting another file, writes `_manifest.json`/`.csv` with one
-  row per input (converted / skipped / failed + error code), and re-runs skip
-  everything unchanged
+  row per input (converted / skipped / failed + error code), converts one copy
+  per book when it's held as epub *and* pdf or in several folders, and re-runs
+  skip everything unchanged
 - **Optional local-LLM extras** (off by default, fully local): artifact
   **polish** pass with a size guardrail, vision-model **alt-text captions**
   for extracted figures, and a 2–3 sentence **document summary** written into
@@ -246,7 +247,11 @@ MarkdownSidekick-cli.exe batch D:\eBooks --out D:\eBooks-md --naming title
 Flags: `--naming source|title|title_author`, `--style single|chapters|ai`
 (+ `--ai-target`), `--include GLOB` / `--exclude GLOB` (repeatable),
 `--no-skip-existing`, `--overwrite`, `--workers N`, `--images`, `--no-clean`,
-`--no-front-matter`, `--quiet`. It prints one JSON summary (totals, failures with
+`--no-front-matter`, `--quiet`, `--no-dedupe`, `--prefer epub,pdf`, `--dry-run`.
+A book held more than once — epub and pdf, or the same file in two bundle folders —
+is converted once (epub preferred); the other copies get a `duplicate` row naming
+the kept one. Different editions and volumes are never merged. `--dry-run` shows the
+plan (what converts, what is skipped and why) without converting anything. It prints one JSON summary (totals, failures with
 error codes, low-quality outputs to review, manifest path) and exits 1 if any input
 failed.
 

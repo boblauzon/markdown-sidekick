@@ -413,6 +413,9 @@ def convert_batch(
     workers: int = 0,
     images: bool = False,
     clean: bool = True,
+    dedupe: bool = True,
+    prefer: list[str] | None = None,
+    dry_run: bool = False,
 ) -> dict:
     """Start converting a whole library (folders and/or files) into
     output_root; returns a batch_id at once. Poll batch_status(batch_id)
@@ -446,6 +449,14 @@ def convert_batch(
         workers: Parallel conversions; 0 = automatic (cores minus one, max 4).
         images: Extract PDF figures to images/ folders.
         clean: Run the cleanup pass (default).
+        dedupe: Convert one copy per book when the same book is there as
+            epub and pdf, or copied into several folders (default). The
+            others become "duplicate" rows naming the kept copy; different
+            editions or volumes are never merged.
+        prefer: Formats to keep, best first (default ["epub", "azw3",
+            "mobi", "pdf"]).
+        dry_run: Return what would be converted, skipped and de-duplicated
+            right away, converting and writing nothing.
     """
     from . import batch
 
@@ -474,9 +485,13 @@ def convert_batch(
                 exclude=tuple(exclude or ()),
                 engine=batch.engine_config(),
                 isolate=True,  # never share this server's model singletons
+                dedupe=dedupe,
+                prefer=tuple(prefer or ()),
             )
         except ValueError as exc:
             return {"state": "error", "error": str(exc)}
+        if dry_run:
+            return {"state": "plan", **batch.plan_batch(paths, options), "skipped_inputs": missing}
         job = _Batch(f"b{int(time.time())}-{len(_batches) + 1}", out)
         _batches[job.id] = job
 

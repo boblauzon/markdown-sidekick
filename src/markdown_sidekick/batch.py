@@ -45,6 +45,7 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import debuglog, errors, export
+from .dedupe import DEFAULT_PREFERENCE
 
 MANIFEST_NAME = "_manifest.json"
 MANIFEST_CSV = "_manifest.csv"
@@ -102,6 +103,10 @@ class BatchOptions:
     # in-process too (the MCP server) must not share its model singletons
     # with a batch running on another thread.
     isolate: bool = False
+    # Convert one copy per book (dedupe.py); the others become "duplicate"
+    # rows naming the kept copy. ``prefer`` orders the formats to keep.
+    dedupe: bool = True
+    prefer: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.naming not in NAMING_MODES:
@@ -112,6 +117,9 @@ class BatchOptions:
             raise ValueError(f"ai_target must be one of {', '.join(export.AI_TARGETS)}")
         self.output_root = Path(self.output_root)
         self.workers = max(1, int(self.workers))
+        self.prefer = tuple(
+            e.lower() if e.startswith(".") else "." + e.lower() for e in self.prefer if e
+        ) or DEFAULT_PREFERENCE
 
 
 @dataclass
@@ -136,6 +144,7 @@ class BatchRow:
     mtime: float = 0.0
     settings: str = ""  # settings_hash() of the run that wrote the outputs
     error_ref: str = ""
+    duplicate_of: str = ""  # the kept copy, for a "duplicate" row
 
 
 @dataclass
@@ -380,7 +389,7 @@ def _write_manifest(options: BatchOptions, rows: list[BatchRow], summary: BatchS
     export.write_text_verified(root / MANIFEST_NAME, json.dumps(data, indent=2, ensure_ascii=False))
     buf = io.StringIO()
     cols = ["source", "output", "status", "reason", "code", "message", "title", "title_source",
-            "authors", "identifier", "engine", "quality", "issues", "est_tokens", "duration_s"]
+            "authors", "identifier", "engine", "quality", "issues", "est_tokens", "duration_s", "duplicate_of"]
     writer = csv.writer(buf, lineterminator="\n")
     writer.writerow(cols)
     for r in rows:
@@ -462,6 +471,62 @@ def default_workers() -> int:
     return max(1, min(4, (os.cpu_count() or 2) - 1))
 
 
+def _plan(jobs: list[_Job], options: BatchOptions, previous: dict[str, BatchRow],
+          fingerprint: str) -> tuple[list[BatchRow], list[_Job]]:
+    """Rows decided without converting (duplicates, unsupported formats,
+    unchanged sources) and the jobs left to convert."""
+    dupes: dict = {}
+    if options.dedupe and len(jobs) > 1:
+        from .dedupe import find_duplicates
+
+        converted_before = {k for k, r in previous.items() if r.status == "converted" or r.reason == "unchanged"}
+        dupes = find_duplicates([j.source for j in jobs], options.prefer, keep_hint=converted_before)
+    decided: list[BatchRow] = []
+    to_convert: list[_Job] = []
+    for job in jobs:
+        row = _new_row(job.source)
+        if job.source in dupes:
+            row.status, row.reason = "skipped", "duplicate"
+            row.duplicate_of = str(dupes[job.source].resolve())
+            row.message = f"Same book as {dupes[job.source].name}, which is converted instead."
+            decided.append(row)
+            continue
+        if job.source.suffix.lower() in UNSUPPORTED_EBOOK_EXTENSIONS:
+            row.status, row.reason = "skipped", "unsupported_format"
+            row.code = "MS-105"
+            row.message = errors.CATALOG["MS-105"].title
+            decided.append(row)
+            continue
+        prev = previous.get(_key(job.source))
+        if options.skip_existing and _unchanged(prev, row, fingerprint):
+            kept = BatchRow(**asdict(prev))
+            kept.status, kept.reason, kept.code, kept.message, kept.duration_s = "skipped", "unchanged", "", "", 0.0
+            decided.append(kept)
+            continue
+        to_convert.append(job)
+    return decided, to_convert
+
+
+def plan_batch(inputs: Iterable[str | os.PathLike[str]], options: BatchOptions) -> dict:
+    """What run_batch would do, without converting or writing anything."""
+    if not options.engine:
+        options.engine = engine_config()
+    jobs = discover(inputs, options)
+    decided, to_convert = _plan(jobs, options, load_manifest(options.output_root), settings_hash(options))
+    by_reason: dict[str, int] = {}
+    for r in decided:
+        by_reason[r.reason] = by_reason.get(r.reason, 0) + 1
+    dupes = [r for r in decided if r.reason == "duplicate"]
+    return {
+        "total": len(jobs),
+        "to_convert": len(to_convert),
+        "skipped": by_reason,
+        "convert_sample": [str(j.source) for j in to_convert[:_MAX_LISTED]],
+        "duplicates": [{"source": r.source, "duplicate_of": r.duplicate_of} for r in dupes[:_MAX_LISTED]],
+        "more_duplicates": max(0, len(dupes) - _MAX_LISTED),
+    }
+
+
 def run_batch(
     inputs: Iterable[str | os.PathLike[str]],
     options: BatchOptions,
@@ -507,23 +572,10 @@ def run_batch(
                 raise
             debuglog.exception("batch.manifest_write", exc)
 
-    to_convert: list[_Job] = []
-    for job in jobs:
-        row = _new_row(job.source)
-        if job.source.suffix.lower() in UNSUPPORTED_EBOOK_EXTENSIONS:
-            row.status, row.reason = "skipped", "unsupported_format"
-            row.code = "MS-105"
-            row.message = errors.CATALOG["MS-105"].title
-            finish(row)
-            continue
-        prev = previous.get(_key(job.source))
-        if options.skip_existing and _unchanged(prev, row, fingerprint):
-            kept = BatchRow(**asdict(prev))
-            kept.status, kept.reason, kept.code, kept.message, kept.duration_s = "skipped", "unchanged", "", "", 0.0
-            finish(kept)
-            continue
-        to_convert.append(job)
+    decided, to_convert = _plan(jobs, options, previous, fingerprint)
     pending_keys.update(_key(j.source) for j in to_convert)
+    for row in decided:
+        finish(row)
 
     def handle(job: _Job, data: dict | None, exc: BaseException | None) -> None:
         pending_keys.discard(_key(job.source))
