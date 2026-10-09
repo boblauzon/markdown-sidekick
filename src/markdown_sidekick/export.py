@@ -234,6 +234,44 @@ def _retrying(op, path: Path, *, replacing: bool = False) -> None:
             time.sleep(delay)
 
 
+# Asks Windows Defender whether it flagged the file in the last few minutes.
+# The path arrives through the environment, never inside the command text.
+_DEFENDER_QUERY = (
+    "$p = $env:MS_SIDEKICK_SAVED.ToLower(); "
+    "$since = (Get-Date).AddMinutes(-10); "
+    "$hit = Get-MpThreatDetection -ErrorAction Stop | Where-Object { "
+    "$_.InitialDetectionTime -gt $since -and "
+    "($_.Resources | Where-Object { $_ -and $_.ToLower().Contains($p) }) }; "
+    "if ($hit) { 'flagged' } else { 'clean' }"
+)
+
+
+def _defender_flagged(path: Path) -> bool:
+    """Did Windows Defender just quarantine this file? Defender removes a
+    flagged file moments after it is written, so the read-back finds it
+    *missing* rather than failing with ERROR_VIRUS_INFECTED; its detection
+    history is the only way to tell that from a sync client or a disk.
+    Asked only when a just-written file has vanished (rare), never for a
+    normal save. Any failure (not Windows, no Defender, no rights) -> False."""
+    if os.name != "nt":
+        return False
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _DEFENDER_QUERY],
+            env={**os.environ, "MS_SIDEKICK_SAVED": str(path.resolve())},
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        debuglog.exception("export.defender_query", exc, path=str(path))
+        return False
+    flagged = proc.stdout.strip().endswith("flagged")
+    debuglog.event("export.defender_query", path=str(path), flagged=flagged, rc=proc.returncode)
+    return flagged
+
+
 def _verify(path: Path, size: int, digest: bytes) -> None:
     last = "the saved file doesn't match what was written"
     for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
@@ -252,6 +290,8 @@ def _verify(path: Path, size: int, digest: bytes) -> None:
             break
         debuglog.event("export.verify_retry", level="warning", path=str(path), attempt=attempt + 1, problem=last)
         time.sleep(delay)
+    if last == "the saved file is missing" and _defender_flagged(path):
+        raise SaveVerificationError(path, "MS-205", "antivirus removed the file right after it was written")
     raise SaveVerificationError(path, "MS-206", last)
 
 

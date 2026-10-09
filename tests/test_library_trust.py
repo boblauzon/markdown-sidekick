@@ -310,10 +310,40 @@ class TestVerifiedWrites:
             raise FileNotFoundError(2, "No such file", str(path))
 
         _patch_reads(monkeypatch, missing)
+        monkeypatch.setattr(export, "_defender_flagged", lambda p: False)
         with pytest.raises(SaveVerificationError) as info:
             write_text_verified(tmp_path / "book.md", "content\n")
         assert info.value.ms_code == "MS-206"
         assert "missing" in str(info.value)
+
+    def test_vanished_file_that_defender_flagged_is_ms_205(self, tmp_path, monkeypatch, fast_retries):
+        # What really happened to the library run's two security books:
+        # Defender deleted each .md moments after it was written, so the
+        # read-back found it missing, not a virus error code.
+        def missing(path):
+            raise FileNotFoundError(2, "No such file", str(path))
+
+        _patch_reads(monkeypatch, missing)
+        asked = []
+        monkeypatch.setattr(export, "_defender_flagged", lambda p: asked.append(p) or True)
+        with pytest.raises(SaveVerificationError) as info:
+            write_text_verified(tmp_path / "Advanced Penetration Testing.md", "content\n")
+        assert info.value.ms_code == "MS-205" and len(asked) == 1
+
+    def test_defender_query_passes_the_path_out_of_band(self, tmp_path, monkeypatch):
+        import subprocess
+
+        seen = {}
+
+        def fake_run(cmd, **kw):
+            seen["cmd"], seen["env"] = cmd, kw["env"]
+            return subprocess.CompletedProcess(cmd, 0, stdout="clean\n", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        weird = tmp_path / "x'; Remove-Item -Recurse C:\\ ; '.md"
+        assert export._defender_flagged(weird) is False
+        assert str(weird.resolve()) == seen["env"]["MS_SIDEKICK_SAVED"]
+        assert all("Remove-Item" not in part for part in seen["cmd"])  # never in the command text
 
     def test_rename_retried_while_a_scanner_holds_the_file(self, tmp_path, monkeypatch, fast_retries):
         real_replace = os.replace
