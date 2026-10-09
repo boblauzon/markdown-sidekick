@@ -193,7 +193,12 @@ class OcrEngine:
                         device = "gpu" if "DmlExecutionProvider" in providers else "cpu"
                 sp["device"] = device
                 self._engine = RapidOCR(
-                    params={"EngineConfig.onnxruntime.use_dml": device == "gpu"}
+                    params={
+                        "EngineConfig.onnxruntime.use_dml": device == "gpu",
+                        # Its INFO lines (a dozen per engine, colour-coded)
+                        # flooded the CLI's stderr — once per batch worker.
+                        "Global.log_level": "warning",
+                    }
                 )
         return self._engine
 
