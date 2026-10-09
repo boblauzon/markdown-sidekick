@@ -333,6 +333,8 @@ def _write_outputs(
             title=result.doc_title,
             author=result.doc_author,
             notebook=args.ai_target in export.NOTEBOOK_TARGETS,
+            title_source=result.title_source,
+            meta=result.doc_meta,
         )
         written = [str(p) for p in res.paths]
         if res.index_path:
@@ -350,6 +352,8 @@ def _write_outputs(
             summary=summary,
             title=result.doc_title,
             author=result.doc_author,
+            title_source=result.title_source,
+            meta=result.doc_meta,
         )
         written = [str(out_path)]
     record["written"] = written

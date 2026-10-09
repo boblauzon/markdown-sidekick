@@ -17,7 +17,7 @@ if not exist "%ROOT%.venv\Scripts\python.exe" (
 
 echo Installing dependencies ^(this can take a few minutes^)...
 "%ROOT%.venv\Scripts\python.exe" -m pip install --upgrade pip
-"%ROOT%.venv\Scripts\python.exe" -m pip install -r "%ROOT%requirements.txt"
+"%ROOT%.venv\Scripts\python.exe" -m pip install -r "%ROOT%requirements.txt" -c "%ROOT%constraints.txt"
 if errorlevel 1 exit /b 1
 
 echo.

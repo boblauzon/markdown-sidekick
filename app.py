@@ -2,12 +2,18 @@
 
 Usage:
     python app.py             # launch the GUI
+    python app.py --cli ...   # headless CLI (convert, capabilities, diagnostics)
     python app.py --mcp       # run the MCP server over stdio (for AI clients)
     python app.py --selftest  # verify the conversion pipeline, write a JSON
                               # report next to this file (used to validate
                               # frozen/PyInstaller builds), exit 0/1.
     python app.py --debug     # any of the above with debug mode on for this
                               # run (a detailed trace under the log folder)
+    python app.py --help      # print this usage and exit (never opens the GUI)
+
+The frozen build ships this launcher twice: MarkdownSidekick.exe (windowed)
+and MarkdownSidekick-cli.exe (console). Run under the -cli name, every
+argument goes to the CLI, so a terminal waits for it and sees its output.
 """
 
 import os
@@ -116,6 +122,43 @@ def _selftest() -> int:
             report["checks"]["export_split"] = (
                 len(book.paths) == 2 and book.manifest_path is not None
             )
+
+            # Book metadata: an epub's own title reaches the front matter
+            # (not its filename), through a verified save.
+            import zipfile
+
+            from markdown_sidekick.export import export_single
+
+            epub = Path(td) / "Some_File_Name.epub"
+            with zipfile.ZipFile(epub, "w") as zf:
+                zf.writestr("mimetype", "application/epub+zip")
+                zf.writestr(
+                    "META-INF/container.xml",
+                    '<container xmlns="urn:oasis:names:tc:opendocument:xmlns:container">'
+                    '<rootfiles><rootfile full-path="c.opf"/></rootfiles></container>',
+                )
+                zf.writestr(
+                    "c.opf",
+                    '<package xmlns="http://www.idpf.org/2007/opf"><metadata '
+                    'xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:title>Self Test Book: '
+                    "A Subtitle</dc:title><dc:creator>Ada Lovelace</dc:creator></metadata>"
+                    '<manifest><item id="c1" href="c1.xhtml" media-type="application/xhtml+xml"/>'
+                    '</manifest><spine><itemref idref="c1"/></spine></package>',
+                )
+                zf.writestr(
+                    "c1.xhtml",
+                    '<html xmlns="http://www.w3.org/1999/xhtml"><body><h1>Preface</h1>'
+                    "<p>Self test body text for the metadata check.</p></body></html>",
+                )
+            r4 = engine.convert_file(epub)
+            saved = Path(td) / "meta.md"
+            if r4.ok:
+                export_single(r4.markdown, saved, source=epub.name, title=r4.doc_title,
+                              author=r4.doc_author, title_source=r4.title_source, meta=r4.doc_meta)
+            head = saved.read_text(encoding="utf-8")[:400] if saved.exists() else ""
+            report["checks"]["book_metadata"] = (
+                "title: Self Test Book\n" in head and "title_source: opf" in head
+            )
             report["checks"]["quality"] = assess_markdown("# T\n\nbody\n").score > 0
 
             # A failure must get its code and an error-log entry, and the
@@ -178,6 +221,55 @@ def _run_mcp() -> None:
     mcp_main()
 
 
+USAGE = """\
+Markdown Sidekick {version} - convert documents, scans and audio to Markdown.
+
+Usage:
+  MarkdownSidekick.exe                    open the app
+  MarkdownSidekick-cli.exe <command> ...  headless conversion in a terminal:
+      convert FILES... [--out DIR] [--ai-target Claude|ChatGPT|...]
+      capabilities                        which local engines are available
+      diagnostics                         digest of the error log and debug traces
+      (MarkdownSidekick-cli.exe --help lists every option)
+  MarkdownSidekick.exe --cli <command>    the same CLI from the windowed exe
+  MarkdownSidekick.exe --mcp              MCP server over stdio, for AI clients
+  MarkdownSidekick.exe --selftest         check the conversion pipeline (exit 0/1)
+  --debug                                 add to any of the above to record a trace
+  --help, --version                       print this or the version, and exit
+"""
+_HELP_FLAGS = ("--help", "-h", "/?", "-?")
+
+
+def _cli_exe() -> bool:
+    """Running as the console companion (MarkdownSidekick-cli.exe)?"""
+    return bool(getattr(sys, "frozen", False)) and Path(sys.executable).stem.lower().endswith("-cli")
+
+
+def _ensure_stdout() -> None:
+    """Give a windowed (no-console) build somewhere to print: the terminal it
+    was started from when there is one, else nowhere. (The windowed exe can't
+    make the terminal wait for it — that is what the -cli exe is for.)"""
+    if sys.stdout is not None:
+        return
+    if os.name == "nt":
+        import ctypes
+
+        if ctypes.windll.kernel32.AttachConsole(-1):  # ATTACH_PARENT_PROCESS
+            sys.stdout = open("CONOUT$", "w", encoding="utf-8")
+            sys.stderr = sys.stdout
+            print()  # the prompt already printed: start on a fresh line
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = sys.stdout
+
+
+def _version() -> str:
+    from markdown_sidekick import __version__
+
+    return __version__
+
+
 if __name__ == "__main__":
     if "--debug" in sys.argv:
         # Debug mode for this run, whichever front-end starts (debuglog.ENV_DEBUG).
@@ -188,12 +280,29 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
-    if "--cli" in sys.argv:
-        # Headless conversion: `MarkdownSidekick.exe --cli convert file.pdf ...`
+    if sys.argv[1:] == ["--version"] or ("--version" in sys.argv and not _cli_exe() and "--cli" not in sys.argv):
+        # Either exe, alone: the app's version. (Inside a CLI command line
+        # the flag is the CLI's business.)
+        _ensure_stdout()
+        print(f"Markdown Sidekick {_version()}")
+        sys.exit(0)
+    if _cli_exe() or "--cli" in sys.argv:
+        # Headless conversion: `MarkdownSidekick-cli.exe convert file.pdf ...`
+        # (or `MarkdownSidekick.exe --cli convert ...`).
+        _ensure_stdout()
         from markdown_sidekick.cli import main as cli_main
 
-        args = sys.argv[sys.argv.index("--cli") + 1 :]
+        args = sys.argv[sys.argv.index("--cli") + 1 :] if "--cli" in sys.argv else sys.argv[1:]
         sys.exit(cli_main(args))
+    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in _HELP_FLAGS]
+    if any(a in _HELP_FLAGS for a in sys.argv[1:]) or unknown:
+        # Never fall through to the GUI on a flag we don't know: a script or
+        # an agent asking for --help must get text back, not a window.
+        _ensure_stdout()
+        if unknown:
+            print(f"Unknown option: {' '.join(unknown)}\n", file=sys.stderr)
+        print(USAGE.format(version=_version()))
+        sys.exit(2 if unknown else 0)
     from markdown_sidekick.ui import run
 
     run()

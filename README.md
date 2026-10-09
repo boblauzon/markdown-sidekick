@@ -75,9 +75,15 @@ available inside the app via the **❓ Help** button.
   and PDFs route to it for layout-aware Markdown, with automatic fallback to the
   built-in OCR / markitdown pipeline if it's unreachable
 - **AI-friendly export** (Settings → *AI-friendly export*):
-  - **YAML front matter** on saved files (title, author, source, date, token
-    and image counts; title/author come from the PDF itself when trustworthy)
-    — a plain one-line book/part header for Gemini Notebook
+  - **YAML front matter** on saved files (title, subtitle, authors, publisher,
+    date, language, ISBN/identifier, source, token and image counts). The title
+    comes from the book itself — an epub's package metadata, a PDF's document
+    info or title page — and `title_source` says which; a heading like
+    "Preface" is never taken for the title. A plain one-line book/part header
+    for Gemini Notebook
+  - **Verified saves**: every file is written atomically and read back before
+    it is reported as saved — a file antivirus quarantined (`MS-205`) or a
+    synced folder can't hand back (`MS-206`) is reported, never "Saved"
   - **Export bar** in the main window: choose *One Markdown file*, *Chapter
     files* (book folder with `index.md` + `manifest.json`), or **AI-sized
     sections** with an *Optimize for* picker (Claude / ChatGPT / Gemini /
@@ -98,7 +104,8 @@ available inside the app via the **❓ Help** button.
   Whisper pipeline (PyAV decodes the audio track); transcripts are grouped into
   timestamped paragraphs
 - **Headless CLI** — `markdown-sidekick-cli convert *.pdf --split-chapters
-  --quality` (or `MarkdownSidekick.exe --cli convert …`) for scripts and CI
+  --quality` (or `MarkdownSidekick-cli.exe convert …` from the standalone app)
+  for scripts, agents and CI
 - **Optional local-LLM extras** (off by default, fully local): artifact
   **polish** pass with a size guardrail, vision-model **alt-text captions**
   for extracted figures, and a 2–3 sentence **document summary** written into
@@ -184,7 +191,7 @@ Manual equivalent:
 
 ```powershell
 py -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt -c constraints.txt
 ```
 
 ## Running
@@ -212,8 +219,10 @@ You can also run it as a module:
 .venv\Scripts\python.exe -m markdown_sidekick.cli capabilities
 ```
 
-(or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick.exe --cli convert …`
-from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
+(or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick-cli.exe convert …`
+from the standalone build — a console program, so the terminal waits for it and gets its
+output and exit code; `MarkdownSidekick.exe --help` prints usage and never opens the
+window). Flags: `--split-chapters`, `--ai-target Claude`
 (AI-sized book folders — every part fits the platform's budget), `--quality`,
 `--anchors`, `--images` / `--no-images`, `--no-layout`, `--polish`, `--summarize`,
 `--no-clean`, `--no-front-matter`, `--json`, `--out DIR`, `--debug`. Failures print an
