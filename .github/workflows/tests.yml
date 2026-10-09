@@ -29,12 +29,16 @@ jobs:
         with:
           python-version: "3.13"
           cache: pip
-          cache-dependency-path: requirements.txt
+          cache-dependency-path: |
+            requirements.txt
+            constraints.txt
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          # constraints.txt pins the versions the released exe is built
+          # with, so CI tests what ships; upgrades are deliberate.
+          python -m pip install -r requirements.txt -c constraints.txt
           python -m pip install -e . --no-deps
           # Dev-only: deliberately not in requirements.txt.
           python -m pip install pytest pyyaml

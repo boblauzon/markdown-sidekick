@@ -11,7 +11,7 @@ Markdown Sidekick — a Windows desktop app (Python 3.10+, Tkinter) that convert
 All commands use the project venv; there is no global Python assumption.
 
 ```powershell
-.venv\Scripts\python.exe -m pip install -r requirements.txt   # setup (or run setup.bat)
+.venv\Scripts\python.exe -m pip install -r requirements.txt -c constraints.txt   # setup (or run setup.bat)
 .venv\Scripts\python.exe app.py                               # launch the GUI
 .venv\Scripts\python.exe app.py --selftest                    # end-to-end pipeline check, JSON report to %TEMP%, exit 0/1
 .venv\Scripts\python.exe app.py --mcp                         # MCP server over stdio (also: run_mcp.py)
@@ -23,6 +23,7 @@ All commands use the project venv; there is no global Python assumption.
 ISCC.exe installer\MarkdownSidekick.iss                               # build the installer from dist\ (~2 min; Inno Setup 6)
 ```
 
+- `constraints.txt` pins every package to the versions the released exe is built from (CI and setup.bat install with `-c constraints.txt`). Upgrading a dependency is a deliberate change: bump the pin, run the suite and the corpora, then rebuild. Regenerate with `pip freeze` minus the editable package and dev/build tools. An unpinned install once pulled markitdown 0.1.8, which converts binary junk to "text" and broke the empty-output guard.
 - `pytest` is a dev-only dependency — it is deliberately **not** in `requirements.txt`; install it into the venv if missing.
 - Don't feed Python source containing backslash escapes (`\n`, `\d`) through a Bash heredoc — it gets mangled; use the Edit tool (or Write a patch script to a file and run that).
 - `app.py` never falls through to the GUI on a flag: `--help`/`--version` print and exit, an unknown `-option` exits 2. The spec builds the same launcher twice; under the `-cli` exe name every argument goes to the CLI (a windowed exe can't make a terminal wait or receive its output).
