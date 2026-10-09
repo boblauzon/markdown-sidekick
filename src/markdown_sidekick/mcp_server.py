@@ -20,6 +20,7 @@ import logging
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 # Keep startup quiet and offline-safe: no banner, no pypi update check. Must be
@@ -48,7 +49,8 @@ mcp = FastMCP(
         "Converts local documents, images, scanned/vector PDFs and audio files to "
         "Markdown using a local offline pipeline (markitdown + RapidOCR + "
         "faster-whisper) with optional cleanup. Use convert_local_file with an "
-        "absolute path."
+        "absolute path for one file; for a folder or a library use convert_batch, "
+        "then poll batch_status."
     ),
 )
 
@@ -72,6 +74,7 @@ def _get_engine() -> ConversionEngine:
             mineru_endpoint=s.mineru_endpoint,
             page_anchors=s.page_anchors,
             pdf_layout=s.pdf_layout,
+            ocr_device=s.ocr_device,
         )
     return _engine
 
@@ -349,6 +352,189 @@ def list_capabilities() -> dict:
         "mineru_endpoint": mineru.mineru_configured(s.mineru_endpoint),
         "whisper_model": s.whisper_model,
     }
+
+
+# ---------------------------------------------------------------------------
+# Library batches: start, then poll. A 500-book batch runs for many minutes,
+# longer than MCP clients wait for one tool call, so convert_batch returns at
+# once and batch_status reports progress and, at the end, the compact summary.
+# ---------------------------------------------------------------------------
+class _Batch:
+    def __init__(self, batch_id: str, output_root: str) -> None:
+        self.id = batch_id
+        self.output_root = output_root
+        self.cancel = threading.Event()
+        self.state = "running"  # running | done | cancelled | error
+        self.done = 0
+        self.total = 0
+        self.counts = {"converted": 0, "skipped": 0, "failed": 0}
+        self.last = ""
+        self.started = time.monotonic()
+        self.summary: dict | None = None
+        self.error = ""
+
+
+_batches: dict[str, _Batch] = {}
+_batches_lock = threading.Lock()
+
+
+def _batch_view(job: _Batch) -> dict:
+    view = {
+        "batch_id": job.id,
+        "state": job.state,
+        "done": job.done,
+        "total": job.total,
+        **job.counts,
+        "elapsed_s": round(time.monotonic() - job.started, 1),
+        "output_root": job.output_root,
+    }
+    if job.last:
+        view["last"] = job.last
+    if job.summary is not None:
+        view["summary"] = job.summary
+    if job.error:
+        view["error"] = job.error
+    if job.state == "running":
+        view["next"] = "Call batch_status again in 30-60 seconds."
+    return view
+
+
+@mcp.tool
+def convert_batch(
+    inputs: list[str],
+    output_root: str,
+    naming: str = "source",
+    style: str = "single",
+    ai_target: str = "Claude",
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    skip_existing: bool = True,
+    overwrite: bool = False,
+    workers: int = 0,
+    images: bool = False,
+    clean: bool = True,
+) -> dict:
+    """Start converting a whole library (folders and/or files) into
+    output_root; returns a batch_id at once. Poll batch_status(batch_id)
+    until state is "done" — it returns totals, failures with error codes,
+    low-quality outputs to review, and the manifest path. One call replaces
+    one convert_local_file per book.
+
+    Folders are walked for documents and ebooks (PDF, EPUB, DOCX, PPTX,
+    XLSX, HTML), skipping tool environments (.venv, node_modules,
+    site-packages, .git), hidden folders and output_root itself; the folder
+    structure is mirrored. Every input ends in one manifest row
+    (output_root/_manifest.json and .csv): converted, skipped (unchanged
+    since the last run, unsupported_format such as .mobi, or cancelled) or
+    failed with its MS-… code. A saved file is read back before it counts
+    as converted. Re-running converts only new or changed sources.
+
+    Args:
+        inputs: Absolute paths of folders to walk and/or files.
+        output_root: Absolute path of the output folder (created if missing).
+        naming: "source" (keep file names), "title" (the book's own title),
+            or "title_author". A name another file already holds is never
+            overwritten: edition, then author, then " (2)" is appended.
+        style: "single" (one .md per source), "chapters" (a folder per book),
+            or "ai" (AI-sized parts for ai_target).
+        ai_target: Claude, ChatGPT, Gemini, "Gemini Notebook" or "Local LLM".
+        include: Filename globs to convert instead of the default document
+            types, e.g. ["*.png", "*.mp3"].
+        exclude: Globs (name or path relative to an input folder) to skip.
+        skip_existing: Skip sources unchanged since the last run (default).
+        overwrite: Allow replacing files this batch didn't write.
+        workers: Parallel conversions; 0 = automatic (cores minus one, max 4).
+        images: Extract PDF figures to images/ folders.
+        clean: Run the cleanup pass (default).
+    """
+    from . import batch
+
+    out = os.path.abspath(os.path.expanduser(output_root))
+    paths = [os.path.abspath(os.path.expanduser(p)) for p in inputs]
+    missing = [p for p in paths if not os.path.exists(p)]
+    if not paths or len(missing) == len(paths):
+        incident = errors.report("MS-103", where="mcp convert_batch", detail=f"no such inputs: {missing[:3]}")
+        return {"state": "error", "error": _coded(incident)}
+    with _batches_lock:
+        running = next((b for b in _batches.values() if b.state == "running"), None)
+        if running is not None:
+            return {**_batch_view(running), "note": "A batch is already running; poll it or cancel_batch it first."}
+        try:
+            options = batch.BatchOptions(
+                output_root=Path(out),
+                naming=naming,
+                skip_existing=skip_existing,
+                overwrite=overwrite,
+                clean=clean,
+                style=style,
+                ai_target=ai_target,
+                images=images,
+                workers=workers or batch.default_workers(),
+                include=tuple(include or ()),
+                exclude=tuple(exclude or ()),
+                engine=batch.engine_config(),
+                isolate=True,  # never share this server's model singletons
+            )
+        except ValueError as exc:
+            return {"state": "error", "error": str(exc)}
+        job = _Batch(f"b{int(time.time())}-{len(_batches) + 1}", out)
+        _batches[job.id] = job
+
+    def progress(done: int, total: int, row) -> None:
+        job.done, job.total = done, total
+        job.counts[row.status] = job.counts.get(row.status, 0) + 1
+        job.last = f"{row.status}: {Path(row.output or row.source).name}"
+
+    def run() -> None:
+        try:
+            summary = batch.run_batch(paths, options, on_progress=progress, cancel=job.cancel)
+            job.summary = summary.as_dict()
+            job.total = summary.total
+            job.state = "cancelled" if summary.cancelled else "done"
+        except Exception as exc:
+            incident = errors.report(
+                errors.classify_os_error(exc) if isinstance(exc, OSError) else "MS-900",
+                exc=exc, where="mcp convert_batch",
+            )
+            job.error, job.state = _coded(incident), "error"
+        logger.info("Batch %s %s: %s", job.id, job.state, job.counts)
+
+    threading.Thread(target=run, name=f"batch-{job.id}", daemon=True).start()
+    logger.info("Batch %s started: %d input(s) -> %s", job.id, len(paths), out)
+    return {
+        "batch_id": job.id,
+        "state": "running",
+        "output_root": out,
+        "skipped_inputs": missing,
+        "next": "Call batch_status(batch_id) every 30-60 seconds until state is done.",
+    }
+
+
+@mcp.tool
+def batch_status(batch_id: str = "") -> dict:
+    """Progress of a convert_batch run (the latest when batch_id is blank).
+    When state is "done" (or "cancelled"), "summary" holds the totals, the
+    failures with their MS-… codes, the outputs worth reviewing, and the
+    manifest path (one row per input)."""
+    with _batches_lock:
+        job = _batches.get(batch_id) if batch_id else (list(_batches.values())[-1] if _batches else None)
+    if job is None:
+        return {"state": "unknown", "error": f"No batch {batch_id!r} in this session."}
+    return _batch_view(job)
+
+
+@mcp.tool
+def cancel_batch(batch_id: str = "") -> dict:
+    """Stop a running convert_batch (the latest when batch_id is blank).
+    Files already converted are kept and listed in the manifest; the rest
+    are recorded as skipped (cancelled). Poll batch_status until it says
+    "cancelled"."""
+    with _batches_lock:
+        job = _batches.get(batch_id) if batch_id else (list(_batches.values())[-1] if _batches else None)
+    if job is None:
+        return {"state": "unknown", "error": f"No batch {batch_id!r} in this session."}
+    job.cancel.set()
+    return _batch_view(job)
 
 
 def main() -> None:

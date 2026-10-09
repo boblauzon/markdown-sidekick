@@ -106,6 +106,12 @@ available inside the app via the **❓ Help** button.
 - **Headless CLI** — `markdown-sidekick-cli convert *.pdf --split-chapters
   --quality` (or `MarkdownSidekick-cli.exe convert …` from the standalone app)
   for scripts, agents and CI
+- **Whole-library batches** — `batch D:\eBooks --out D:\eBooks-md --naming title`
+  (CLI) or `convert_batch` + `batch_status` (MCP): one run converts a folder
+  tree into a mirrored output folder, names files after the book's real title
+  without ever overwriting another file, writes `_manifest.json`/`.csv` with one
+  row per input (converted / skipped / failed + error code), and re-runs skip
+  everything unchanged
 - **Optional local-LLM extras** (off by default, fully local): artifact
   **polish** pass with a size guardrail, vision-model **alt-text captions**
   for extracted figures, and a 2–3 sentence **document summary** written into
@@ -230,6 +236,20 @@ error code (`MS-…`), the next step, and the reference of their error-log entry
 `markdown-sidekick-cli diagnostics` summarises the logs (add `--report out.zip` for a
 shareable bundle).
 
+`batch` converts a whole library — every PDF/EPUB/Office/HTML file under the
+given folders — into `--out`, mirroring the folder structure:
+
+```powershell
+MarkdownSidekick-cli.exe batch D:\eBooks --out D:\eBooks-md --naming title
+```
+
+Flags: `--naming source|title|title_author`, `--style single|chapters|ai`
+(+ `--ai-target`), `--include GLOB` / `--exclude GLOB` (repeatable),
+`--no-skip-existing`, `--overwrite`, `--workers N`, `--images`, `--no-clean`,
+`--no-front-matter`, `--quiet`. It prints one JSON summary (totals, failures with
+error codes, low-quality outputs to review, manifest path) and exits 1 if any input
+failed.
+
 ## How to use
 
 1. Add files (drag & drop or **Add files…**) — conversion starts automatically
@@ -308,6 +328,10 @@ just plain markitdown. Tools:
 - `convert_url(url)` — downloads (http/https, 50 MB cap) and converts a web page,
   PDF, or image with the same local pipeline
 - `list_capabilities()` — reports which local engines are available
+- `convert_batch(inputs, output_root, naming, style, …)` → `batch_status(batch_id)`
+  / `cancel_batch(batch_id)` — library-scale conversion: starts at once, then poll;
+  the finished status is a compact summary (<4 KB) and the per-file detail is in
+  the manifest on disk
 
 **One-click setup:** in the app, open **⚙ Settings → 📋 Copy AI setup prompt**
 and paste it into Claude, Cursor, or any AI assistant — the prompt carries your

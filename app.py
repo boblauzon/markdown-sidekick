@@ -271,6 +271,11 @@ def _version() -> str:
 
 
 if __name__ == "__main__":
+    # A batch's worker processes re-launch this exe with multiprocessing's
+    # own arguments; this must run first, before any of ours are parsed.
+    import multiprocessing
+
+    multiprocessing.freeze_support()
     if "--debug" in sys.argv:
         # Debug mode for this run, whichever front-end starts (debuglog.ENV_DEBUG).
         sys.argv.remove("--debug")

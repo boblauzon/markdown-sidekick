@@ -324,6 +324,10 @@ Tools exposed:
 - `convert_section(file_path, section_index)` — one chapter at a time
 - `convert_url(url)` — download and convert a web page or remote PDF
 - `list_capabilities()` — reports which engines are available
+- `convert_batch(inputs, output_root, naming, style, …)` — starts converting
+  a whole library and returns a batch id straight away; `batch_status(id)`
+  reports progress and, when finished, the totals, failures and manifest path;
+  `cancel_batch(id)` stops it. One call instead of one per book.
 
 There is also a **command line** for scripts and automation:
 
@@ -352,6 +356,37 @@ per chapter). The MCP tools take a matching `max_tokens` argument.
 their error code, the next step and the log reference; `--debug` traces the
 run and `diagnostics` summarises the logs (see *Debug mode and diagnostic
 reports*).
+
+### Converting a whole library
+
+`batch` converts every document and ebook under one or more folders in a
+single run, into an output folder that mirrors your folder structure:
+
+```
+MarkdownSidekick-cli.exe batch "D:\eBooks" --out "D:\eBooks-md" --naming title
+```
+
+- **What it picks up:** PDF, EPUB, DOCX, PPTX, XLSX and HTML files. It skips
+  tool folders (`.venv`, `node_modules`, `site-packages`, `.git`), hidden
+  folders and the output folder itself. Add other types with
+  `--include "*.png"` (repeatable) and leave things out with `--exclude`.
+- **Names:** `--naming source` (the default) keeps file names; `title` uses
+  the book's own title (`Algorithms_and_Data_Structures_for_Massi.epub`
+  becomes `Algorithms and Data Structures for Massive Datasets.md`);
+  `title_author` adds the first author. A name that another file already
+  has is never overwritten — the edition, then the author, then " (2)" is
+  added (`--overwrite` turns this off).
+- **Every input gets one row** in `_manifest.json` and `_manifest.csv` in the
+  output folder: converted, skipped (unchanged since the last run, an
+  unsupported format such as `.mobi`, or cancelled) or failed with its
+  error code. A file only counts as converted once it has been read back.
+- **Re-runs are quick:** sources that haven't changed since the last run
+  (same size, date and settings, outputs still there) are skipped without
+  being opened, so adding five books doesn't redo five hundred.
+- `--style chapters` or `--style ai --ai-target Claude` writes a folder per
+  book instead of one file; `--workers N` sets how many files convert at
+  once (default: cores minus one, at most 4). The summary printed at the end
+  lists failures and the outputs whose quality score is worth a look.
 
 ---
 

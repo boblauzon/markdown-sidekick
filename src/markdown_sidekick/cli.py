@@ -76,6 +76,35 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--whisper-model", default=None, help="whisper model size (tiny/base/small/medium)")
     conv.add_argument("--debug", action="store_true", help="record a detailed trace of this run (timings, routing decisions, cleanup passes) under the log folder; see the diagnostics command")
 
+    from . import batch
+
+    bat = sub.add_parser(
+        "batch",
+        help="convert a whole folder (a library) into an output folder, with a manifest; re-runs skip what is unchanged",
+        description="Convert every document and ebook under the given folders (and any files "
+        "listed) into --out, mirroring the folder structure. Writes _manifest.json and "
+        "_manifest.csv in --out with one row per input. Prints one JSON summary to stdout "
+        "(totals, failures, low-quality outputs); progress goes to stderr. Exit code 1 when "
+        "any input failed.",
+    )
+    bat.add_argument("inputs", nargs="+", help="folders to walk and/or files")
+    bat.add_argument("--out", type=Path, required=True, help="output root (created if missing; mirrored folder structure)")
+    bat.add_argument("--naming", choices=batch.NAMING_MODES, default="source", help="output file names: the source's name (default), the book's title, or title - first author")
+    bat.add_argument("--style", choices=batch.STYLES, default="single", help="one .md per source (default), a chapter folder, or AI-sized parts (see --ai-target)")
+    bat.add_argument("--ai-target", choices=list(export.AI_TARGETS), default="Claude", help="budget for --style ai (default Claude)")
+    bat.add_argument("--include", action="append", default=[], metavar="GLOB", help="filename globs to include instead of the default documents/ebooks (repeatable), e.g. --include *.png --include *.mp3")
+    bat.add_argument("--exclude", action="append", default=[], metavar="GLOB", help="skip files or folders matching this glob, by name or path relative to the input folder (repeatable)")
+    bat.add_argument("--no-skip-existing", action="store_true", help="convert everything again, even sources unchanged since the last run")
+    bat.add_argument("--overwrite", action="store_true", help="allow replacing files this batch didn't write (default: pick a free name instead)")
+    bat.add_argument("--workers", type=int, default=None, help=f"parallel conversions (default {batch.default_workers()}: cores minus one, at most 4)")
+    bat.add_argument("--images", action="store_true", help="extract PDF figures to images/ folders")
+    bat.add_argument("--no-clean", action="store_true", help="skip the cleanup pass")
+    bat.add_argument("--no-front-matter", action="store_true", help="omit YAML front matter")
+    bat.add_argument("--no-ocr", action="store_true", help="disable the OCR route")
+    bat.add_argument("--no-audio", action="store_true", help="disable audio/video transcription")
+    bat.add_argument("--quiet", action="store_true", help="no per-file progress lines")
+    bat.add_argument("--debug", action="store_true", help="record a detailed trace of this run under the log folder")
+
     sub.add_parser("capabilities", help="report which local engines are available")
     diag = sub.add_parser(
         "diagnostics",
@@ -235,6 +264,50 @@ def _convert(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _batch(args: argparse.Namespace) -> int:
+    from . import batch
+
+    settings = Settings.load()
+    if args.debug or settings.debug_mode or debuglog.debug_requested():
+        session = debuglog.enable("cli", snapshots=settings.debug_snapshots)
+        if session is not None:
+            print(f"Debug trace: {session}", file=sys.stderr)
+    options = batch.BatchOptions(
+        output_root=args.out,
+        naming=args.naming,
+        skip_existing=not args.no_skip_existing,
+        overwrite=args.overwrite,
+        clean=not args.no_clean,
+        style=args.style,
+        ai_target=args.ai_target,
+        front_matter=not args.no_front_matter,
+        images=args.images,
+        workers=args.workers if args.workers is not None else batch.default_workers(),
+        include=tuple(args.include),
+        exclude=tuple(args.exclude),
+        engine=batch.engine_config(settings, no_ocr=args.no_ocr, no_audio=args.no_audio),
+    )
+    for stream in (sys.stdout, sys.stderr):  # titles carry characters a legacy code page can't encode
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    def progress(done: int, total: int, row: "batch.BatchRow") -> None:
+        if args.quiet:
+            return
+        name = Path(row.output).name if row.output else Path(row.source).name
+        extra = f" q{row.quality}" if row.quality is not None and row.status == "converted" else ""
+        why = f" {row.reason}" if row.reason else ""
+        code = f" [{row.code}]" if row.code else ""
+        print(f"[{done}/{total}] {row.status:<9}{why}{code}{extra}  {name}", file=sys.stderr, flush=True)
+
+    summary = batch.run_batch(args.inputs, options, on_progress=progress)
+    print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+    if summary.total == 0:
+        print("No documents found under the inputs (see --include).", file=sys.stderr)
+        return 1
+    return 1 if summary.failed or summary.cancelled else 0
+
+
 def _write_outputs(
     path: Path,
     result: ConversionResult,
@@ -374,6 +447,8 @@ def main(argv: list[str] | None = None) -> int:
             return _print_capabilities()
         if args.command == "diagnostics":
             return _diagnostics(args)
+        if args.command == "batch":
+            return _batch(args)
         return _convert(args)
     except Exception as exc:  # a bug, not a bad input: code it and say where to look
         _print_incident(errors.report("MS-900", exc=exc, where=f"cli {args.command}"))
