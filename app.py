@@ -280,6 +280,12 @@ if __name__ == "__main__":
         sys.exit(0)
     if "--selftest" in sys.argv:
         sys.exit(_selftest())
+    if sys.argv[1:] == ["--version"] or ("--version" in sys.argv and not _cli_exe() and "--cli" not in sys.argv):
+        # Either exe, alone: the app's version. (Inside a CLI command line
+        # the flag is the CLI's business.)
+        _ensure_stdout()
+        print(f"Markdown Sidekick {_version()}")
+        sys.exit(0)
     if _cli_exe() or "--cli" in sys.argv:
         # Headless conversion: `MarkdownSidekick-cli.exe convert file.pdf ...`
         # (or `MarkdownSidekick.exe --cli convert ...`).
@@ -288,10 +294,6 @@ if __name__ == "__main__":
 
         args = sys.argv[sys.argv.index("--cli") + 1 :] if "--cli" in sys.argv else sys.argv[1:]
         sys.exit(cli_main(args))
-    if "--version" in sys.argv:
-        _ensure_stdout()
-        print(f"Markdown Sidekick {_version()}")
-        sys.exit(0)
     unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in _HELP_FLAGS]
     if any(a in _HELP_FLAGS for a in sys.argv[1:]) or unknown:
         # Never fall through to the GUI on a flag we don't know: a script or
