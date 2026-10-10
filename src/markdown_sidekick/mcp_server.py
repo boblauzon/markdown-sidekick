@@ -351,6 +351,7 @@ def list_capabilities() -> dict:
         "audio_transcription": audio.audio_available(),
         "mineru_endpoint": mineru.mineru_configured(s.mineru_endpoint),
         "whisper_model": s.whisper_model,
+        "ocr_gpu": ocr.gpu_status(),  # "shadowed": see ocr.GPU_FIX
     }
 
 

@@ -125,11 +125,17 @@ def _print_capabilities() -> int:
     info = {
         "ocr": ocr.ocr_available(),
         "pdf_ocr": ocr.pdf_ocr_available(),
+        "ocr_gpu": ocr.gpu_status(),
         "audio": audio.audio_available(),
         "settings": str(Settings.config_path()),
         "logs": str(debuglog.log_dir()),
     }
+    if info["ocr_gpu"] == "shadowed":
+        info["ocr_gpu_fix"] = ocr.GPU_FIX
     print(json.dumps(info, indent=2))
+    if info["ocr_gpu"] == "shadowed":
+        print(f"warn   OCR runs on the CPU: a CPU-only onnxruntime hides the GPU build. Fix: {ocr.GPU_FIX}",
+              file=sys.stderr)
     return 0
 
 

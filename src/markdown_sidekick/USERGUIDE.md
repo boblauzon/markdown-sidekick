@@ -426,6 +426,14 @@ You launched the exe from the `build\` folder of a source checkout. Only
 temporary scaffolding. When sharing the app, zip the whole
 `dist\MarkdownSidekick` folder, not just the exe.
 
+**OCR is slow after installing with pip (not the standalone app)**
+Run `markdown-sidekick-cli capabilities` and look at `ocr_gpu`. `shadowed`
+means a CPU-only `onnxruntime` package (installed by a dependency) is
+hiding the GPU build, so OCR runs about five times slower. The fix is
+printed with it: `pip uninstall -y onnxruntime`, then
+`pip install --force-reinstall --no-deps onnxruntime-directml`.
+(`setup.bat` and the standalone app already do this.)
+
 **A PDF converts to (almost) empty output**
 Turn **OCR images & scanned PDFs** on and re-convert — the PDF likely has no
 text layer. Scanned and vector-text PDFs are detected and OCR'd automatically.

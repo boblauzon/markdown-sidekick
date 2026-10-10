@@ -82,6 +82,37 @@ def pdfium_available() -> bool:
     return _PDFIUM_AVAILABLE
 
 
+GPU_FIX = (
+    "pip uninstall -y onnxruntime && "
+    "pip install --force-reinstall --no-deps onnxruntime-directml"
+)
+
+
+def gpu_status() -> str:
+    """Which OCR backend onnxruntime offers: "directml" (GPU), "cpu", or
+    "shadowed" — onnxruntime-directml is installed but the CPU-only
+    "onnxruntime" package (a dependency of magika) was installed over it
+    into the same folder, silently putting OCR on the CPU (~5x slower).
+    GPU_FIX repairs a shadowed install. Imports onnxruntime: call it for
+    diagnostics, not on the startup path."""
+    try:
+        import onnxruntime
+
+        providers = onnxruntime.get_available_providers()
+    except Exception as exc:  # broken or missing install: report, don't raise
+        debuglog.exception("ocr.gpu_status", exc)
+        return "unavailable"
+    if "DmlExecutionProvider" in providers:
+        return "directml"
+    from importlib import metadata as md
+
+    try:
+        md.version("onnxruntime-directml")
+    except md.PackageNotFoundError:
+        return "cpu"
+    return "shadowed"
+
+
 @dataclass
 class PdfAnalysis:
     """Per-page triage of a PDF used to decide on the conversion route."""

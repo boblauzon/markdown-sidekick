@@ -39,6 +39,10 @@ jobs:
           # constraints.txt pins the versions the released exe is built
           # with, so CI tests what ships; upgrades are deliberate.
           python -m pip install -r requirements.txt -c constraints.txt
+          # magika pulls the CPU-only onnxruntime, which overwrites the
+          # DirectML build in the same folder: restore it (as setup.bat does).
+          python -m pip uninstall -y onnxruntime
+          python -m pip install --force-reinstall --no-deps onnxruntime-directml -c constraints.txt
           python -m pip install -e . --no-deps
           # Dev-only: deliberately not in requirements.txt.
           python -m pip install pytest pyyaml
