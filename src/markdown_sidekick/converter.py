@@ -429,6 +429,14 @@ class ConversionEngine:
             has_text = any(
                 m.group(0) != "None" for m in re.finditer(r"\w+", text)
             )
+            if has_text and len(text) >= 400:
+                # markitdown 0.1.8+ decodes binary junk with some multi-byte
+                # codec instead of returning "None": a salad of scripts that
+                # passes the \w test. The quality gauge's binary-noise check
+                # catches it (incl. its mixed-script signal).
+                from .quality import assess_markdown
+
+                has_text = not assess_markdown(text).binary_noise
             if not has_text:
                 try:
                     src_size = source.stat().st_size
