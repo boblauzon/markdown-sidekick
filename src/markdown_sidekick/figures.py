@@ -153,6 +153,9 @@ def _save_image(obj, stem: Path, raw: bytes) -> tuple[Path, int, int] | None:
         pil = bitmap.to_pil()
         pil = pil.convert("L" if pil.mode in ("L", "1", "LA") else "RGB")
     finally:
+        # Safe: the copy above no longer references the buffer. (pypdfium2
+        # 5.14+ otherwise logs "potentially unsafe" for every figure.)
+        bitmap.warn_on_close = False
         bitmap.close()
     if pil.getcolors(_PALETTE_COLOURS) is not None:
         path = stem.with_suffix(".png")

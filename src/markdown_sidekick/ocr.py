@@ -245,8 +245,9 @@ class OcrEngine:
         """Render one pypdfium2 page and return its recognised text."""
         bitmap = page.render(scale=self.render_scale)
         try:
-            pil = bitmap.to_pil().convert("RGB")
+            pil = bitmap.to_pil().convert("RGB")  # convert copies the buffer
         finally:
+            bitmap.warn_on_close = False  # safe after the copy (pypdfium2 5.14+ warns)
             bitmap.close()  # free the native render buffer
         return self._recognise(np.asarray(pil)).strip()
 
