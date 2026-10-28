@@ -21,6 +21,7 @@ warnings.filterwarnings("ignore", message=r"Couldn't find ff(?:mpeg|probe)", cat
 
 try:
     from markitdown import MarkItDown
+    from markitdown.converters import AudioConverter
 except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
     raise ImportError(
         "The 'markitdown' package is not installed. Activate the project "
@@ -30,7 +31,8 @@ except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
 from . import audio, debuglog, errors, metadata, mineru, ocr, pdflayout
 
 
-# File extensions markitdown can meaningfully handle. Used to build the file
+# File extensions some route (markitdown, OCR, Whisper) can meaningfully
+# handle — audio/video only ever goes to Whisper. Used to build the file
 # picker filter and to give friendly warnings; markitdown still sniffs content
 # at conversion time, so this list is a guide, not a hard gate.
 SUPPORTED_EXTENSIONS: tuple[str, ...] = (
@@ -171,6 +173,13 @@ class ConversionEngine:
 
     def __post_init__(self) -> None:
         self._md = MarkItDown(enable_plugins=self.enable_plugins)
+        # markitdown's audio converter transcribes through Google's online
+        # speech API. Nothing here may leave the computer, so it never runs —
+        # not for a file Whisper failed on, with transcription turned off, for
+        # a file sniffed as audio, or for a WAV inside a ZIP (same instance).
+        self._md._converters[:] = [
+            r for r in self._md._converters if not isinstance(r.converter, AudioConverter)
+        ]
 
     def _ocr_engine(self) -> "ocr.OcrEngine":
         # Rebuilt when the device setting changes — the ONNX sessions inside
