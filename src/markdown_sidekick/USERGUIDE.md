@@ -567,6 +567,7 @@ your documents' text (file names and paths, yes).
 | MS-602 | Windows couldn't open that folder. *(warning)* | Open it yourself — its path is in the details. | — |
 | MS-603 | The diagnostic report couldn't be created. | Choose another folder for the report, or open the log folder and send the files from there. | Open log folder |
 | MS-604 | The built-in user guide couldn't be loaded — a file is missing from this installation. | Reinstall Markdown Sidekick to restore it. | — |
+| MS-605 | The new window can't start — a part it needs isn't on this PC. | Start Markdown Sidekick without --new-ui to use the classic window. To use the new one, install Microsoft's Edge WebView2 Runtime; the details say what was missing. | — |
 
 **Unexpected errors**
 

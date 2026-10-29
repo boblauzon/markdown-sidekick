@@ -371,6 +371,12 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "The built-in user guide couldn't be loaded — a file is missing from this installation.",
         "Reinstall Markdown Sidekick to restore it.",
     ),
+    ErrorSpec(
+        "MS-605",
+        "The new window can't start — a part it needs isn't on this PC.",
+        "Start Markdown Sidekick without --new-ui to use the classic window. To use the new one, "
+        "install Microsoft's Edge WebView2 Runtime; the details say what was missing.",
+    ),
     # -- 9xx unexpected ---------------------------------------------------------
     ErrorSpec(
         "MS-900",

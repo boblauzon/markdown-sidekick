@@ -21,3 +21,9 @@ av>=11,<19
 # MCP server (Phase 5): exposes the conversion pipeline as a tool for
 # Claude Desktop / Cursor / VS Code over stdio.
 fastmcp>=3.0.0
+
+# Redesigned window (preview: `app.py --new-ui`). pywebview (BSD) drives the
+# Windows WebView2 runtime through pythonnet (MIT); markdown-it-py (MIT)
+# renders the preview.
+pywebview>=6.2; sys_platform == 'win32'
+markdown-it-py>=3.0

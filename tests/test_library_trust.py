@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import builtins
 import os
+import re
 import subprocess
 import sys
 import zipfile
@@ -394,6 +395,17 @@ class TestLauncher:
         proc = self._run("--no-such-flag")
         assert proc.returncode == 2
         assert "Unknown option: --no-such-flag" in proc.stderr
+
+    def test_new_ui_with_other_arguments_says_so(self):
+        proc = self._run("--new-ui", "book.pdf")
+        assert proc.returncode == 2
+        assert "--new-ui takes no other arguments (got: book.pdf)" in proc.stderr
+        assert "Unknown option" not in proc.stderr
+        assert self._run("--new-ui", "--help").returncode == 0
+
+    def test_usage_columns_line_up(self):
+        lines = [ln for ln in self._run("--help").stdout.splitlines() if re.match(r"  \S", ln)]
+        assert {re.match(r"  \S.*?\s{2,}(?=\S)", ln).end() for ln in lines} == {42}
 
     def test_version(self):
         from markdown_sidekick import __version__

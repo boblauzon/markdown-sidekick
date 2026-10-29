@@ -21,6 +21,9 @@ for pkg in (
     "av",
     "markitdown",
     "fastmcp",  # the exe hosts the MCP server via `MarkdownSidekick.exe --mcp`
+    "webview",  # the redesigned window (`--new-ui`): WebView2 DLLs + its JS
+    "pythonnet",  # Python.Runtime.dll, which pywebview drives WebView2 through
+    "clr_loader",
 ):
     d, b, h = collect_all(pkg)
     datas += d
@@ -29,6 +32,11 @@ for pkg in (
 
 # Bundled user guide (package data, loaded via importlib.resources).
 datas += [("src/markdown_sidekick/USERGUIDE.md", "markdown_sidekick")]
+# The web UI's page, and the window icon it sets.
+datas += [
+    ("src/markdown_sidekick/webui/static", "markdown_sidekick/webui/static"),
+    ("assets/MarkdownSidekick.ico", "markdown_sidekick/webui/static"),
+]
 
 a = Analysis(
     ["app.py"],

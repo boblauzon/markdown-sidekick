@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+<head>
+<meta charset="utf-8">
+<!-- Nothing leaves the computer: no remote scripts, styles, fonts or images.
+     A converted document's ![](https://…) image therefore never loads. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Markdown Sidekick</title>
+<link rel="stylesheet" href="app.css">
+<script src="app.js" defer></script>
+</head>
+<body>
+<div class="app">
+  <header class="topbar">
+    <div class="logo" aria-hidden="true">
+      <span>M</span>
+      <svg width="10" height="15" viewBox="0 0 10 15" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="square"><path d="M5 1.5v11"/><path d="M1.5 9l3.5 3.5L8.5 9"/></svg>
+    </div>
+    <div class="brand">
+      <span class="brand-name">Markdown Sidekick</span>
+      <span class="brand-tag">Drop files in — get clean Markdown out</span>
+    </div>
+    <button class="btn btn-secondary btn-icon" id="themeBtn" title="Switch theme"></button>
+    <button class="btn btn-secondary" id="helpBtn"></button>
+    <button class="btn btn-secondary" id="settingsBtn"></button>
+  </header>
+  <main id="main" class="main"></main>
+  <footer id="exportbar" class="exportbar" hidden></footer>
+  <div class="statusbar">
+    <span id="status" class="status-text" role="status" aria-live="polite"></span>
+    <button id="kofiBtn" class="kofi"></button>
+  </div>
+  <div id="dialog"></div>
+</div>
+</body>
+</html>

@@ -20,3 +20,4 @@ Thumbs.db
 
 # Installer build output
 installer/Output/
+build-webui/
