@@ -45,6 +45,13 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 [Tasks]
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
+[InstallDelete]
+; Every upgrade starts from an empty _internal. Inno never deletes files a new
+; version stopped shipping, and the app reads what's left: an upgraded 1.2.0
+; kept 164 old files, and its MCP server reported fastmcp 3.4.2 instead of 4.1.0.
+; User data lives in %LOCALAPPDATA%\MarkdownSidekick, never here.
+Type: filesandordirs; Name: "{app}\_internal"
+
 [Files]
 Source: "{#DistDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
