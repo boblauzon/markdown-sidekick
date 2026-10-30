@@ -12,7 +12,7 @@ This is the working list: what's being built, in order, and what waits on someth
 | 2 | **Installer, phase 1.** Per-user installs only; running copies (including `--mcp`) are closed, not overwritten; a one-time move from an all-users install; uninstall asks about the user's data. Answers spec Q4 and Q6. | spec R1, R3–R5 | Done (`2238df4`) |
 | 3 | **Updates, phases 2–3.** Check for updates (manual and opt-in weekly), update information signed with an offline Ed25519 key, a notice in both windows, download and verify, install when the app closes, a failed install reported on next start, the 7xx error codes, the privacy wording, the release step, `cli update --check`, a separate update asset name, resumable downloads. | spec R6–R17, R20–R22 | Done (`8b89862`) |
 | 4 | **Dependencies.** Pillow 12.3 → 13 (37 CVEs, reachable through every dropped image); fastmcp, certifi, filelock patch releases; `markitdown[all]` replaced by explicit extras so the online speech converter isn't installed at all. | assessment 2026-10-27, ADR-001 item 2 | Done (`a66b988`) |
-| 5 | **Frozen build and end to end.** Rebuild into `build-webui\`, frozen self-test, the new window from the exe, and the updater end to end with look-alike installers. | | Built and checked: 552 MB (45 MB smaller), selftest 15/15, 741/741 files identical to source, MCP and Whisper from the exe. The updater end to end last ran on the build before the dependency update (`8b89862`); rerun on this build pending. |
+| 5 | **Frozen build and end to end.** Rebuild into `build-webui\`, frozen self-test, the new window from the exe, and the updater end to end with look-alike installers. | | Done: 552 MB (45 MB smaller), selftest 15/15, 741/741 files identical to source, MCP and Whisper from the exe; the updater end to end on this build took a look-alike 1.3.0 to 1.3.2 and reopened it 58 s after the window closed. |
 
 ## Done
 
@@ -45,6 +45,7 @@ This is the working list: what's being built, in order, and what waits on someth
 
 ### Later (ideas, not commitments)
 
+- Updating from the new window reopens the classic one: the installer's relaunch passes no flag. It goes away when the new window becomes the default; until then only `--new-ui` users see it.
 - Design: the Archivo font (OFL, would need bundling), and the red accent doubling as the error colour.
 - Release automation on GitHub Actions with cloud signing; a beta channel; smaller updates when dependencies haven't changed.
 - A library (batch) mode in the window; a watch folder; MOBI/AZW3 discovery.
