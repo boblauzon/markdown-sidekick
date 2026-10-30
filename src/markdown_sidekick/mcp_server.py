@@ -30,7 +30,7 @@ os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")  # Literal: stable|pre
 
 from fastmcp import FastMCP
 
-from . import debuglog, errors, export
+from . import __version__, debuglog, errors, export
 from .cleanup import clean_markdown
 from .converter import ConversionEngine, ConversionResult
 from .quality import assess_markdown
@@ -45,6 +45,7 @@ logger = logging.getLogger("MarkdownSidekickMCP")
 
 mcp = FastMCP(
     name="Markdown Sidekick",
+    version=__version__,  # serverInfo: the app's version, not fastmcp's
     instructions=(
         "Converts local documents, images, scanned/vector PDFs and audio files to "
         "Markdown using a local offline pipeline (markitdown + RapidOCR + "
@@ -547,8 +548,22 @@ def cancel_batch(batch_id: str = "") -> dict:
     return _batch_view(job)
 
 
+# Held while the server runs: the installer looks for it to say why an AI
+# tool is about to lose its connection (Restart Manager then closes us).
+_running_mutex = None
+
+
+def _hold_running_mutex() -> None:
+    global _running_mutex
+    if sys.platform == "win32" and _running_mutex is None:
+        import ctypes
+
+        _running_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "MarkdownSidekickMCP")
+
+
 def main() -> None:
     errors.install_crash_hooks()
+    _hold_running_mutex()
     settings = Settings.load()
     if settings.debug_mode or debuglog.debug_requested():
         # Files only — stdout stays reserved for JSON-RPC.
