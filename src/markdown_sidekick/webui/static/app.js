@@ -34,6 +34,7 @@ const S = {
   // Settings dialog: the values being edited, what Python sent with them,
   // the open tab, the Detect line, detected models and a save error.
   draft: null, setOpts: null, setTab: 'conversion', setMsg: '', models: [], setErr: '',
+  update: null, showNotes: false,
 };
 const sysDark = window.matchMedia('(prefers-color-scheme: dark)');
 
@@ -54,7 +55,7 @@ window.app = {
     if (!S.boot || snap.seq <= S.seq) return;
     S.seq = snap.seq;
     const before = new Map(S.files.map((f) => [f.id, f.status]));
-    Object.assign(S, { files: snap.files, busy: snap.busy, status: snap.status, overall: snap.overall, canSave: snap.canSave, ocr: snap.ocr });
+    Object.assign(S, { files: snap.files, busy: snap.busy, status: snap.status, overall: snap.overall, canSave: snap.canSave, ocr: snap.ocr, update: snap.update });
     if (S.selId && !S.files.some((f) => f.id === S.selId)) S.selId = null;
     // Nothing selected yet: show the first file that finishes.
     if (!S.selId) {
@@ -63,6 +64,7 @@ window.app = {
     }
     drawMain();
     drawFooter();
+    drawUpdateBar();
     const status = $('#status');
     status.textContent = S.status.replace(/ {2}⚠ /g, '\n⚠ '); // each warning on its own line
     status.classList.toggle('multi', status.textContent.includes('\n')); // else one line, no jumping
@@ -79,6 +81,28 @@ window.app = {
 };
 
 // ---- drawing -----------------------------------------------------------
+// Python's UpdateFlow decides; this only draws it (spec R10–R14).
+function drawUpdateBar() {
+  const bar = $('#updatebar');
+  const u = S.update;
+  if (!u) { bar.className = ''; bar.innerHTML = ''; return; }
+  bar.className = 'updatebar' + (u.important ? ' important' : '');
+  const what = u.important ? `Markdown Sidekick ${esc(u.version)} includes a privacy or security fix.` : `Markdown Sidekick ${esc(u.version)} is available.`;
+  let acts = '';
+  if (u.state === 'available') {
+    acts = (u.notes ? `<button class="btn btn-ghost" data-act="updNotes">${S.showNotes ? 'Hide what’s new' : 'What’s new'}</button>` : '') +
+      (u.canUpdate ? '<button class="btn btn-primary" data-act="updDownload">Update</button>'
+        : '<button class="btn btn-primary" data-act="updPage">Download</button>') +
+      '<button class="btn btn-secondary" data-act="updSkip">Skip this version</button>';
+  } else if (u.state === 'downloading') {
+    acts = `<span class="muted">Downloading… ${u.pct}%</span>`;
+  } else if (u.state === 'ready') {
+    acts = '<span class="muted">Installs when you close Markdown Sidekick.</span><button class="btn btn-primary" data-act="updRestart">Restart now</button>';
+  }
+  bar.innerHTML = `<span style="color:var(--color-accent)">${icon('upload', 18, 2)}</span><div class="txt"><strong>${what}</strong></div>${acts}` +
+    (S.showNotes && u.notes ? `<div class="notes">${esc(u.notes)}</div>` : '');
+}
+
 function drawMain() {
   const main = $('#main');
   if (!S.files.length) {
@@ -239,7 +263,7 @@ async function loadPreview() {
   if (S.probe && p.state === 'done') probe(p, t1 - t0, t1);
 }
 
-const SET_TABS = [['conversion', 'Conversion'], ['output', 'Output'], ['ai', 'Local AI'], ['appearance', 'Appearance'], ['diagnostics', 'Diagnostics']];
+const SET_TABS = [['conversion', 'Conversion'], ['output', 'Output'], ['ai', 'Local AI'], ['appearance', 'Appearance'], ['updates', 'Updates'], ['diagnostics', 'Diagnostics']];
 
 // The Settings dialog's rows per tab (the Designer handoff's layout); keys
 // are Settings field names, sent back as they are to settings_save.
@@ -278,6 +302,12 @@ function settingSections() {
     ],
     appearance: [
       ['Appearance', [{ type: 'seg', label: 'Theme', key: 'theme', opts: [['light', 'Light'], ['dark', 'Dark'], ['system', 'Follow Windows']] }]],
+    ],
+    updates: [
+      ['Updates', [
+        { type: 'seg', label: 'Check for updates', key: 'update_check', opts: [['weekly', 'Once a week'], ['off', 'Never']],
+          desc: 'Only the latest version number is fetched from GitHub — nothing about you or your files is sent.' },
+        button('Check now', 'See whether a newer version is out.', 'Check now', 'checkUpdates')]],
     ],
     diagnostics: [
       ['Error log (always on)', [button('Every error is recorded automatically', `With its code and reference — in ${o.logDir}`, 'Open log folder', 'openLogs')]],
@@ -361,8 +391,17 @@ function closeDialog() {
   applyTheme(); // undo a theme previewed but not saved
 }
 
+function askHtml() {
+  return `<div class="backdrop"><div class="dlg ask" role="dialog" aria-modal="true" aria-label="Check for updates?">
+    <div class="dlg-head"><span class="t">Check for updates?</span></div>
+    <div class="body">Markdown Sidekick can look for a new version once a week. It only asks GitHub for the latest version number — nothing about you or your files is sent. You can change this in Settings → Updates.</div>
+    <div class="dlg-foot"><button class="btn btn-secondary right" data-act="updNever">Don’t check</button><button class="btn btn-secondary" data-act="updWeekly">Check weekly</button></div>
+  </div></div>`;
+}
+
 function drawDialog() {
   const root = $('#dialog');
+  if (S.dialog === 'updateAsk') { root.innerHTML = askHtml(); return; }
   if (S.dialog === 'settings' && S.draft) { root.innerHTML = settingsHtml(); return; }
   if (S.dialog !== 'help' || !S.help) { root.innerHTML = ''; return; }
   const tab = S.help[S.helpTab] || S.help[0];
@@ -422,6 +461,14 @@ async function act(name, el) {
     case 'copyPrompt': return api().copy_ai_prompt();
     case 'report': return api().create_report();
     case 'openLogs': return api().fix('open_logs');
+    // updates
+    case 'checkUpdates': return api().check_updates();
+    case 'updWeekly': case 'updNever': S.dialog = null; drawDialog(); return api().update_choice(name === 'updWeekly');
+    case 'updNotes': S.showNotes = !S.showNotes; return drawUpdateBar();
+    case 'updDownload': return api().update_download();
+    case 'updSkip': return api().update_skip();
+    case 'updRestart': return api().update_restart();
+    case 'updPage': return api().update_page();
   }
 }
 
@@ -483,7 +530,7 @@ document.addEventListener('input', (e) => {
 document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   const inList = !!document.activeElement.closest?.('#filelist');
-  if (e.key === 'Escape' && S.dialog) { closeDialog(); return; }
+  if (e.key === 'Escape' && S.dialog && S.dialog !== 'updateAsk') { closeDialog(); return; } // the first-run question needs an answer
   if (e.ctrlKey && (k === 'o' || k === 's') && S.dialog) { e.preventDefault(); return; } // not behind a dialog
   if (e.ctrlKey && k === 'o') { e.preventDefault(); act('add'); }
   else if (e.ctrlKey && !e.shiftKey && k === 's') { e.preventDefault(); if (S.canSave) act('save'); }
@@ -516,6 +563,7 @@ window.addEventListener('pywebviewready', async () => {
   $('#kofiBtn').dataset.act = 'kofi';
   applyTheme();
   window.app.receive(boot);
+  if (boot.updateAsk) { S.dialog = 'updateAsk'; drawDialog(); }
 });
 
 // ---- probe mode: the spike's measurements (MARKDOWN_SIDEKICK_WEBUI_PROBE) -

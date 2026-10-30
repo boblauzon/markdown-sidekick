@@ -188,6 +188,15 @@ svg { display: block; flex: none; }
 .warnbar .btn { height: 30px; padding: 0 10px; }
 .warnbar .btn-icon { width: 30px; }
 .pv-body { flex: 1; min-height: 0; overflow: auto; }
+/* — the update bar (under the header) — */
+.updatebar { flex: none; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; padding: 8px 20px;
+  background: var(--color-surface); border-bottom: 1px solid var(--ms-rule); font-size: 13px; }
+.updatebar .txt { flex: 1; min-width: 240px; line-height: 1.45; }
+.updatebar .notes { flex-basis: 100%; color: var(--ms-muted); line-height: 1.45; }
+.updatebar .btn { height: 30px; padding: 0 10px; }
+.updatebar.important { background: var(--ms-tint); }
+.ask { width: min(520px, 100%); }
+.ask .body { padding: 20px; line-height: 1.5; font-size: 14px; }
 .pv-state { padding: 40px; max-width: 560px; display: flex; flex-direction: column; gap: 12px; }
 .pv-state .big { font: 800 24px/1.2 var(--font-heading); }
 .progress { height: 4px; background: var(--ms-rule); }

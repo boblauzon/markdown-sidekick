@@ -96,6 +96,7 @@ def run() -> None:
             threading.Timer(0.3, api._probe_add, args=(files,)).start()
 
     window.events.loaded += on_loaded
+    window.events.closing += api._on_closing  # a downloaded update installs as the window closes
     # The frozen build copies the icon beside the page; a source checkout
     # has it in assets/.
     icons = [_STATIC / "MarkdownSidekick.ico", Path(__file__).resolve().parents[3] / "assets" / "MarkdownSidekick.ico"]

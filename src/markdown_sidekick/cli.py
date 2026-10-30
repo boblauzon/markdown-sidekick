@@ -116,7 +116,33 @@ def _build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--sessions", type=int, default=1, help="how many of the newest debug sessions to include (default 1)")
     diag.add_argument("--report", type=Path, default=None, help="also write a shareable .zip (digest + logs + settings) to this path")
     diag.add_argument("--no-snapshots", action="store_true", help="leave the Markdown snapshots (document text) out of the --report zip")
+    upd = sub.add_parser(
+        "update",
+        help="check GitHub for a newer version (exit 0: up to date, 10: one is available, 1: couldn't check)",
+    )
+    upd.add_argument("--check", action="store_true", help="only check (the default; installing is done from the app)")
     return parser
+
+
+def _update_check() -> int:
+    """Ask GitHub for the latest version, once. The CLI never checks on its
+    own; installing is the app's job (it can close and reopen itself)."""
+    from . import __version__, updates
+
+    try:
+        release = updates.check()
+    except updates.UpdateError as exc:
+        _print_incident(errors.report(exc.code, where="cli update", detail=str(exc)))
+        return 1
+    if release is None:
+        print(f"Markdown Sidekick {__version__} is the latest version.")
+        return 0
+    print(f"Markdown Sidekick {release.version} is available (you have {__version__})."
+          + (" It includes a privacy or security fix." if release.important else ""))
+    if release.notes:
+        print(release.notes)
+    print(f"Get it: {updates.RELEASES_URL}")
+    return 10
 
 
 def _print_capabilities() -> int:
@@ -434,6 +460,8 @@ def main(argv: list[str] | None = None) -> int:
             return _diagnostics(args)
         if args.command == "batch":
             return _batch(args)
+        if args.command == "update":
+            return _update_check()
         return _convert(args)
     except Exception as exc:  # a bug, not a bad input: code it and say where to look
         _print_incident(errors.report("MS-900", exc=exc, where=f"cli {args.command}"))

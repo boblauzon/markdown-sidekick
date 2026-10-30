@@ -8,9 +8,9 @@ This is the working list: what's being built, in order, and what waits on someth
 
 | # | Item | Source | Status |
 |---|---|---|---|
-| 1 | **New window polish.** Collapse repeated status-line notes; keep the notes when some files fail; show debug mode in the title; files removed or cleared while a batch runs are skipped, not converted. | verify findings 2026-10-29/30 | |
-| 2 | **Installer, phase 1.** Per-user installs only; running copies (including `--mcp`) are closed, not overwritten; a one-time move from an all-users install; uninstall asks about the user's data. Answers spec Q4 and Q6. | spec R1, R3–R5 | |
-| 3 | **Updates, phases 2–3.** Check for updates (manual and opt-in weekly), update information signed with an offline Ed25519 key, a notice in both windows, download and verify, install when the app closes, a failed install reported on next start, the 7xx error codes, the privacy wording, the release step, `cli update --check`, a separate update asset name, resumable downloads. | spec R6–R17, R20–R22 | |
+| 1 | **New window polish.** Collapse repeated status-line notes; keep the notes when some files fail; show debug mode in the title; files removed or cleared while a batch runs are skipped, not converted. | verify findings 2026-10-29/30 | Done (`b51a7b4`) |
+| 2 | **Installer, phase 1.** Per-user installs only; running copies (including `--mcp`) are closed, not overwritten; a one-time move from an all-users install; uninstall asks about the user's data. Answers spec Q4 and Q6. | spec R1, R3–R5 | Done (`2238df4`) |
+| 3 | **Updates, phases 2–3.** Check for updates (manual and opt-in weekly), update information signed with an offline Ed25519 key, a notice in both windows, download and verify, install when the app closes, a failed install reported on next start, the 7xx error codes, the privacy wording, the release step, `cli update --check`, a separate update asset name, resumable downloads. | spec R6–R17, R20–R22 | Done |
 | 4 | **Dependencies.** Pillow 12.3 → 13 (37 CVEs, reachable through every dropped image); fastmcp, certifi, filelock patch releases; `markitdown[all]` replaced by explicit extras so the online speech converter isn't installed at all. | assessment 2026-10-27, ADR-001 item 2 | |
 | 5 | **Frozen build and end to end.** Rebuild into `build-webui\`, frozen self-test, the new window from the exe, and the updater end to end with look-alike installers. | | |
 

@@ -19,7 +19,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import __app_name__, __version__, debuglog, errors, export
+from .. import __app_name__, __version__, debuglog, errors, export, updates
 from ..audio import MEDIA_EXTENSIONS
 from ..export import AI_TARGETS
 from ..guide import KOFI_URL, load_user_guide
@@ -49,7 +49,7 @@ _SETTING_KEYS = (
     "enable_ocr", "ocr_device", "pdf_layout", "enable_audio", "whisper_model", "mineru_endpoint",
     "default_output_dir", "clean_output", "rendered_preview", "export_front_matter", "page_anchors",
     "extract_images", "ollama_endpoint", "polish_model", "caption_model", "summary_model",
-    "debug_mode", "debug_snapshots", "theme",
+    "debug_mode", "debug_snapshots", "theme", "update_check",
 )
 _RECONVERT_KEYS = frozenset({
     "enable_ocr", "ocr_device", "pdf_layout", "enable_audio", "whisper_model", "mineru_endpoint",
@@ -197,6 +197,7 @@ class Api:
         self._saving = False  # a save is under way (from its dialog on)
         self._save_note = ""  # what the save is doing now, for the status line
         self.probe_path: str | None = None  # set by run() in probe mode
+        self._updates: updates.UpdateFlow | None = None  # created by _attach
 
     # -- wiring (called from run(), not the page) ----------------------------
     def _attach(self, window) -> None:
@@ -204,6 +205,10 @@ class Api:
         errors.add_listener(lambda incident: self._flash(f"⚠ {incident.title} ({incident.code}, ref {incident.ref})"))
         # markitdown takes seconds to import; do it while the window paints.
         threading.Thread(target=self._engine, daemon=True, name="engine-warmup").start()
+        self._updates = updates.UpdateFlow(self._settings, self._save_quietly,
+                                           on_change=lambda: self._push(force=True),
+                                           on_message=lambda text: self._flash(text, 8))
+        threading.Thread(target=self._start_updates, daemon=True, name="updates-start").start()
 
     def _engine(self):
         with self._engine_lock:
@@ -314,6 +319,7 @@ class Api:
                 "canSave": bool(done) and not self._saving,
                 # A fix button can turn OCR on, so the switch follows Python.
                 "ocr": self._settings.enable_ocr,
+                "update": self._updates.snapshot() if self._updates else None,
             }
 
     def _push(self, force: bool = False) -> None:
@@ -553,6 +559,7 @@ class Api:
             "targets": list(AI_TARGETS),
             "formats": [{"cat": c, "list": f} for c, f in _FORMATS],
             "probe": bool(self.probe_path),
+            "updateAsk": s.update_check == "ask" and not self.probe_path,
             **self._snapshot(),
         }
 
@@ -892,6 +899,49 @@ class Api:
     def kofi(self) -> None:
         self.open_url(KOFI_URL)
         self._flash("Thank you for supporting Markdown Sidekick!")
+
+    # -- updates (updates.py; the window only draws UpdateFlow's state) --------
+    def _start_updates(self) -> None:
+        incident = self._updates.start()  # an update that didn't take; the weekly check
+        if incident is not None:
+            self._flash(f"⚠ {incident.title} {incident.next_step} ({incident.code}, ref {incident.ref})", 12)
+
+    def _save_quietly(self) -> None:
+        try:
+            self._settings.save()
+        except Exception as exc:
+            self._flash(f"⚠ {errors.report('MS-502', exc=exc, where='settings save').title}", 5)
+
+    def update_choice(self, weekly: bool) -> None:
+        """The first-run question: check once a week, or never (manual only)."""
+        self._settings.update_check = "weekly" if weekly else "off"
+        self._save_quietly()
+        debuglog.event("ui.update_choice", weekly=bool(weekly), front_end="webui")
+        if weekly:
+            self._updates.check(manual=False)
+
+    def check_updates(self) -> None:
+        self._flash("Checking for updates…", 10)
+        self._updates.check(manual=True)
+
+    def update_download(self) -> None:
+        self._updates.download()
+
+    def update_skip(self) -> None:
+        self._updates.skip()
+
+    def update_restart(self) -> None:
+        """Install now: start the installer and close; it reopens the app."""
+        if self._updates.install():
+            self._window.destroy()
+
+    def update_page(self) -> None:
+        self.open_url(updates.RELEASES_URL)
+
+    def _on_closing(self) -> None:
+        """Closing the window installs a downloaded update (spec R12)."""
+        if self._updates is not None:
+            self._updates.install()
 
     def not_yet(self, what: str) -> None:
         self._flash(f"{what} isn't in the new window yet — the classic window still has it.", 4)

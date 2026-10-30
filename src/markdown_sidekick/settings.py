@@ -17,6 +17,7 @@ from .export import AI_TARGETS, STYLES
 
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
 THEMES = ("system", "light", "dark")
+UPDATE_CHECKS = ("ask", "weekly", "off")
 
 # The incident from the last load of an unreadable settings file (MS-501),
 # for the GUI to surface once at startup; None when the file was fine.
@@ -77,6 +78,12 @@ class Settings:
     debug_snapshots: bool = True
     # The new window's theme (THEMES); the classic window has one look.
     theme: str = "system"
+    # -- updates (updates.py) --------------------------------------------------
+    # "ask" until the first-run question is answered, then "weekly" or "off".
+    # Nothing is fetched unless the user chose "weekly" or clicks Check.
+    update_check: str = "ask"
+    update_last_check: str = ""  # ISO date of the last weekly check
+    update_skip_version: str = ""  # a release the user chose to skip
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -151,3 +158,7 @@ class Settings:
         self.debug_snapshots = bool(self.debug_snapshots)
         if self.theme not in THEMES:
             self.theme = "system"
+        if self.update_check not in UPDATE_CHECKS:
+            self.update_check = "ask"
+        self.update_last_check = str(self.update_last_check or "").strip()
+        self.update_skip_version = str(self.update_skip_version or "").strip()

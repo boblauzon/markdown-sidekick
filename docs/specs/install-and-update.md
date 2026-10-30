@@ -1,6 +1,6 @@
 # Spec: Install, update and uninstall
 
-**Status:** Phase 1 (R1–R5) built and tested 2026-10-30; phases 2–3 in progress · **Date:** 2026-10-29 · **Owner:** Rob · **Source:** brainstorm of 2026-10-29
+**Status:** Phases 1–3 built 2026-10-30 (R1–R17, R20–R22); P2 waits on code signing · **Date:** 2026-10-29 · **Owner:** Rob · **Source:** brainstorm of 2026-10-29
 
 ## Problem statement
 
@@ -262,11 +262,11 @@ There's no telemetry, so every measure is aggregate GitHub data or a test on Rob
 
 | # | Question | Who | Blocking? |
 |---|---|---|---|
-| Q1 | Can an *important* release be skipped permanently, or only dismissed until the next check? | Rob | Phase 2 |
-| Q2 | Which answer does the first-run question highlight, Yes or No? (No is the stricter privacy position; Yes makes fixes reach more people.) | Rob | Phase 2 |
-| Q3 | Where does the private signing key live, and how is it backed up? Should the app accept two public keys, so a key can be replaced? | Rob / engineering | Phase 2 |
+| Q1 | Can an *important* release be skipped permanently? **Default taken (confirm):** yes — Skip works the same, but the bar says it includes a privacy or security fix. | Rob | Done |
+| Q2 | Which first-run answer is highlighted? **Default taken (confirm):** the new window highlights neither; the classic window's Yes/No box defaults to No (privacy first). | Rob | Done |
+| Q3 | Where does the signing key live? **Done:** `%USERPROFILE%\.markdown-sidekick-release\` (not in the repo); `PUBLIC_KEYS` takes several keys for rotation; backup is Rob's (roadmap backlog); see `docs/release-signing.md`. | Rob / engineering | Done |
 | Q4 | Does Inno's Restart Manager close an `--mcp` process whose pipes Claude Desktop holds? **Answered 2026-10-30: yes.** A silent upgrade with `/CLOSEAPPLICATIONS` force-closed the window and an `--mcp` server with a live client (log: "Shutting down applications using our files. (forced)"); the client saw the connection drop, and the upgrade succeeded. The AI tool needs a restart to reconnect, which the interactive notice says. | Engineering | Done |
-| Q5 | Does the request's User-Agent include the app version? It helps GitHub-side debugging but tells GitHub which version is running. | Rob | Phase 2 |
+| Q5 | Does the User-Agent include the app version? **Default taken (confirm):** no — `MarkdownSidekick-updater` only, so GitHub can't tell versions apart. | Rob | Done |
 | Q6 | Can a standard user remove an all-users copy that a different admin account installed (R4)? **Answered: only with an administrator's credentials.** The old uninstaller asks Windows for permission itself; if that's declined, Setup says the copy is still installed and carries on, so the user ends with both copies, as with No. | Engineering | Done |
 | Q7 | Does 1.3.0 get Phase 1 before it's published? **Tested 2026-10-29** (look-alike installers built from the real script, per-user, in a scratch folder): upgrading 1.2.0 → 1.3.0 leaves all 164 files 1.3.0 dropped, including 13 packages with two versions side by side (markitdown 0.1.6 + 0.1.8, mcp 1.28.1 + 2.3.0 and others). The app *reads* them: the upgraded MCP server reports version 3.4.2 instead of 4.1.0. Nothing else broke: self-test 14/14, conversions byte-identical, all 8 MCP tools work. R2's one line fixes it: 0 leftover files, 14/14, and the right version. Uninstall already removes the leftovers. **The decision left:** fold R2 into 1.3.0 (an installer-only rebuild with the same app files), or ship it next. | Rob | Yes, for publishing 1.3.0 |
 

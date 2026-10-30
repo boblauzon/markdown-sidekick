@@ -512,6 +512,80 @@ def test_the_title_says_when_debug_mode_is_on():
         debuglog.disable()
 
 
+def _flow(api):
+    from markdown_sidekick import updates
+
+    api._updates = updates.UpdateFlow(api._settings, api._save_quietly, on_change=lambda: api._push(force=True),
+                                      on_message=lambda text: api._flash(text, 8))
+    return api._updates
+
+
+def _wait(pred, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while not pred():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.02)
+
+
+def test_the_first_run_question_and_its_answer(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    checked = []
+    monkeypatch.setattr(updates, "check", lambda *a, **k: checked.append(1))
+    _flow(api)
+    assert api.ready()["updateAsk"] is True
+    api.update_choice(False)
+    assert Settings.load().update_check == "off" and api.ready()["updateAsk"] is False
+    assert checked == []  # "Don't check" fetches nothing
+    api.update_choice(True)
+    _wait(lambda: checked)
+    assert Settings.load().update_check == "weekly"
+
+
+def test_an_update_is_offered_then_skipped(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    rel = updates.Release("9.9.9", "Faster OCR.", True, "u.exe", "https://example.invalid/u.exe", 1, "0" * 64)
+    monkeypatch.setattr(updates, "check", lambda *a, **k: rel)
+    flow = _flow(api)
+    api.check_updates()
+    _wait(lambda: flow.state == "available")
+    shown = api._snapshot()["update"]
+    assert shown["version"] == "9.9.9" and shown["important"] and shown["canUpdate"] is False  # not an installed copy
+    api.update_skip()
+    assert api._snapshot()["update"] is None and Settings.load().update_skip_version == "9.9.9"
+    flow.check(manual=False)  # the weekly check stays quiet about a skipped version
+    _wait(lambda: flow.state != "checking")
+    assert api._snapshot()["update"] is None
+
+
+def test_a_manual_check_says_up_to_date_or_why_not(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    monkeypatch.setattr(updates, "check", lambda *a, **k: None)
+    flow = _flow(api)
+    api.check_updates()
+    _wait(lambda: "latest version" in api._snapshot()["status"])
+
+    def offline(*a, **k):
+        raise updates.UpdateError("MS-701", "URLError")
+
+    monkeypatch.setattr(updates, "check", offline)
+    api.check_updates()
+    _wait(lambda: "MS-701" in api._snapshot()["status"])
+    assert flow.state == "idle"
+
+
+def test_closing_with_nothing_downloaded_installs_nothing(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    started = []
+    monkeypatch.setattr(updates, "start_install", lambda *a: started.append(a))
+    _flow(api)
+    api._on_closing()
+    assert started == []
+
+
 def test_help_has_the_guide_sections(api):
     titles = [s["title"] for s in api.help()]
     assert any("Error codes" in t for t in titles)

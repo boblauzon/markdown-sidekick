@@ -177,6 +177,11 @@ def _selftest() -> int:
 
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
 
+        # Updates verify a signature offline: the crypto must be in the build.
+        from markdown_sidekick import updates
+
+        report["checks"]["update_signature"] = updates.selftest()
+
         # The MCP server (and fastmcp) must be present so `--mcp` works.
         try:
             import markdown_sidekick.mcp_server  # noqa: F401
