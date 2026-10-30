@@ -75,9 +75,15 @@ available inside the app via the **❓ Help** button.
   and PDFs route to it for layout-aware Markdown, with automatic fallback to the
   built-in OCR / markitdown pipeline if it's unreachable
 - **AI-friendly export** (Settings → *AI-friendly export*):
-  - **YAML front matter** on saved files (title, author, source, date, token
-    and image counts; title/author come from the PDF itself when trustworthy)
-    — a plain one-line book/part header for Gemini Notebook
+  - **YAML front matter** on saved files (title, subtitle, authors, publisher,
+    date, language, ISBN/identifier, source, token and image counts). The title
+    comes from the book itself — an epub's package metadata, a PDF's document
+    info or title page — and `title_source` says which; a heading like
+    "Preface" is never taken for the title. A plain one-line book/part header
+    for Gemini Notebook
+  - **Verified saves**: every file is written atomically and read back before
+    it is reported as saved — a file antivirus quarantined (`MS-205`) or a
+    synced folder can't hand back (`MS-206`) is reported, never "Saved"
   - **Export bar** in the main window: choose *One Markdown file*, *Chapter
     files* (book folder with `index.md` + `manifest.json`), or **AI-sized
     sections** with an *Optimize for* picker (Claude / ChatGPT / Gemini /
@@ -98,7 +104,15 @@ available inside the app via the **❓ Help** button.
   Whisper pipeline (PyAV decodes the audio track); transcripts are grouped into
   timestamped paragraphs
 - **Headless CLI** — `markdown-sidekick-cli convert *.pdf --split-chapters
-  --quality` (or `MarkdownSidekick.exe --cli convert …`) for scripts and CI
+  --quality` (or `MarkdownSidekick-cli.exe convert …` from the standalone app)
+  for scripts, agents and CI
+- **Whole-library batches** — `batch D:\eBooks --out D:\eBooks-md --naming title`
+  (CLI) or `convert_batch` + `batch_status` (MCP): one run converts a folder
+  tree into a mirrored output folder, names files after the book's real title
+  without ever overwriting another file, writes `_manifest.json`/`.csv` with one
+  row per input (converted / skipped / failed + error code), converts one copy
+  per book when it's held as epub *and* pdf or in several folders, and re-runs
+  skip everything unchanged
 - **Optional local-LLM extras** (off by default, fully local): artifact
   **polish** pass with a size guardrail, vision-model **alt-text captions**
   for extracted figures, and a 2–3 sentence **document summary** written into
@@ -184,7 +198,7 @@ Manual equivalent:
 
 ```powershell
 py -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+.venv\Scripts\python.exe -m pip install -r requirements.txt -c constraints.txt
 ```
 
 ## Running
@@ -212,14 +226,34 @@ You can also run it as a module:
 .venv\Scripts\python.exe -m markdown_sidekick.cli capabilities
 ```
 
-(or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick.exe --cli convert …`
-from the standalone build). Flags: `--split-chapters`, `--ai-target Claude`
+(or `markdown-sidekick-cli` after `pip install`, or `MarkdownSidekick-cli.exe convert …`
+from the standalone build — a console program, so the terminal waits for it and gets its
+output and exit code; `MarkdownSidekick.exe --help` prints usage and never opens the
+window). Flags: `--split-chapters`, `--ai-target Claude`
 (AI-sized book folders — every part fits the platform's budget), `--quality`,
 `--anchors`, `--images` / `--no-images`, `--no-layout`, `--polish`, `--summarize`,
 `--no-clean`, `--no-front-matter`, `--json`, `--out DIR`, `--debug`. Failures print an
 error code (`MS-…`), the next step, and the reference of their error-log entry;
 `markdown-sidekick-cli diagnostics` summarises the logs (add `--report out.zip` for a
 shareable bundle).
+
+`batch` converts a whole library — every PDF/EPUB/Office/HTML file under the
+given folders — into `--out`, mirroring the folder structure:
+
+```powershell
+MarkdownSidekick-cli.exe batch D:\eBooks --out D:\eBooks-md --naming title
+```
+
+Flags: `--naming source|title|title_author`, `--style single|chapters|ai`
+(+ `--ai-target`), `--include GLOB` / `--exclude GLOB` (repeatable),
+`--no-skip-existing`, `--overwrite`, `--workers N`, `--images`, `--no-clean`,
+`--no-front-matter`, `--quiet`, `--no-dedupe`, `--prefer epub,pdf`, `--dry-run`.
+A book held more than once — epub and pdf, or the same file in two bundle folders —
+is converted once (epub preferred); the other copies get a `duplicate` row naming
+the kept one. Different editions and volumes are never merged. `--dry-run` shows the
+plan (what converts, what is skipped and why) without converting anything. It prints one JSON summary (totals, failures with
+error codes, low-quality outputs to review, manifest path) and exits 1 if any input
+failed.
 
 ## How to use
 
@@ -299,6 +333,10 @@ just plain markitdown. Tools:
 - `convert_url(url)` — downloads (http/https, 50 MB cap) and converts a web page,
   PDF, or image with the same local pipeline
 - `list_capabilities()` — reports which local engines are available
+- `convert_batch(inputs, output_root, naming, style, …)` → `batch_status(batch_id)`
+  / `cancel_batch(batch_id)` — library-scale conversion: starts at once, then poll;
+  the finished status is a compact summary (<4 KB) and the per-file detail is in
+  the manifest on disk
 
 **One-click setup:** in the app, open **⚙ Settings → 📋 Copy AI setup prompt**
 and paste it into Claude, Cursor, or any AI assistant — the prompt carries your

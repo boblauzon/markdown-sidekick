@@ -156,6 +156,13 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "enable_audio",
     ),
     ErrorSpec(
+        "MS-116",
+        "This file is online-only (OneDrive, Dropbox, iCloud…) and couldn't be downloaded.",
+        "Make sure the sync app is running and signed in, or mark the file "
+        "\"Always keep on this device\" in File Explorer, then convert it again.",
+        "retry",
+    ),
+    ErrorSpec(
         "MS-120",
         "The column-aware PDF reader failed, so the basic reader was used — "
         "columns and tables may be out of order.",
@@ -246,6 +253,22 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "A file being saved is open in another program.",
         "Close the program that has it open (often a Markdown editor), then save again.",
         "save_again",
+    ),
+    ErrorSpec(
+        "MS-205",
+        "Windows Security (or another antivirus) blocked a saved file, so it is missing.",
+        "Check your antivirus's protection history. If you trust the document (security "
+        "books often quote malware samples), add an exclusion for the output folder in "
+        "your antivirus yourself, then save again.",
+        "save_again",
+    ),
+    ErrorSpec(
+        "MS-206",
+        "A saved file couldn't be read back, so it may be missing or incomplete.",
+        "If the folder is synced (OneDrive, Dropbox), let syncing settle or choose a "
+        "folder that isn't synced, then save again. Antivirus can also remove a file "
+        "right after it is written.",
+        "choose_folder",
     ),
     ErrorSpec(
         "MS-299",
@@ -547,6 +570,10 @@ _CONVERSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), code)
     for pattern, code in (
         (r"password|encrypt|decrypt", "MS-101"),
+        # ERROR_CLOUD_FILE_* (WinError 358-404): the sync provider couldn't
+        # deliver a placeholder's contents. Before MS-102, whose "Permission
+        # denied" a cloud access-denied would otherwise match.
+        (r"WinError (?:3[5-9]\d|40[0-4])\b|cloud file|cloud operation|CloudFileUnavailable", "MS-116"),
         (
             r"WinError 32|being used by another process|Errno 13|Permission denied|"
             r"PermissionError",
@@ -597,8 +624,13 @@ def is_network_error(exc: BaseException | str) -> bool:
 
 def classify_os_error(exc: BaseException) -> str:
     """The saving code for an exception raised while writing files."""
+    ms_code = getattr(exc, "ms_code", "")  # export.SaveVerificationError
+    if ms_code:
+        return ms_code
     winerror = getattr(exc, "winerror", None)
     err = getattr(exc, "errno", None)
+    if winerror in (225, 226):  # ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED
+        return "MS-205"
     if winerror in (32, 33):  # sharing / lock violation: the file is open
         return "MS-204"
     if winerror in (39, 112) or err == errno.ENOSPC:

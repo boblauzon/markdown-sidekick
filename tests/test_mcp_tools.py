@@ -56,6 +56,20 @@ class TestConvertLocalFile:
         assert "Saved Markdown to" in out and "Quality" in out
         assert dest.exists()
 
+    def test_save_to_writes_the_books_own_title(self, tmp_path):
+        # The library run's top defect: every saved epub was titled after its
+        # filename because save_to never received the converter's metadata.
+        from test_library_trust import _GROKKING, make_epub
+
+        src = make_epub(tmp_path / "Grokking_Algorithms.epub", _GROKKING)
+        dest = tmp_path / "out" / "grokking.md"
+        out = _text(_call("convert_local_file", file_path=str(src), save_to=str(dest)))
+        assert "verified on disk" in out and "Title: Grokking Algorithms." in out
+        header = dest.read_text(encoding="utf-8").split("---")[1]
+        assert "title: Grokking Algorithms\n" in header
+        assert "title_source: opf" in header
+        assert "isbn:9781617292231" in header
+
     def test_missing_file(self):
         out = _text(_call("convert_local_file", file_path="Z:/nope/missing.pdf"))
         assert out.startswith("Error")
@@ -128,3 +142,56 @@ class TestCapabilities:
     def test_capabilities(self):
         data = json.loads(_text(_call("list_capabilities")))
         assert "image_ocr" in data
+
+
+class TestBatch:
+    """convert_batch starts and returns; batch_status reports until done."""
+
+    def _poll(self, batch_id: str, timeout: float = 180.0) -> dict:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = json.loads(_text(_call("batch_status", batch_id=batch_id)))
+            if status["state"] != "running":
+                return status
+            time.sleep(0.5)
+        raise AssertionError(f"batch {batch_id} still running after {timeout}s")
+
+    def test_start_then_poll_to_done(self, tmp_path):
+        from test_library_trust import _GROKKING, make_epub
+
+        lib = tmp_path / "lib"
+        (lib / "sub").mkdir(parents=True)
+        make_epub(lib / "sub" / "Grokking_Algorithms.epub", _GROKKING)
+        (lib / "page.html").write_text(
+            "<h1>Batch Page</h1>" + "".join(f"<p>Line {i} is distinct.</p>" for i in range(5)),
+            encoding="utf-8",
+        )
+        out = tmp_path / "out"
+        started = json.loads(_text(_call(
+            "convert_batch", inputs=[str(lib)], output_root=str(out), naming="title", workers=1,
+        )))
+        assert started["state"] == "running" and started["batch_id"]
+        status = self._poll(started["batch_id"])
+        assert status["state"] == "done", status
+        summary = status["summary"]
+        assert (summary["total"], summary["converted"], summary["failed"]) == (2, 2, 0)
+        assert (out / "sub" / "Grokking Algorithms.md").exists()
+        assert summary["manifest"].endswith("_manifest.json")
+        assert len(json.dumps(summary)) < 4096
+
+    def test_bad_inputs_are_reported_not_started(self, tmp_path):
+        missing = json.loads(_text(_call(
+            "convert_batch", inputs=["Z:/no/such/folder"], output_root=str(tmp_path / "o"),
+        )))
+        assert missing["state"] == "error" and "MS-103" in missing["error"]
+        (tmp_path / "lib").mkdir()
+        bad = json.loads(_text(_call(
+            "convert_batch", inputs=[str(tmp_path / "lib")], output_root=str(tmp_path / "o"), naming="nope",
+        )))
+        assert bad["state"] == "error" and "naming" in bad["error"]
+
+    def test_unknown_batch(self):
+        status = json.loads(_text(_call("batch_status", batch_id="nope")))
+        assert status["state"] == "unknown"
