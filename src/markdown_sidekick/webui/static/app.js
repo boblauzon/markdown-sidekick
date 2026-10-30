@@ -31,11 +31,15 @@ const S = {
   selId: null, view: 'rendered', clean: true, ocr: true, exportStyle: 'single', aiTarget: 'Claude',
   theme: 'system', preview: null, previewKey: '', hiddenWarn: new Set(), showTech: false,
   dialog: null, help: null, helpTab: 0, probe: false,
+  // Settings dialog: the values being edited, what Python sent with them,
+  // the open tab, the Detect line, detected models and a save error.
+  draft: null, setOpts: null, setTab: 'conversion', setMsg: '', models: [], setErr: '',
 };
 const sysDark = window.matchMedia('(prefers-color-scheme: dark)');
 
-function applyTheme() {
-  const dark = S.theme === 'dark' || (S.theme === 'system' && sysDark.matches);
+// The theme in use; Settings previews its draft choice until Save or Cancel.
+function applyTheme(pref = S.theme) {
+  const dark = pref === 'dark' || (pref === 'system' && sysDark.matches);
   document.documentElement.dataset.theme = dark ? 'dark' : 'light';
   const b = $('#themeBtn');
   b.innerHTML = icon(dark ? 'sun' : 'moon');
@@ -232,8 +236,131 @@ async function loadPreview() {
   if (S.probe && p.state === 'done') probe(p, t1 - t0, t1);
 }
 
+const SET_TABS = [['conversion', 'Conversion'], ['output', 'Output'], ['ai', 'Local AI'], ['appearance', 'Appearance'], ['diagnostics', 'Diagnostics']];
+
+// The Settings dialog's rows per tab (the Designer handoff's layout); keys
+// are Settings field names, sent back as they are to settings_save.
+function settingSections() {
+  const o = S.setOpts;
+  const sw = (label, key, desc) => ({ type: 'sw', label, key, desc });
+  const sel = (label, key, options, desc) => ({ type: 'sel', label, key, options, desc });
+  const inp = (label, key, placeholder, desc, btn, act, id) => ({ type: 'inp', label, key, placeholder, desc, btn, act, id });
+  const model = (label, key, desc) => ({ type: 'model', label, key, desc, placeholder: 'blank = off' });
+  const button = (label, desc, btn, act) => ({ type: 'btn', label, desc, btn, act });
+  return {
+    conversion: [
+      ['Engines', [
+        sw('OCR images & scanned PDFs', 'enable_ocr'),
+        sel('OCR device', 'ocr_device', ['auto', 'cpu', 'gpu'], 'auto = GPU (DirectML) when present — measured ~6x faster'),
+        sw('Column-aware PDF reading (recommended)', 'pdf_layout'),
+        sw('Transcribe audio files', 'enable_audio'),
+        sel('Whisper model', 'whisper_model', o.whisperModels)]],
+      ['High-fidelity (optional)', [inp('MinerU endpoint URL', 'mineru_endpoint', 'http://127.0.0.1:2364', 'e.g. http://127.0.0.1:2364  (blank = off)')]],
+    ],
+    output: [
+      ['Saving', [inp('Default output folder', 'default_output_dir', 'Beside the source file', 'Where Save Markdown… opens. Blank = beside the source file.', 'Browse…', 'browse')]],
+      ['Preview defaults', [sw('Clean output', 'clean_output'), sw('Rendered preview', 'rendered_preview')]],
+      ['AI-friendly export', [
+        sw('Front matter / source header on saved files', 'export_front_matter'),
+        sw('Page anchors (<!-- page N -->) in PDF conversions', 'page_anchors'),
+        sw('Extract PDF figures to images/ on save', 'extract_images')]],
+    ],
+    ai: [
+      [`${o.runtimes}… (optional — everything stays on this machine)`, [
+        inp('Endpoint', 'ollama_endpoint', 'auto-detect', S.setMsg, 'Detect', 'detect', 'detectMsg'),
+        model('Polish model', 'polish_model', 'Repairs residual artifacts.'),
+        model('Caption model', 'caption_model', 'Writes alt-text for extracted figures.'),
+        model('Summary model', 'summary_model', 'Adds a 2–3 sentence description to saved front matter.')]],
+      ['AI integration (MCP)', [button('Copy AI setup prompt', 'Paste it into Claude, Cursor, or any AI assistant to connect Markdown Sidekick as a converter tool.', 'Copy prompt', 'copyPrompt')]],
+    ],
+    appearance: [
+      ['Appearance', [{ type: 'seg', label: 'Theme', key: 'theme', opts: [['light', 'Light'], ['dark', 'Dark'], ['system', 'Follow Windows']] }]],
+    ],
+    diagnostics: [
+      ['Error log (always on)', [button('Every error is recorded automatically', `With its code and reference — in ${o.logDir}`, 'Open log folder', 'openLogs')]],
+      ['Debug mode', [
+        sw('Record a detailed trace of every conversion (timings, decisions)', 'debug_mode', 'Logs stay on this PC. Traces include file names and paths.'),
+        sw('Also keep each conversion’s raw and cleaned Markdown', 'debug_snapshots', 'The Markdown copies include document text.')]],
+      ['Report a problem', [button('Create diagnostic report', 'Zips the error log, recent debug traces, your settings and a readable summary — attach it to a bug report.', 'Create report…', 'report')]],
+    ],
+  };
+}
+
+function setRow(r) {
+  const v = S.draft[r.key];
+  let ctl = '';
+  if (r.type === 'sw') ctl = `<button class="switch" role="switch" data-set="${r.key}" aria-checked="${!!v}" aria-label="${esc(r.label)}"><span class="track"></span></button>`;
+  else if (r.type === 'sel') ctl = `<select class="input" data-key="${r.key}" aria-label="${esc(r.label)}">${r.options.map((op) => `<option ${op === v ? 'selected' : ''}>${esc(op)}</option>`).join('')}</select>`;
+  else if (r.type === 'inp' || r.type === 'model') ctl = `<input class="input" data-key="${r.key}" value="${esc(v)}" placeholder="${esc(r.placeholder || '')}"${r.type === 'model' ? ' list="aiModels"' : ''} spellcheck="false" aria-label="${esc(r.label)}">`;
+  else if (r.type === 'seg') ctl = `<div class="seg" role="group" aria-label="${esc(r.label)}">${r.opts.map(([val, l]) => `<button data-seg="${r.key}" data-val="${val}" aria-pressed="${v === val}">${esc(l)}</button>`).join('')}</div>`;
+  if (r.btn) ctl += `<button class="btn btn-secondary" data-act="${r.act}">${esc(r.btn)}</button>`;
+  const desc = r.id || r.desc ? `<div class="desc"${r.id ? ` id="${r.id}"` : ''}>${esc(r.desc || '')}</div>` : '';
+  return `<div class="set-row"><div><div class="lbl">${esc(r.label)}</div>${desc}</div><div class="ctl">${ctl}</div></div>`;
+}
+
+function settingsHtml() {
+  const secs = settingSections()[S.setTab] || [];
+  return `<div class="backdrop" data-act="closeDlg"><div class="dlg settings" role="dialog" aria-modal="true" aria-label="Settings">
+    <div class="dlg-head"><span class="t">Settings</span><button class="btn btn-icon" data-act="closeDlg" title="Esc">${icon('x', 16, 2.4)}</button></div>
+    <div class="tabs"><nav>${SET_TABS.map(([v, l]) => `<button data-settab="${v}" aria-selected="${v === S.setTab}">${l}</button>`).join('')}</nav>
+      <div class="pane">${secs.map(([title, rows]) => `<div class="label set-sec">${esc(title)}</div>${rows.map(setRow).join('')}`).join('')}</div></div>
+    <datalist id="aiModels">${S.models.map((m) => `<option value="${esc(m)}"></option>`).join('')}</datalist>
+    <div class="dlg-foot"><span class="msg" id="setErr" role="alert">${esc(S.setErr)}</span>
+      <button class="btn btn-secondary right" data-act="closeDlg">Cancel</button><button class="btn btn-primary" data-act="saveSettings">Save settings</button></div>
+  </div></div>`;
+}
+
+async function openSettings() {
+  const r = await api().settings_get();
+  if (!r) return; // files are converting: the status line says so
+  Object.assign(S, { dialog: 'settings', draft: { ...r.values }, setOpts: r, setMsg: '', setErr: '', models: [] });
+  drawDialog();
+  detectAI(true);
+}
+
+// Look for a local AI runtime. The quiet probe on open says nothing unless
+// one answers, and fills the endpoint only if it is still blank.
+async function detectAI(quiet) {
+  if (!quiet) setDetectMsg('Probing…');
+  const r = await api().detect_ai(S.draft.ollama_endpoint);
+  if (S.dialog !== 'settings') return;
+  if (quiet && r.status !== 'ok' && r.status !== 'empty') return;
+  if (r.status === 'ok') {
+    if (!S.draft.ollama_endpoint && r.endpoint) {
+      S.draft.ollama_endpoint = r.endpoint;
+      const box = document.querySelector('[data-key="ollama_endpoint"]');
+      if (box) box.value = r.endpoint;
+    }
+    S.models = r.models;
+    const list = $('#aiModels');
+    if (list) list.innerHTML = r.models.map((m) => `<option value="${esc(m)}"></option>`).join('');
+  }
+  setDetectMsg(r.message);
+}
+
+function setDetectMsg(text) {
+  S.setMsg = text;
+  const el = $('#detectMsg');
+  if (el) el.textContent = text;
+}
+
+async function saveSettings() {
+  const r = await api().settings_save(S.draft);
+  if (!r.ok) { S.setErr = r.message; $('#setErr').textContent = r.message; return; }
+  Object.assign(S, { clean: r.clean, view: r.rendered ? 'rendered' : 'raw', theme: r.theme });
+  closeDialog();
+  loadPreview();
+}
+
+function closeDialog() {
+  Object.assign(S, { dialog: null, draft: null });
+  drawDialog();
+  applyTheme(); // undo a theme previewed but not saved
+}
+
 function drawDialog() {
   const root = $('#dialog');
+  if (S.dialog === 'settings' && S.draft) { root.innerHTML = settingsHtml(); return; }
   if (S.dialog !== 'help' || !S.help) { root.innerHTML = ''; return; }
   const tab = S.help[S.helpTab] || S.help[0];
   root.innerHTML = `<div class="backdrop" data-act="closeDlg"><div class="dlg help" role="dialog" aria-modal="true" aria-label="User guide">
@@ -271,15 +398,27 @@ async function act(name, el) {
     case 'tech': S.showTech = !S.showTech; return drawPreview(S.preview);
     case 'hideWarn': S.hiddenWarn.add(S.selId); return drawPreview(S.preview);
     case 'save': return api().save(); // Python opens the dialog and greys the button meanwhile
-    case 'settings': return api().not_yet('Settings');
+    case 'settings': return openSettings();
     case 'help': S.help = S.help || await api().help(); S.dialog = 'help'; return drawDialog();
-    case 'closeDlg': S.dialog = null; return drawDialog();
+    case 'closeDlg': return closeDialog();
     case 'kofi': return api().kofi();
     case 'theme': {
       const dark = document.documentElement.dataset.theme === 'dark';
       S.theme = dark ? 'light' : 'dark';
-      return applyTheme();
+      applyTheme();
+      return api().set_option('theme', S.theme);
     }
+    // Settings dialog
+    case 'saveSettings': return saveSettings();
+    case 'detect': return detectAI(false);
+    case 'browse': {
+      const dir = await api().browse_folder();
+      if (dir && S.draft) { S.draft.default_output_dir = dir; document.querySelector('[data-key="default_output_dir"]').value = dir; }
+      return;
+    }
+    case 'copyPrompt': return api().copy_ai_prompt();
+    case 'report': return api().create_report();
+    case 'openLogs': return api().fix('open_logs');
   }
 }
 
@@ -289,6 +428,21 @@ document.addEventListener('click', (e) => {
   if (link) { e.preventDefault(); return api().open_url(link.getAttribute('href')); }
   const tab = t.closest('[data-tab]');
   if (tab) { S.helpTab = Number(tab.dataset.tab); drawDialog(); return; }
+  const setTab = t.closest('[data-settab]');
+  if (setTab) { S.setTab = setTab.dataset.settab; drawDialog(); return; }
+  const sw = t.closest('[data-set]');
+  if (sw && S.draft) {
+    S.draft[sw.dataset.set] = !S.draft[sw.dataset.set];
+    sw.setAttribute('aria-checked', String(S.draft[sw.dataset.set]));
+    return;
+  }
+  const seg = t.closest('[data-seg]');
+  if (seg && S.draft) {
+    S.draft[seg.dataset.seg] = seg.dataset.val;
+    seg.parentElement.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === seg)));
+    if (seg.dataset.seg === 'theme') applyTheme(seg.dataset.val);
+    return;
+  }
   const a = t.closest('[data-act]');
   if (a) {
     // The backdrop closes only when the click lands on it, not the dialog.
@@ -318,10 +472,16 @@ document.addEventListener('auxclick', (e) => {
 document.addEventListener('change', (e) => {
   if (e.target.id === 'target') { S.aiTarget = e.target.value; api().set_option('aiTarget', S.aiTarget); }
 });
+// Settings text boxes and pickers write straight into the draft.
+document.addEventListener('input', (e) => {
+  const key = e.target.dataset?.key;
+  if (key && S.draft) S.draft[key] = e.target.value;
+});
 document.addEventListener('keydown', (e) => {
   const k = e.key.toLowerCase();
   const inList = !!document.activeElement.closest?.('#filelist');
-  if (e.key === 'Escape' && S.dialog) { S.dialog = null; drawDialog(); return; }
+  if (e.key === 'Escape' && S.dialog) { closeDialog(); return; }
+  if (e.ctrlKey && (k === 'o' || k === 's') && S.dialog) { e.preventDefault(); return; } // not behind a dialog
   if (e.ctrlKey && k === 'o') { e.preventDefault(); act('add'); }
   else if (e.ctrlKey && !e.shiftKey && k === 's') { e.preventDefault(); if (S.canSave) act('save'); }
   else if (e.ctrlKey && e.shiftKey && k === 'c') { e.preventDefault(); act('copy'); }
@@ -343,7 +503,7 @@ sysDark.addEventListener('change', applyTheme);
 
 window.addEventListener('pywebviewready', async () => {
   const boot = await api().ready();
-  Object.assign(S, { boot, clean: boot.clean, view: boot.rendered ? 'rendered' : 'raw', exportStyle: boot.exportStyle, aiTarget: boot.aiTarget, probe: boot.probe });
+  Object.assign(S, { boot, clean: boot.clean, view: boot.rendered ? 'rendered' : 'raw', exportStyle: boot.exportStyle, aiTarget: boot.aiTarget, theme: boot.theme, probe: boot.probe });
   $('#helpBtn').innerHTML = `${icon('help')}Help`;
   $('#helpBtn').dataset.act = 'help';
   $('#settingsBtn').innerHTML = `${icon('sliders')}Settings`;

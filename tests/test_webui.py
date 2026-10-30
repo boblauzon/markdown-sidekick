@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -292,6 +293,124 @@ def test_a_failed_save_names_the_code_and_next_step(saving, tmp_path, monkeypatc
 def test_nothing_to_save_says_so(saving):
     saving.save()
     assert not saving._window.dialogs and "Nothing to save yet" in saving._snapshot()["status"]
+
+
+def test_settings_dialog_gets_every_field_it_edits(api):
+    got = api.settings_get()
+    assert set(got["values"]) == set(bridge._SETTING_KEYS)
+    assert got["whisperModels"] and got["logDir"] and got["runtimes"]
+
+
+def test_settings_wait_for_a_running_conversion(api):
+    api._busy = True
+    assert api.settings_get() is None
+    assert "Finish the current conversion" in api._snapshot()["status"]
+    res = api.settings_save({"theme": "dark"})
+    assert res["ok"] is False and "your changes are still here" in res["message"]
+    assert api._settings.theme == "system"
+
+
+def test_settings_save_validates_persists_and_reaches_the_engine(api):
+    class Engine:
+        pass
+
+    api._engine_obj = Engine()
+    res = api.settings_save({"whisper_model": "huge", "ocr_device": "tpu", "theme": "dark", "pdf_layout": False,
+                             "extract_images": False, "export_style": "ai", "not_a_setting": 1})
+    assert res == {"ok": True, "clean": True, "rendered": True, "theme": "dark"}
+    saved = Settings.load()
+    assert saved.whisper_model == "base" and saved.ocr_device == "auto"  # junk became the default
+    assert saved.theme == "dark" and saved.pdf_layout is False
+    assert saved.export_style == "single"  # the export bar's, not the dialog's
+    assert api._engine_obj.pdf_layout is False and api._engine_obj.figure_markers is False
+
+
+def test_a_failed_settings_save_keeps_nothing(api, monkeypatch):
+    def denied(self):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Settings, "save", denied)
+    res = api.settings_save({"theme": "dark"})
+    assert res["ok"] is False and "MS-502" in res["message"]
+    assert api._settings.theme == "system"
+
+
+def test_reconvert_is_offered_only_when_results_would_change(api, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(api, [src])
+    api._window.confirm = False
+    api.settings_save({"theme": "dark", "summary_model": "llama3.2", "clean_output": False})
+    assert api._window.prompts == []  # nothing a conversion produces changed
+    api.settings_save({"pdf_layout": False})
+    assert api._window.prompts == ["Re-convert the 1 loaded file(s) with the new settings?"]
+    monkeypatch.setattr(api, "_convert_pending", lambda: None)
+    api._window.confirm = True
+    api.settings_save({"pdf_layout": True})
+    assert next(iter(api._items.values())).result is None  # queued to convert again
+
+
+def test_debug_mode_follows_the_setting(api):
+    from markdown_sidekick import debuglog
+
+    api.settings_save({"debug_mode": True})
+    try:
+        assert debuglog.enabled()
+    finally:
+        api.settings_save({"debug_mode": False})
+    assert not debuglog.enabled()
+
+
+def test_detect_ai_says_what_it_found(api, monkeypatch):
+    from markdown_sidekick import polish
+
+    monkeypatch.setattr(polish, "detect_local_ai",
+                        lambda ep: ("ok", ["llama3.2", "llava"], "ollama", "http://localhost:11434"))
+    found = api.detect_ai("")
+    assert found["status"] == "ok" and found["models"] == ["llama3.2", "llava"]
+    assert found["endpoint"] == "http://localhost:11434" and "2 model(s)" in found["message"]
+    monkeypatch.setattr(polish, "detect_local_ai", lambda ep: ("unreachable", [], "", ""))
+    assert api.detect_ai("http://127.0.0.1:9")["message"] == "Nothing answered at that endpoint."
+    assert api.detect_ai("")["message"].startswith("No local AI found")
+
+
+def test_theme_is_remembered(api):
+    assert api.ready()["theme"] == "system"
+    assert api.set_option("theme", "dark") == {"ok": True}
+    assert api.set_option("theme", "purple") == {"ok": False}
+    assert Settings.load().theme == "dark"
+    junk = Settings(theme="purple")
+    junk.normalize()
+    assert junk.theme == "system"
+
+
+def test_copy_ai_prompt(api, monkeypatch):
+    copied = []
+    monkeypatch.setattr(bridge, "_set_clipboard", lambda text: copied.append(text) or True)
+    assert api.copy_ai_prompt() is True
+    assert "mcp" in copied[0].lower() and "AI setup prompt copied" in api._snapshot()["status"]
+
+
+def test_diagnostic_report(saving, tmp_path, monkeypatch):
+    from markdown_sidekick import diagnostics
+
+    made = []
+    monkeypatch.setattr(diagnostics, "build_report", lambda dest, include_snapshots=True: made.append(dest) or dest)
+    saving._window.picked = (str(tmp_path / "report.zip"),)
+    saving.create_report()
+    assert made == [tmp_path / "report.zip"] and "Diagnostic report saved" in saving._snapshot()["status"]
+    assert saving._window.prompts and not saving.opened  # asked, declined
+
+
+def test_dialogs_open_in_a_real_folder(saving, tmp_path):
+    src = tmp_path / "books" / "a.md"
+    src.parent.mkdir()
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src])
+    saving.save()  # cancelled: nothing picked
+    assert saving._window.dialogs[-1][1]["directory"] == str(src.parent)  # beside the source
+    saving.browse_folder()
+    assert saving._window.dialogs[-1][1]["directory"] == str(Path.home())
 
 
 def test_help_has_the_guide_sections(api):

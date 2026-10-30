@@ -16,6 +16,7 @@ from . import errors
 from .export import AI_TARGETS, STYLES
 
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
+THEMES = ("system", "light", "dark")
 
 # The incident from the last load of an unreadable settings file (MS-501),
 # for the GUI to surface once at startup; None when the file was fine.
@@ -74,6 +75,8 @@ class Settings:
     debug_mode: bool = False  # detailed session trace under logs/sessions
     # In debug mode, also keep each conversion's raw + cleaned Markdown.
     debug_snapshots: bool = True
+    # The new window's theme (THEMES); the classic window has one look.
+    theme: str = "system"
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -146,3 +149,5 @@ class Settings:
         self.summary_model = str(self.summary_model or "").strip()
         self.debug_mode = bool(self.debug_mode)
         self.debug_snapshots = bool(self.debug_snapshots)
+        if self.theme not in THEMES:
+            self.theme = "system"

@@ -272,3 +272,17 @@ svg { display: block; flex: none; }
 .tabs .pane { overflow: auto; padding: 28px 36px; }
 .tabs .pane h2.title { margin: 0 0 16px; font: 800 28px/1.15 var(--font-heading); letter-spacing: -.015em; }
 .tabs .pane .doc { padding: 0; max-width: 680px; }
+
+/* — settings — */
+.settings { width: min(860px, 100%); height: min(600px, 100%); }
+.settings .tabs { grid-template-columns: 200px minmax(0, 1fr); }
+.settings .tabs nav button { padding: 11px 20px; }
+.settings .tabs .pane { padding: 4px 24px 24px; }
+.set-sec { margin: 20px 0 2px; padding-bottom: 6px; border-bottom: 2px solid var(--color-divider); }
+.set-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 16px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--ms-rule); }
+.set-row .lbl { font-weight: 600; font-size: 14px; }
+.set-row .desc { font-size: 12px; color: var(--ms-muted); margin-top: 2px; line-height: 1.45; overflow-wrap: anywhere; }
+.set-row .ctl { display: flex; gap: 8px; align-items: center; }
+.set-row select.input { width: 190px; }
+.set-row input.input { width: 250px; }
+.settings .dlg-foot .msg { align-self: center; font-size: 13px; color: var(--ms-accent-text); }

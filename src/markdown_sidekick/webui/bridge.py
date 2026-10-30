@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import ctypes
 import json
+import os
 import re
 import threading
 import time
@@ -23,7 +24,7 @@ from ..audio import MEDIA_EXTENSIONS
 from ..export import AI_TARGETS
 from ..guide import KOFI_URL, load_user_guide
 from ..ocr import OCR_IMAGE_EXTENSIONS
-from ..settings import Settings
+from ..settings import THEMES, WHISPER_MODELS, Settings
 
 # Same cap as the Tk preview: the page renders at most this much of a
 # document; Copy and Save always use all of it.
@@ -41,6 +42,19 @@ _STYLES = (
     ("chapters", "Chapter files", "Each book becomes a folder of per-chapter files, index.md and manifest.json."),
     ("ai", "AI-sized sections", "Parts guaranteed to fit an AI's context window. Short chapters are packed together."),
 )
+# What the Settings dialog edits (the export bar owns export_style and
+# ai_target). A change to one of the second set changes what a conversion
+# produces, so files already converted are offered a re-convert.
+_SETTING_KEYS = (
+    "enable_ocr", "ocr_device", "pdf_layout", "enable_audio", "whisper_model", "mineru_endpoint",
+    "default_output_dir", "clean_output", "rendered_preview", "export_front_matter", "page_anchors",
+    "extract_images", "ollama_endpoint", "polish_model", "caption_model", "summary_model",
+    "debug_mode", "debug_snapshots", "theme",
+)
+_RECONVERT_KEYS = frozenset({
+    "enable_ocr", "ocr_device", "pdf_layout", "enable_audio", "whisper_model", "mineru_endpoint",
+    "page_anchors", "extract_images",
+})
 _FORMATS = (
     ("Documents", "PDF, DOCX, PPTX, XLSX, XLS, EPUB"),
     ("Web / data", "HTML, CSV, JSON, XML, TXT, MD"),
@@ -59,6 +73,17 @@ def _fmt_size(n: int) -> str:
 def _fmt_mmss(seconds: float) -> str:
     seconds = int(max(0, seconds))
     return f"{seconds // 60}:{seconds % 60:02d}"
+
+
+def _start_dir(*candidates) -> str:
+    """The folder a native dialog opens in: the first candidate that exists,
+    else the user's home. pywebview's own fallback is a drive-less %HOMEPATH%,
+    which opens the dialog in the app's working folder when that is on
+    another drive."""
+    for c in candidates:
+        if c and Path(c).is_dir():
+            return str(c)
+    return str(Path.home())
 
 
 def _kind(path: Path) -> str:
@@ -497,6 +522,7 @@ class Api:
             "rendered": s.rendered_preview,
             "exportStyle": s.export_style,
             "aiTarget": s.ai_target,
+            "theme": s.theme,
             "styles": [{"id": k, "label": label, "desc": desc} for k, label, desc in _STYLES],
             "targets": list(AI_TARGETS),
             "formats": [{"cat": c, "list": f} for c, f in _FORMATS],
@@ -513,6 +539,7 @@ class Api:
         with debuglog.ui_blocking("open dialog"):
             paths = self._window.create_file_dialog(
                 webview.FileDialog.OPEN,
+                directory=_start_dir(),
                 allow_multiple=True,
                 file_types=(f"Supported files ({patterns})", "All files (*.*)"),
             )
@@ -594,6 +621,8 @@ class Api:
             s.export_style = value
         elif key == "aiTarget" and value in AI_TARGETS:
             s.ai_target = value
+        elif key == "theme" and value in THEMES:
+            s.theme = value
         else:
             return {"ok": False}
         try:
@@ -628,12 +657,14 @@ class Api:
     def retry(self, item_id: str) -> None:
         self._retry_where((), also=item_id)
 
-    def _retry_where(self, codes: tuple[str, ...], also: str | None = None) -> None:
+    def _retry_where(self, codes: tuple[str, ...], also: str | None = None, every: bool = False) -> None:
+        """Convert again: the files whose error or warnings carry one of
+        ``codes``, the file ``also``, or (``every``) all converted files."""
         with self._lock:
             for item in self._items.values():
                 r = item.result
                 hit = r is not None and (
-                    (codes and r.error_code in codes) or any(w.code in codes for w in r.warnings)
+                    every or (codes and r.error_code in codes) or any(w.code in codes for w in r.warnings)
                 )
                 if hit or (item.id == also and r is not None):
                     item.result, item.progress, item.sub = None, 0.0, ""
@@ -716,18 +747,20 @@ class Api:
         style, target = s.export_style, s.ai_target
         single = len(done) == 1 and style == "single"
         debuglog.event("ui.action", action="save", files=len(done), style=style, target=target, front_end="webui")
+        # The default output folder, else beside the (first) source, as the CLI does.
+        start = _start_dir(s.default_output_dir, done[0][0].path.parent)
         try:
             self._push(force=True)  # the Save button greys out
             with debuglog.ui_blocking("save dialog"):
                 if single:
                     picked = self._window.create_file_dialog(
                         webview.FileDialog.SAVE,
-                        directory=s.default_output_dir,
+                        directory=start,
                         save_filename=f"{done[0][0].path.stem}.md",
                         file_types=("Markdown (*.md)", "All files (*.*)"),
                     )
                 else:
-                    picked = self._window.create_file_dialog(webview.FileDialog.FOLDER, directory=s.default_output_dir)
+                    picked = self._window.create_file_dialog(webview.FileDialog.FOLDER, directory=start)
             if picked:
                 self._save_to(Path(picked[0]), done, style, target, single)
         finally:
@@ -830,6 +863,145 @@ class Api:
 
     def not_yet(self, what: str) -> None:
         self._flash(f"{what} isn't in the new window yet — the classic window still has it.", 4)
+
+    # -- settings ------------------------------------------------------------
+    def settings_get(self) -> dict | None:
+        """What the Settings dialog edits, or None while files convert (the
+        classic window's rule: a save changes the engine under them)."""
+        from ..polish import known_runtime_names
+
+        with self._lock:
+            busy = self._busy
+        if busy:
+            self._flash("Finish the current conversion first, then open Settings.", 4)
+            return None
+        s = self._settings
+        return {
+            "values": {k: getattr(s, k) for k in _SETTING_KEYS},
+            "whisperModels": list(WHISPER_MODELS),
+            "logDir": str(debuglog.log_dir()),
+            "runtimes": known_runtime_names(),
+        }
+
+    def settings_save(self, values: dict) -> dict:
+        """Validate, save and apply the dialog's values. Nothing is kept
+        unless the file was written; the dialog stays open on a failure."""
+        with self._lock:
+            busy = self._busy
+        if busy:  # files dropped while the dialog was open
+            return {"ok": False, "message": "Finish the current conversion first — your changes are still here."}
+        s = self._settings
+        before = {k: getattr(s, k) for k in _SETTING_KEYS}
+        for key in _SETTING_KEYS:
+            if key in (values or {}):
+                setattr(s, key, values[key])
+        try:
+            s.save()  # normalize() turns junk into the default first
+        except Exception as exc:
+            for key, value in before.items():
+                setattr(s, key, value)
+            incident = errors.report("MS-502", exc=exc, where="settings save")
+            return {"ok": False, "message": f"{incident.title} {incident.next_step} ({incident.code})"}
+        changed = {k: [before[k], getattr(s, k)] for k in _SETTING_KEYS if before[k] != getattr(s, k)}
+        debuglog.event("ui.settings_saved", changed=changed, front_end="webui")
+        self._apply_settings()
+        self._apply_debug()
+        self._push(force=True)
+        with self._lock:
+            converted = sum(1 for i in self._items.values() if i.result is not None)
+        if converted and _RECONVERT_KEYS & changed.keys() and self._window.create_confirmation_dialog(
+            __app_name__, f"Re-convert the {converted} loaded file(s) with the new settings?"
+        ):
+            self._retry_where((), every=True)
+        return {"ok": True, "clean": s.clean_output, "rendered": s.rendered_preview, "theme": s.theme}
+
+    def _apply_settings(self) -> None:
+        """Push saved settings into the engine. One still being built (the
+        warm-up thread) reads them itself, hence the engine lock."""
+        s = self._settings
+        with self._engine_lock:
+            engine = self._engine_obj
+            if engine is None:
+                return
+            engine.enable_ocr, engine.ocr_device, engine.enable_audio = s.enable_ocr, s.ocr_device, s.enable_audio
+            engine.whisper_model, engine.mineru_endpoint = s.whisper_model, s.mineru_endpoint
+            engine.page_anchors, engine.pdf_layout = s.page_anchors, s.pdf_layout
+            engine.figure_markers = s.extract_images
+
+    def _apply_debug(self) -> None:
+        s = self._settings
+        if s.debug_mode:
+            if debuglog.enable("webui", snapshots=s.debug_snapshots) is None:
+                self._flash("⚠ Debug mode couldn't start: the log folder isn't writable.", 6)
+        elif debuglog.enabled() and not debuglog.debug_requested():
+            debuglog.disable()
+
+    def detect_ai(self, endpoint: str = "") -> dict:
+        """Look for a local AI runtime (the typed endpoint, else the
+        well-known ports) and list its models."""
+        from .. import polish
+
+        endpoint = str(endpoint or "").strip()
+        status, models, protocol, found = polish.detect_local_ai(endpoint)
+        name = polish.runtime_name(found, protocol) if found else ""
+        if status == "ok":
+            message = f"✓ {name} detected — {len(models)} model(s) available"
+        elif status == "empty":
+            hint = "try:  ollama pull llama3.2" if protocol == "ollama" else "load a model in the app, then Detect again"
+            message = f"{name} is running but has no models — {hint}"
+        elif endpoint:
+            message = "Nothing answered at that endpoint."
+        else:
+            message = f"No local AI found (checked the {polish.known_runtime_names()} ports)."
+        return {"status": status, "models": list(models), "endpoint": found or "", "message": message}
+
+    def browse_folder(self) -> str:
+        """A folder for Settings → Default output folder ("" = cancelled)."""
+        import webview
+
+        with debuglog.ui_blocking("folder dialog"):
+            picked = self._window.create_file_dialog(
+                webview.FileDialog.FOLDER, directory=_start_dir(self._settings.default_output_dir)
+            )
+        return picked[0] if picked else ""
+
+    def copy_ai_prompt(self) -> bool:
+        """Copy the prompt that connects this install to an AI assistant (MCP)."""
+        from ..guide import build_mcp_setup_prompt
+
+        if not _set_clipboard(build_mcp_setup_prompt()):
+            self._flash(f"⚠ {errors.report('MS-601', where='clipboard').title}", 5)
+            return False
+        self._flash("AI setup prompt copied — paste it into Claude, Cursor or any AI assistant.", 5)
+        return True
+
+    def create_report(self) -> None:
+        """Zip the error log, recent debug traces and settings for a bug report."""
+        import webview
+
+        from .. import diagnostics
+
+        with debuglog.ui_blocking("report dialog"):
+            picked = self._window.create_file_dialog(
+                webview.FileDialog.SAVE,
+                directory=_start_dir(),
+                save_filename=f"MarkdownSidekick-diagnostics-{time.strftime('%Y%m%d-%H%M')}.zip",
+                file_types=("Zip archive (*.zip)",),
+            )
+        if not picked:
+            return
+        self._flash("Creating the diagnostic report…", 60)
+        try:
+            report = diagnostics.build_report(Path(picked[0]), include_snapshots=self._settings.debug_snapshots)
+        except Exception as exc:
+            incident = errors.report("MS-603", exc=exc, where="diagnostic report", dest=picked[0])
+            self._flash(f"⚠ {incident.title} {incident.next_step} ({incident.code}, ref {incident.ref})", 10)
+            return
+        self._flash(f"Diagnostic report saved: {report}", 6)
+        if self._window.create_confirmation_dialog(
+            __app_name__, f"Diagnostic report saved:\n{report}\n\nOpen its folder?"
+        ):
+            os.startfile(Path(report).parent)  # noqa: S606 - the folder the user just chose
 
     # -- probe mode (spike measurements) -------------------------------------
     def _probe_note(self, key: str, value) -> None:
