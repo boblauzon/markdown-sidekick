@@ -374,16 +374,12 @@ def _write_outputs(
             notes.append(failure)
 
     out_dir = args.out if args.out is not None else path.parent
-    book = bool(args.split_chapters or args.ai_target)
+    style = "ai" if args.ai_target else "chapters" if args.split_chapters else "single"
+    dest = default_output_path(path, out_dir) if style == "single" else out_dir / path.stem
     from . import figures
 
     if want_images and path.suffix.lower() == ".pdf":
-        # Book folders keep images/ beside the parts; single files get a
-        # per-document subfolder so several conversions can share out_dir.
-        if book:
-            images_dir, rel_dir = out_dir / path.stem / "images", "images"
-        else:
-            images_dir, rel_dir = out_dir / "images" / path.stem, f"images/{path.stem}"
+        images_dir, rel_dir = export.figure_dirs(dest, style)
         try:
             figs = figures.extract_pdf_figures(path, images_dir)
         except Exception as exc:  # the Markdown is still worth saving
@@ -406,44 +402,18 @@ def _write_outputs(
             record["figures"] = len(figs)
     else:
         markdown = figures.strip_figure_markers(markdown)
-    if book:
-        res = export.export_book(
-            markdown,
-            out_dir / path.stem,
-            source=path.name,
-            engine=result.engine,
-            front_matter=not args.no_front_matter,
-            max_tokens=(
-                export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
-            ),
-            ai_sections=args.ai_target is not None,
-            summary=summary,
-            title=result.doc_title,
-            author=result.doc_author,
-            notebook=args.ai_target in export.NOTEBOOK_TARGETS,
-            title_source=result.title_source,
-            meta=result.doc_meta,
-        )
-        written = [str(p) for p in res.paths]
-        if res.index_path:
-            written.append(str(res.index_path))
-        if res.manifest_path:
-            written.append(str(res.manifest_path))
-    else:
-        out_path = default_output_path(path, out_dir)
-        export.export_single(
-            markdown,
-            out_path,
-            source=path.name,
-            engine=result.engine,
-            front_matter=not args.no_front_matter,
-            summary=summary,
-            title=result.doc_title,
-            author=result.doc_author,
-            title_source=result.title_source,
-            meta=result.doc_meta,
-        )
-        written = [str(out_path)]
+    res = export.save(
+        markdown,
+        dest,
+        source=path.name,
+        style=style,
+        ai_target=args.ai_target or "",
+        details=result.details,
+        front_matter=not args.no_front_matter,
+        summary=summary,
+        max_tokens=args.max_tokens,  # chapters only; --ai-target sets its own budget
+    )
+    written = [str(p) for p in res.files]
     record["written"] = written
 
     report = assess_markdown(markdown)

@@ -13,7 +13,7 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from . import errors
-from .export import AI_TARGETS
+from .export import AI_TARGETS, STYLES
 
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
 
@@ -134,7 +134,7 @@ class Settings:
         self.mineru_endpoint = str(self.mineru_endpoint or "").strip()
         self.default_output_dir = str(self.default_output_dir or "").strip()
         self.export_front_matter = bool(self.export_front_matter)
-        if self.export_style not in ("single", "chapters", "ai"):
+        if self.export_style not in STYLES:
             self.export_style = "single"
         if self.ai_target not in AI_TARGETS:
             self.ai_target = "Claude"

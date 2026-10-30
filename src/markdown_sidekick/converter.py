@@ -112,6 +112,18 @@ class ConversionResult:
     def title(self) -> str:
         return self.source.name
 
+    @property
+    def details(self) -> dict:
+        """The book's details as ``export.save`` takes them — plain data, so
+        a batch worker can return it and the MCP server can cache it."""
+        return {
+            "engine": self.engine,
+            "title": self.doc_title,
+            "author": self.doc_author,
+            "title_source": self.title_source,
+            "meta": dict(self.doc_meta),
+        }
+
 
 def _attach_metadata(result: ConversionResult) -> None:
     """Fill the result's title/author/metadata from the source file's own

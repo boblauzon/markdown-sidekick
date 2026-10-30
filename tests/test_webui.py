@@ -14,12 +14,23 @@ from markdown_sidekick.webui import bridge
 class FakeWindow:
     def __init__(self):
         self.scripts: list[str] = []
+        self.picked = None  # what the next file dialog returns (a tuple of paths, or None)
+        self.dialogs: list[tuple] = []
+        self.confirm = True
+        self.prompts: list[str] = []
+        self.on_dialog = lambda: None
 
     def run_js(self, script: str) -> None:
         self.scripts.append(script)
 
     def create_confirmation_dialog(self, title: str, message: str) -> bool:
-        return True
+        self.prompts.append(message)
+        return self.confirm
+
+    def create_file_dialog(self, dialog_type, **kwargs):
+        self.dialogs.append((dialog_type, kwargs))
+        self.on_dialog()
+        return self.picked
 
 
 @pytest.fixture
@@ -176,6 +187,111 @@ def test_without_webview2_the_new_window_says_so(monkeypatch):
         webui.run()
     assert stop.value.code == 1
     assert "MS-605" in shown[0] and "WebView2" in shown[0]
+
+
+@pytest.fixture
+def saving(api, monkeypatch):
+    """The api with Open-the-folder declined and startfile stubbed: a test
+    must never open Explorer."""
+    import os
+
+    opened = []
+    monkeypatch.setattr(os, "startfile", opened.append, raising=False)
+    api._window.confirm = False
+    api.opened = opened
+    return api
+
+
+def _convert_all(api, paths, timeout=60.0):
+    api._add([str(p) for p in paths])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with api._lock:
+            if not api._busy and all(i.result is not None and not i.preparing for i in api._items.values()):
+                return
+        time.sleep(0.05)
+    raise AssertionError("conversion did not finish")
+
+
+def test_save_one_file_through_a_save_dialog(saving, tmp_path):
+    import webview
+
+    src = tmp_path / "notes.md"
+    src.write_text("# Field Notes\n\nThe notes have a sentence of their own.\n", encoding="utf-8")
+    _convert_all(saving, [src])
+    dest = tmp_path / "out" / "Saved.md"
+    saving._window.picked = (str(dest),)
+    saving.save()
+    kind, kwargs = saving._window.dialogs[0]
+    assert kind == webview.FileDialog.SAVE and kwargs["save_filename"] == "notes.md"
+    text = dest.read_text(encoding="utf-8")
+    assert text.startswith("---\ntitle: Field Notes\n") and "source: notes.md" in text
+    assert saving._snapshot()["status"] == "Saved Saved.md." and not saving._window.prompts
+
+
+def test_saving_several_files_to_a_folder_never_collides(saving, tmp_path):
+    import webview
+
+    sources = []
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        src = tmp_path / folder / "notes.md"
+        src.write_text(f"# Notes {folder}\n\nFolder {folder} has its own sentence.\n", encoding="utf-8")
+        sources.append(src)
+    _convert_all(saving, sources)
+    out = tmp_path / "out"
+    saving._window.picked = (str(out),)
+    saving.save()
+    assert saving._window.dialogs[0][0] == webview.FileDialog.FOLDER
+    assert sorted(p.name for p in out.iterdir()) == ["notes-2.md", "notes.md"]
+    assert "title: Notes b" in (out / "notes-2.md").read_text(encoding="utf-8")
+    assert "Saved 2 file(s)" in saving._snapshot()["status"]
+    assert saving._window.prompts and not saving.opened  # asked, declined, nothing opened
+
+
+def test_chapter_style_saves_a_book_folder(saving, tmp_path):
+    src = tmp_path / "book.md"
+    src.write_text("".join(f"# Chapter {n}\n\nChapter {n} says something new.\n\n" for n in range(1, 4)),
+                   encoding="utf-8")
+    _convert_all(saving, [src])
+    saving.set_option("exportStyle", "chapters")
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    book = tmp_path / "out" / "book"
+    assert (book / "index.md").exists() and (book / "manifest.json").exists()
+    assert len(list(book.glob("0*.md"))) == 3
+
+
+def test_save_greys_out_while_its_dialog_is_open_and_cancel_writes_nothing(saving, tmp_path):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src])
+    seen = []
+    saving._window.on_dialog = lambda: seen.append(saving._snapshot()["canSave"])
+    saving.save()  # picked is None: the dialog was cancelled
+    assert seen == [False]
+    assert saving._snapshot()["canSave"] is True
+    assert [p.name for p in tmp_path.rglob("*.md")] == ["a.md"]
+
+
+def test_a_failed_save_names_the_code_and_next_step(saving, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src])
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(bridge.export, "save", denied)
+    saving._window.picked = (str(tmp_path / "out" / "a.md"),)
+    saving.save()
+    status = saving._snapshot()["status"]
+    assert "couldn't be saved (a.md)" in status and "MS-201" in status
+
+
+def test_nothing_to_save_says_so(saving):
+    saving.save()
+    assert not saving._window.dialogs and "Nothing to save yet" in saving._snapshot()["status"]
 
 
 def test_help_has_the_guide_sections(api):

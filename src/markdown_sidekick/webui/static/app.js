@@ -270,7 +270,7 @@ async function act(name, el) {
     case 'copyDetails': if (S.preview?.details) { const ok = await api().copy_text(S.preview.details); el.textContent = ok ? 'Copied ✓' : 'Clipboard busy'; } return;
     case 'tech': S.showTech = !S.showTech; return drawPreview(S.preview);
     case 'hideWarn': S.hiddenWarn.add(S.selId); return drawPreview(S.preview);
-    case 'save': return api().not_yet('Saving');
+    case 'save': return api().save(); // Python opens the dialog and greys the button meanwhile
     case 'settings': return api().not_yet('Settings');
     case 'help': S.help = S.help || await api().help(); S.dialog = 'help'; return drawDialog();
     case 'closeDlg': S.dialog = null; return drawDialog();

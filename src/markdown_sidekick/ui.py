@@ -20,7 +20,6 @@ from .converter import (
     SUPPORTED_EXTENSIONS,
     ConversionEngine,
     ConversionResult,
-    default_output_path,
 )
 from . import export as md_export
 from .errorview import NoticeBar, show_error_dialog
@@ -1542,23 +1541,17 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         result = self.files.get(path)
         try:
             with debuglog.file_context(path):
-                text = self._with_figures(
-                    path, text, dest_path.parent / "images" / dest_path.stem, f"images/{dest_path.stem}"
-                )
+                text = self._with_figures(path, text, *md_export.figure_dirs(dest_path, "single"))
                 summary = ""
                 if self.settings.export_front_matter:
                     summary = self._summarize_for_export(text, path.name, result)
-                md_export.export_single(
+                md_export.save(
                     text,
                     dest_path,
                     source=path.name,
-                    engine=result.engine if result else "",
+                    details=result.details if result else None,
                     front_matter=self.settings.export_front_matter,
                     summary=summary,
-                    title=result.doc_title if result else "",
-                    author=result.doc_author if result else "",
-                    title_source=result.title_source if result else "",
-                    meta=result.doc_meta if result else None,
                 )
         except Exception as exc:
             self._show_error(self._save_incident(exc, dest_path))
@@ -1674,15 +1667,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         out = Path(out_dir)
         style = self._export_style_key()
         target = self.target_var.get()
-        max_tokens = md_export.AI_TARGETS.get(target, md_export.DEFAULT_MAX_TOKENS)
-        notebook = style == "ai" and target in md_export.NOTEBOOK_TARGETS
         saved = 0
         used_names: set[str] = set()
         failed: list[tuple[Path, errors.Incident]] = []
         for path in converted:
             try:
                 with debuglog.file_context(path):
-                    saved += self._save_one(path, out, style, notebook, max_tokens, used_names)
+                    saved += self._save_one(path, out, style, target, used_names)
             except Exception as exc:  # one bad file must not lose the rest
                 failed.append((path, self._save_incident(exc, out / path.stem)))
         if failed:
@@ -1698,83 +1689,33 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ):
             self._open_path(out)
 
-    def _save_one(
-        self,
-        path: Path,
-        out: Path,
-        style: str,
-        notebook: bool,
-        max_tokens: int,
-        used_names: set[str],
-    ) -> int:
+    def _save_one(self, path: Path, out: Path, style: str, target: str, used_names: set[str]) -> int:
         """Write one source's output in a batch save; returns files written."""
-        split = style in ("chapters", "ai")
         text = self._export_text_for(path)
         if text is None:
             return 0
         result = self.files.get(path)
-        engine = result.engine if result else ""
-        title = result.doc_title if result else ""
-        author = result.doc_author if result else ""
-        meta_kw = {
-            "title_source": result.title_source if result else "",
-            "meta": result.doc_meta if result else None,
-        }
-        if split:
-            # Disambiguate same-stem sources so one book folder can never
-            # silently overwrite another's chapters/index/manifest.
-            folder = path.stem
-            if folder in used_names:
-                n = 2
-                while f"{path.stem}-{n}" in used_names:
-                    n += 1
-                folder = f"{path.stem}-{n}"
-            used_names.add(folder)
-            book_dir = out / folder
-            text = self._with_figures(path, text, book_dir / "images", "images")
-            # A book folder always has somewhere to put the summary (index +
-            # manifest), whether or not parts carry front matter.
-            summary = self._summarize_for_export(text, path.name, result)
-            res = md_export.export_book(
-                text,
-                book_dir,
-                source=path.name,
-                engine=engine,
-                front_matter=self.settings.export_front_matter,
-                max_tokens=max_tokens if style == "ai" else md_export.DEFAULT_MAX_TOKENS,
-                ai_sections=style == "ai",
-                summary=summary,
-                title=title,
-                author=author,
-                notebook=notebook,
-                **meta_kw,
-            )
-            return len(res.paths)
-        dest = default_output_path(path, out)
-        # Disambiguate same-stem files from different folders so we never
-        # silently overwrite one output with another.
-        if dest.name in used_names:
-            n = 2
-            while (candidate := out / f"{path.stem}-{n}.md").name in used_names:
-                n += 1
-            dest = candidate
-        used_names.add(dest.name)
-        text = self._with_figures(path, text, out / "images" / dest.stem, f"images/{dest.stem}")
+        # Same-stem sources from different folders get "-2", "-3"… so one
+        # can never silently overwrite another's file or book folder.
+        name = md_export.claim_name(path.stem, used_names)
+        dest = out / name if style != "single" else out / f"{name}.md"
+        text = self._with_figures(path, text, *md_export.figure_dirs(dest, style))
+        # A book folder always has somewhere to put the summary (index +
+        # manifest), whether or not parts carry front matter.
         summary = ""
-        if self.settings.export_front_matter:
+        if style != "single" or self.settings.export_front_matter:
             summary = self._summarize_for_export(text, path.name, result)
-        md_export.export_single(
+        res = md_export.save(
             text,
             dest,
             source=path.name,
-            engine=engine,
+            style=style,
+            ai_target=target,
+            details=result.details if result else None,
             front_matter=self.settings.export_front_matter,
             summary=summary,
-            title=title,
-            author=author,
-            **meta_kw,
         )
-        return 1
+        return len(res.paths)
 
     # -- errors ------------------------------------------------------------------
     def _error_handlers(self) -> dict:

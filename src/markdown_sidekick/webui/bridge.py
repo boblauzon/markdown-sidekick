@@ -18,7 +18,7 @@ import webbrowser
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .. import __app_name__, __version__, debuglog, errors
+from .. import __app_name__, __version__, debuglog, errors, export
 from ..audio import MEDIA_EXTENSIONS
 from ..export import AI_TARGETS
 from ..guide import KOFI_URL, load_user_guide
@@ -150,6 +150,8 @@ class Api:
         self._last_push = 0.0
         self._push_timer: threading.Timer | None = None
         self._seq = 0  # snapshot number: the page drops one older than it has
+        self._saving = False  # a save is under way (from its dialog on)
+        self._save_note = ""  # what the save is doing now, for the status line
         self.probe_path: str | None = None  # set by run() in probe mode
 
     # -- wiring (called from run(), not the page) ----------------------------
@@ -242,6 +244,8 @@ class Api:
             active = bool(pending) or cur is not None
             if self._toast and time.monotonic() < self._toast_until:
                 status = self._toast
+            elif self._save_note:
+                status = self._save_note
             elif active:
                 status = f"Converting… {len(items) - len(pending) + (1 if cur else 0)}/{len(items)}"
                 if cur is not None:
@@ -263,7 +267,7 @@ class Api:
                 "busy": active,
                 "status": status,
                 "overall": round(overall * 100, 1),
-                "canSave": bool(done),
+                "canSave": bool(done) and not self._saving,
                 # A fix button can turn OCR on, so the switch follows Python.
                 "ocr": self._settings.enable_ocr,
             }
@@ -692,6 +696,118 @@ class Api:
     def copy_text(self, text: str) -> bool:
         """Copy a short string the page already has (error details)."""
         return _set_clipboard(text)
+
+    def save(self) -> None:
+        """Save Markdown…, by the classic window's rules: one converted file
+        in the One file style gets a Save dialog, anything else a folder.
+        Every file goes through export.save, like every other front-end."""
+        import webview
+
+        with self._lock:
+            if self._saving:
+                return
+            done = [(i, i.result) for i in self._items.values() if i.result is not None and i.result.ok]
+            if done:
+                self._saving = True
+        if not done:
+            self._flash("Nothing to save yet — drop in a file and it converts automatically.", 4)
+            return
+        s = self._settings
+        style, target = s.export_style, s.ai_target
+        single = len(done) == 1 and style == "single"
+        debuglog.event("ui.action", action="save", files=len(done), style=style, target=target, front_end="webui")
+        try:
+            self._push(force=True)  # the Save button greys out
+            with debuglog.ui_blocking("save dialog"):
+                if single:
+                    picked = self._window.create_file_dialog(
+                        webview.FileDialog.SAVE,
+                        directory=s.default_output_dir,
+                        save_filename=f"{done[0][0].path.stem}.md",
+                        file_types=("Markdown (*.md)", "All files (*.*)"),
+                    )
+                else:
+                    picked = self._window.create_file_dialog(webview.FileDialog.FOLDER, directory=s.default_output_dir)
+            if picked:
+                self._save_to(Path(picked[0]), done, style, target, single)
+        finally:
+            with self._lock:
+                self._saving, self._save_note = False, ""
+            self._push(force=True)
+
+    def _save_to(self, picked: Path, done: list, style: str, target: str, single: bool) -> None:
+        saved, used, notes = 0, set(), []
+        failed: list[tuple[str, errors.Incident]] = []
+        for n, (item, result) in enumerate(done, start=1):
+            if single:
+                dest = picked
+            else:  # same-named sources from different folders never collide
+                name = export.claim_name(item.path.stem, used)
+                dest = picked / name if style != "single" else picked / f"{name}.md"
+            with self._lock:
+                self._save_note = f"Saving {n}/{len(done)}  —  {item.path.name}"
+            self._push(force=True)
+            try:
+                with debuglog.file_context(item.path):
+                    saved += self._save_one(item, result, dest, style, target, notes)
+            except Exception as exc:  # one bad file must not lose the rest
+                code = errors.classify_os_error(exc) if isinstance(exc, OSError) else "MS-299"
+                failed.append((item.path.name, errors.report(code, exc=exc, where="save", target=str(dest))))
+        if failed:
+            first = failed[0][1]
+            names = ", ".join(name for name, _ in failed[:5]) + (" …" if len(failed) > 5 else "")
+            self._flash(f"⚠ Saved {saved} file(s); {len(failed)} couldn't be saved ({names}): "
+                        f"{first.title} {first.next_step} ({first.code}, ref {first.ref})", 12)
+            return
+        tail = "".join(f"  ⚠ {note}" for note in notes)
+        if single:
+            self._flash(f"Saved {picked.name}.{tail}", 8 if notes else 3)
+            return
+        self._flash(f"Saved {saved} file(s) to {picked}.{tail}", 8 if notes else 4)
+        if self._window.create_confirmation_dialog(__app_name__, f"Saved {saved} file(s) to:\n{picked}\n\nOpen the folder?"):
+            import os
+
+            os.startfile(picked)  # noqa: S606 - the folder the user just chose
+
+    def _save_one(self, item: _Item, result, dest: Path, style: str, target: str, notes: list[str]) -> int:
+        """Write one source's output; returns the files written. Figures and
+        the summary are this front-end's part (ADR-002); a failure in either
+        is a note, never a lost save."""
+        from .. import figures
+
+        s = self._settings
+        text, _, _ = self._text_and_report(item, result, s.clean_output)
+        if s.extract_images and item.path.suffix.lower() == ".pdf":
+            images_dir, rel_dir = export.figure_dirs(dest, style)
+            try:
+                figs = figures.extract_pdf_figures(item.path, images_dir)
+            except Exception as exc:  # the Markdown is still worth saving
+                figs = []
+                incident = errors.report("MS-401", exc=exc, where="figures", file=str(item.path))
+                notes.append(f"{item.path.name}: {incident.title} ({incident.code})")
+            text = figures.insert_figure_links(text, figs, rel_dir)
+        else:
+            text = figures.strip_figure_markers(text)
+        summary = ""
+        # A book folder always has room for a summary (index + manifest).
+        if (style != "single" or s.export_front_matter) and s.ollama_endpoint and s.summary_model:
+            from .. import polish
+
+            with self._lock:
+                self._save_note += f" · summarizing with {s.summary_model}…"
+            self._push(force=True)
+            polish.take_last_failure()  # only this call's failure counts
+            try:
+                summary = polish.summarize_markdown(text, s.ollama_endpoint, s.summary_model,
+                                                    title=result.doc_title) or ""
+                failure = polish.take_last_failure()
+            except Exception as exc:
+                failure = errors.report("MS-399", exc=exc, where="summary", model=s.summary_model)
+            if not summary and failure is not None:
+                notes.append(f"No summary for {item.path.name}: {failure.title} ({failure.code})")
+        res = export.save(text, dest, source=item.path.name, style=style, ai_target=target,
+                          details=result.details, front_matter=s.export_front_matter, summary=summary)
+        return len(res.paths)
 
     def help(self) -> list[dict]:
         """The user guide, one entry per ``##`` section, rendered."""
