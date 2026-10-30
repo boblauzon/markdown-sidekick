@@ -63,7 +63,10 @@ window.app = {
     }
     drawMain();
     drawFooter();
-    $('#status').textContent = S.status;
+    const status = $('#status');
+    status.textContent = S.status.replace(/ {2}⚠ /g, '\n⚠ '); // each warning on its own line
+    status.classList.toggle('multi', status.textContent.includes('\n')); // else one line, no jumping
+    status.title = S.status;
     const sel = S.files.find((f) => f.id === S.selId);
     const changed = sel && before.get(sel.id) !== sel.status;
     if (!sel) drawPreview(null);

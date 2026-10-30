@@ -86,6 +86,25 @@ def _start_dir(*candidates) -> str:
     return str(Path.home())
 
 
+def _note_lines(notes: list) -> list[str]:
+    """One line per kind of problem — "No summary for 5 files: … (MS-301)" —
+    not the same sentence once per file. ``notes`` holds (prefix, file name,
+    incident) entries in the order they happened."""
+    groups: dict[tuple[str, str], list] = {}
+    for prefix, name, incident in notes:
+        groups.setdefault((prefix, incident.code), []).append((name, incident))
+    lines = []
+    for (prefix, code), hits in groups.items():
+        who = hits[0][0] if len(hits) == 1 else f"{len(hits)} files"
+        lines.append(f"{prefix}{who}: {hits[0][1].title} ({code})")
+    return lines
+
+
+def window_title() -> str:
+    """The window's title; it says so while debug mode records a trace."""
+    return f"{__app_name__}  ·  v{__version__}" + ("  ·  DEBUG MODE" if debuglog.enabled() else "")
+
+
 def _kind(path: Path) -> str:
     ext = path.suffix.lower()
     if ext == ".pdf":
@@ -377,15 +396,14 @@ class Api:
         by_path = {t.path: t for t in targets}
 
         def on_progress(index: int, total: int, result) -> None:
-            item = targets[index - 1]  # convert_many reports targets in order, 1-based
+            item = targets[index - 1]  # 1-based, in order
             with self._lock:
                 live = self._items.get(item.id) is item
                 if live:
                     item.result, item.progress, item.sub = result, 1.0, ""
                     item.evict()
                     item.preparing = bool(result.ok and result.markdown)
-                nxt = targets[index].id if index < len(targets) else None
-                self._current = nxt
+                self._current = None
             self._push(force=True)
             if not (live and result.ok and result.markdown):
                 return
@@ -428,7 +446,15 @@ class Api:
             engine = self._engine()
             with self._lock:
                 engine.enable_ocr = self._settings.enable_ocr
-            engine.convert_many([t.path for t in targets], on_progress=on_progress, on_subprogress=on_subprogress)
+            for index, item in enumerate(targets, start=1):
+                # A file removed (or cleared) while it waited is never converted.
+                # The one already converting finishes; its result is dropped.
+                with self._lock:
+                    if self._items.get(item.id) is not item:
+                        continue
+                    self._current = item.id
+                self._push(force=True)
+                on_progress(index, len(targets), engine.convert_file(item.path, on_subprogress=on_subprogress))
         except BaseException as exc:  # noqa: BLE001 - the batch must always end
             incident = errors.report("MS-902", exc=exc, where="conversion worker")
             from ..converter import ConversionResult
@@ -786,23 +812,23 @@ class Api:
             except Exception as exc:  # one bad file must not lose the rest
                 code = errors.classify_os_error(exc) if isinstance(exc, OSError) else "MS-299"
                 failed.append((item.path.name, errors.report(code, exc=exc, where="save", target=str(dest))))
+        with self._lock:  # done saving: "Open the folder?" may still be on screen
+            self._save_note = ""
+        tail = "".join(f"  ⚠ {line}" for line in _note_lines(notes))
         if failed:
             first = failed[0][1]
             names = ", ".join(name for name, _ in failed[:5]) + (" …" if len(failed) > 5 else "")
             self._flash(f"⚠ Saved {saved} file(s); {len(failed)} couldn't be saved ({names}): "
-                        f"{first.title} {first.next_step} ({first.code}, ref {first.ref})", 12)
+                        f"{first.title} {first.next_step} ({first.code}, ref {first.ref}){tail}", 12)
             return
-        tail = "".join(f"  ⚠ {note}" for note in notes)
         if single:
             self._flash(f"Saved {picked.name}.{tail}", 8 if notes else 3)
             return
         self._flash(f"Saved {saved} file(s) to {picked}.{tail}", 8 if notes else 4)
         if self._window.create_confirmation_dialog(__app_name__, f"Saved {saved} file(s) to:\n{picked}\n\nOpen the folder?"):
-            import os
-
             os.startfile(picked)  # noqa: S606 - the folder the user just chose
 
-    def _save_one(self, item: _Item, result, dest: Path, style: str, target: str, notes: list[str]) -> int:
+    def _save_one(self, item: _Item, result, dest: Path, style: str, target: str, notes: list) -> int:
         """Write one source's output; returns the files written. Figures and
         the summary are this front-end's part (ADR-002); a failure in either
         is a note, never a lost save."""
@@ -817,13 +843,19 @@ class Api:
             except Exception as exc:  # the Markdown is still worth saving
                 figs = []
                 incident = errors.report("MS-401", exc=exc, where="figures", file=str(item.path))
-                notes.append(f"{item.path.name}: {incident.title} ({incident.code})")
+                notes.append(("", item.path.name, incident))
             text = figures.insert_figure_links(text, figs, rel_dir)
         else:
             text = figures.strip_figure_markers(text)
         summary = ""
         # A book folder always has room for a summary (index + manifest).
-        if (style != "single" or s.export_front_matter) and s.ollama_endpoint and s.summary_model:
+        # A local AI that didn't answer for one file won't for the next: each
+        # try costs seconds, so the rest of this save goes without.
+        wanted = (style != "single" or s.export_front_matter) and s.ollama_endpoint and s.summary_model
+        unanswered = next((i for p, _, i in notes if p == "No summary for " and i.code == "MS-301"), None)
+        if wanted and unanswered is not None:
+            notes.append(("No summary for ", item.path.name, unanswered))
+        elif wanted:
             from .. import polish
 
             with self._lock:
@@ -837,7 +869,7 @@ class Api:
             except Exception as exc:
                 failure = errors.report("MS-399", exc=exc, where="summary", model=s.summary_model)
             if not summary and failure is not None:
-                notes.append(f"No summary for {item.path.name}: {failure.title} ({failure.code})")
+                notes.append(("No summary for ", item.path.name, failure))
         res = export.save(text, dest, source=item.path.name, style=style, ai_target=target,
                           details=result.details, front_matter=s.export_front_matter, summary=summary)
         return len(res.paths)
@@ -935,6 +967,8 @@ class Api:
                 self._flash("⚠ Debug mode couldn't start: the log folder isn't writable.", 6)
         elif debuglog.enabled() and not debuglog.debug_requested():
             debuglog.disable()
+        if self._window is not None:
+            self._window.set_title(window_title())
 
     def detect_ai(self, endpoint: str = "") -> dict:
         """Look for a local AI runtime (the typed endpoint, else the

@@ -16,7 +16,7 @@ import sys
 import threading
 from pathlib import Path
 
-from .. import __app_name__, __version__, debuglog, errors
+from .. import __app_name__, debuglog, errors
 
 _STATIC = Path(__file__).with_name("static")
 
@@ -67,7 +67,7 @@ def run() -> None:
     if winforms.renderer != "edgechromium":
         _cant_start(f"Microsoft Edge WebView2 Runtime (pywebview would use {winforms.renderer})")
 
-    from .bridge import Api
+    from .bridge import Api, window_title
 
     api = Api()
     if api._settings.debug_mode or debuglog.debug_requested():
@@ -75,7 +75,7 @@ def run() -> None:
     probe = os.environ.get("MARKDOWN_SIDEKICK_WEBUI_PROBE")
     api.probe_path = probe or None
     window = webview.create_window(
-        f"{__app_name__}  ·  v{__version__}",
+        window_title(),
         url=str(_STATIC / "index.html"),
         js_api=api,
         width=1180,

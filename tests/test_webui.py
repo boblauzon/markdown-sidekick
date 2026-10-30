@@ -28,6 +28,9 @@ class FakeWindow:
         self.prompts.append(message)
         return self.confirm
 
+    def set_title(self, title: str) -> None:
+        self.title = title
+
     def create_file_dialog(self, dialog_type, **kwargs):
         self.dialogs.append((dialog_type, kwargs))
         self.on_dialog()
@@ -411,6 +414,102 @@ def test_dialogs_open_in_a_real_folder(saving, tmp_path):
     assert saving._window.dialogs[-1][1]["directory"] == str(src.parent)  # beside the source
     saving.browse_folder()
     assert saving._window.dialogs[-1][1]["directory"] == str(Path.home())
+
+
+def test_the_same_problem_is_one_note_not_one_per_file():
+    from markdown_sidekick import errors
+
+    no_ai = errors.report("MS-301", where="test")
+    figs = errors.report("MS-401", where="test")
+    lines = bridge._note_lines([("No summary for ", "a.pdf", no_ai), ("", "a.pdf", figs),
+                                ("No summary for ", "b.pdf", no_ai), ("No summary for ", "c.pdf", no_ai)])
+    assert lines == [f"No summary for 3 files: {no_ai.title} (MS-301)", f"a.pdf: {figs.title} (MS-401)"]
+
+
+def test_a_partial_failure_keeps_the_other_notes(saving, tmp_path, monkeypatch):
+    from markdown_sidekick import errors, polish
+
+    sources = []
+    for name in ("a.md", "b.md"):
+        (tmp_path / name).write_text(f"# {name}\n\nIts own sentence about {name}.\n", encoding="utf-8")
+        sources.append(tmp_path / name)
+    _convert_all(saving, sources)
+    saving._settings.ollama_endpoint, saving._settings.summary_model = "http://127.0.0.1:9", "m"
+    no_ai = errors.report("MS-301", where="test")
+    monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: None)
+    monkeypatch.setattr(polish, "take_last_failure", lambda: no_ai)
+    real_save, calls = bridge.export.save, []
+
+    def first_fails(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(bridge.export, "save", first_fails)
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    status = saving._snapshot()["status"]
+    assert "1 couldn't be saved (a.md)" in status and "MS-201" in status
+    assert "No summary for 2 files" in status
+
+
+def test_a_local_ai_that_didnt_answer_is_asked_once_per_save(saving, tmp_path, monkeypatch):
+    from markdown_sidekick import errors, polish
+
+    sources = []
+    for name in ("a.md", "b.md", "c.md"):
+        (tmp_path / name).write_text(f"# {name}\n\nIts own sentence about {name}.\n", encoding="utf-8")
+        sources.append(tmp_path / name)
+    _convert_all(saving, sources)
+    saving._settings.ollama_endpoint, saving._settings.summary_model = "http://127.0.0.1:9", "m"
+    asked, no_ai = [], errors.report("MS-301", where="test")
+    monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: asked.append(1))
+    monkeypatch.setattr(polish, "take_last_failure", lambda: no_ai)
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    assert asked == [1]  # one try, not three
+    status = saving._snapshot()["status"]
+    assert "No summary for 3 files" in status and "Saving" not in status
+
+
+def test_files_removed_while_waiting_are_not_converted(api, tmp_path, monkeypatch):
+    from markdown_sidekick.converter import ConversionResult
+
+    class Engine:
+        enable_ocr = False
+
+        def __init__(self):
+            self.calls = []
+
+        def convert_file(self, path, on_subprogress=None):
+            self.calls.append(Path(path).name)
+            return ConversionResult(source=Path(path), markdown=f"# {Path(path).stem}\n\ntext\n")
+
+    engine = api._engine_obj = Engine()
+    monkeypatch.setattr(api, "_convert_pending", lambda: None)
+    paths = []
+    for name in ("a.md", "b.md", "c.md"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+        paths.append(tmp_path / name)
+    api._add([str(p) for p in paths])
+    targets = list(api._items.values())
+    api.remove(targets[1].id)  # removed while it waited
+    api._busy = True
+    api._worker(targets, False)
+    assert engine.calls == ["a.md", "c.md"]
+    assert targets[1].result is None and not api._busy
+
+
+def test_the_title_says_when_debug_mode_is_on():
+    from markdown_sidekick import debuglog
+
+    assert "DEBUG" not in bridge.window_title()
+    debuglog.enable("webui", snapshots=False)
+    try:
+        assert bridge.window_title().endswith("·  DEBUG MODE")
+    finally:
+        debuglog.disable()
 
 
 def test_help_has_the_guide_sections(api):
