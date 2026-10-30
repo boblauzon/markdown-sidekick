@@ -36,6 +36,8 @@ _PUSH_INTERVAL_S = 0.12
 # ms-settings:, …) could start a program: a middle-click asks WebView2 for a
 # new window, and pywebview hands that URL to Windows whatever it is.
 _WEB_LINK = re.compile(r"(?i)^https?://")
+# A whole-line HTML comment (page anchor, figure marker), as mdrender._COMMENT.
+_COMMENT_LINE = re.compile(r"^\s*<!--\s*(.*?)\s*-->\s*$")
 
 _STYLES = (
     ("single", "One file", "One .md per source file."),
@@ -98,6 +100,36 @@ def _note_lines(notes: list) -> list[str]:
         who = hits[0][0] if len(hits) == 1 else f"{len(hits)} files"
         lines.append(f"{prefix}{who}: {hits[0][1].title} ({code})")
     return lines
+
+
+def _comment_placeholders(state) -> None:
+    """markdown-it core rule, after block parsing and before inline: a
+    comment-only line in a paragraph renders as a muted ⟨figure 1.1⟩
+    placeholder, as in the classic window, not as escaped HTML text."""
+    from html import escape
+
+    from markdown_it.token import Token
+
+    toks, out, i = state.tokens, [], 0
+    while i < len(toks):
+        if toks[i].type != "paragraph_open" or "<!--" not in toks[i + 1].content:
+            out.append(toks[i])
+            i += 1
+            continue
+        open_, inline, close = toks[i:i + 3]
+        text: list[str] = []
+        for line in inline.content.split("\n") + [None]:
+            m = _COMMENT_LINE.match(line) if line is not None else None
+            if (m or line is None) and text:
+                out += [open_.copy(), inline.copy(content="\n".join(text)), close.copy()]
+                text = []
+            if m:
+                out.append(Token("html_block", "", 0, block=True,
+                                 content=f'<p class="mdc">⟨{escape(m.group(1))}⟩</p>\n'))
+            elif line is not None:
+                text.append(line)
+        i += 3
+    state.tokens[:] = out
 
 
 def window_title() -> str:
@@ -242,6 +274,7 @@ class Api:
                 return renderer.renderToken(tokens, idx, options, env)
 
             md.add_render_rule("link_open", link_open)
+            md.core.ruler.after("block", "comment_lines", _comment_placeholders)
             self._md = md
         return self._md
 

@@ -80,6 +80,19 @@ def test_preview_renders_and_never_runs_document_html(api, tmp_path):
     assert [s["label"] for s in page["stats"]] == ["Quality", "Tokens", "Headings", "Cleanup"]
 
 
+def test_page_anchors_and_figure_markers_are_placeholders(api):
+    # As in the classic window: a muted ⟨…⟩ line, not escaped "<!-- … -->" text.
+    html = api._renderer().render(
+        "<!-- figure 1.1 -->\n\nDesign Elements\n\n<!-- page 2 -->\nText that follows **at once**.\n\n"
+        "Mid <!-- not alone --> line\n\n<!-- <b>x</b> -->\n\n```\n<!-- page 9 -->\n```\n"
+    )
+    assert '<p class="mdc">⟨figure 1.1⟩</p>' in html and '<p class="mdc">⟨page 2⟩</p>' in html
+    assert "<p>Text that follows <strong>at once</strong>.</p>" in html
+    assert "<p>Mid &lt;!-- not alone --&gt; line</p>" in html  # only whole lines
+    assert "⟨&lt;b&gt;x&lt;/b&gt;⟩" in html and "<b>" not in html  # still never markup
+    assert "<code>&lt;!-- page 9 --&gt;\n</code>" in html  # fenced code is left alone
+
+
 def test_preview_is_capped_but_says_so(api, tmp_path):
     src = tmp_path / "big.md"
     para = "word " * 60

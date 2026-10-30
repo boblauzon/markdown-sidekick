@@ -212,6 +212,7 @@ svg { display: block; flex: none; }
 .doc h3, .doc h4, .doc h5, .doc h6 { margin: 22px 0 10px; font: 800 17px/1.25 var(--font-heading); }
 .doc p, .doc li { font-size: 15px; line-height: 1.65; text-wrap: pretty; }
 .doc p { margin: 0 0 14px; }
+.doc p.mdc { font: 12px var(--font-mono); color: var(--ms-muted); } /* page anchor / figure marker */
 .doc ul, .doc ol { margin: 0 0 16px; padding-left: 22px; }
 .doc li { margin-bottom: 4px; }
 .doc a { color: var(--ms-accent-text); text-underline-offset: 3px; }
