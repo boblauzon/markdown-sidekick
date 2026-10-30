@@ -29,8 +29,18 @@ Then `node .claude/skills/verify/cdp.mjs 9333 <cmd>` (Node 22+, no deps):
 - Useful selectors: `.dropzone` / `.dropmore`, `.row`, `[data-view=raw]`,
   `[data-act=clean|copy|copyDetails|tech|help|theme]`, `#ocrSw`, `[data-style=ai]`,
   `[data-fix=retry|enable_ocr]`, `[data-tab]`.
-- Not drivable this way: native dialogs (Add files…, Clear all's confirmation).
-  Close a window with WM_CLOSE to its own `MainWindowHandle` (PowerShell
+- Native dialogs (Save As, folder picker, Add files…, confirmations) aren't in the
+  page: answer them with
+  `powershell -NoProfile -ExecutionPolicy Bypass -File .claude/skills/verify/dialog.ps1 [-Path <abs>] [-Button n] [-Title <part>] [-TimeoutS s]`
+  right after the click that opens one (`-ExecutionPolicy Bypass`: Windows'
+  default policy refuses to run a script file). It waits up to `-TimeoutS`
+  (default 20) for a visible `#32770` of the Markdown Sidekick window's process,
+  types `-Path` into the file-name box (it prints what the box then holds), and
+  clicks button `n` (1 Save/Open/Select Folder/OK, 2 Cancel, 6 Yes, 7 No).
+  With several dialogs open it takes the one accepting input (a nested "replace?"
+  prompt, not the Save As behind it), or the one whose title contains `-Title`;
+  exit 2 means it couldn't tell. Works for the classic Tk window's dialogs too.
+- Close a window with WM_CLOSE to its own `MainWindowHandle` (PowerShell
   `PostMessage(h, 0x10, 0, 0)`), not by killing it — that exercises the real close path.
 - Copy writes the user's real clipboard (`Get-Clipboard -Raw` to read it back).
 - The frozen exe takes the same env vars: `build-webui/dist/MarkdownSidekick/MarkdownSidekick.exe --new-ui`.
