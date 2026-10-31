@@ -6,6 +6,7 @@ how conversion actually happens.
 
 from __future__ import annotations
 
+import codecs
 import os
 import re
 import time
@@ -21,7 +22,7 @@ except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
         "virtual environment or run: pip install \"markitdown[all]\""
     ) from exc
 
-from . import audio, debuglog, errors, mineru, ocr, pdflayout
+from . import audio, debuglog, errors, mineru, ocr, pdflayout, quality
 
 
 # File extensions markitdown can meaningfully handle. Used to build the file
@@ -68,6 +69,38 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
 # empty documents (an untouched .docx is ~10 KB of zip scaffolding) pass through
 # as empty output rather than being declared failures.
 _EMPTY_OUTPUT_MIN_BYTES = 16_384
+
+# How much of a file to read when deciding whether it is text at all.
+_SNIFF_BYTES = 1 << 20
+# Containers a markitdown converter really opens: PDF, zip (Office, EPUB), OLE
+# (legacy Office, Outlook).
+_CONTAINER_MAGIC = (b"%PDF", b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
+
+
+def _is_raw_bytes(source: Path) -> bool:
+    """Is this file neither valid text nor a format a converter could open?
+
+    Noisy output is only a failed conversion if it came from decoding raw
+    bytes. A real PDF with a garbled text layer, or a UTF-8 file full of
+    symbols, converted faithfully, so those keep the quality warning. So does
+    HTML: its parser decodes anything, and a legacy-encoded page comes out
+    partly garbled rather than lost.
+    """
+    if source.suffix.lower() in (".html", ".htm"):
+        return False
+    try:
+        with open(source, "rb") as fh:
+            head = fh.read(_SNIFF_BYTES)
+    except OSError:
+        return False
+    if head.startswith(_CONTAINER_MAGIC):
+        return False
+    try:
+        # Incremental: the sniff window may end inside a multi-byte character.
+        codecs.getincrementaldecoder("utf-8")().decode(head)
+    except UnicodeDecodeError:
+        return True
+    return False
 
 
 @dataclass
@@ -376,14 +409,19 @@ class ConversionEngine:
                 text = result.text_content or ""
                 sp["chars"] = len(text)
             # markitdown quirk: unrecognized binary content (a corrupt docx,
-            # an mp3 with broken magic bytes) can "convert" without error to
-            # the literal string "None" (str(None) leaking from a converter),
-            # a "| None |" table, or nothing at all. A non-trivial source
+            # an mp3 with broken magic bytes) can "convert" without error.
+            # Through 0.1.7 that gives the literal string "None" (str(None)
+            # leaking from a converter), a "| None |" table, or nothing at all;
+            # from 0.1.8 a lossy UTF-8 decode of the raw bytes, i.e. whichever
+            # stray byte pairs happen to be valid. A non-trivial source
             # yielding no real text is a failure, not a success.
             has_text = any(
                 m.group(0) != "None" for m in re.finditer(r"\w+", text)
             )
-            if not has_text:
+            garbled = (
+                has_text and quality.looks_like_binary_noise(text) and _is_raw_bytes(source)
+            )
+            if not has_text or garbled:
                 try:
                     src_size = source.stat().st_size
                 except OSError:
@@ -398,7 +436,11 @@ class ConversionEngine:
                     )
                 # A scan or photo with OCR off "converts" to nothing at any
                 # size — and the fix is one click away, so say so.
-                if not self.enable_ocr and (ext == ".pdf" or ext in ocr.OCR_IMAGE_EXTENSIONS):
+                if (
+                    not has_text
+                    and not self.enable_ocr
+                    and (ext == ".pdf" or ext in ocr.OCR_IMAGE_EXTENSIONS)
+                ):
                     return ConversionResult(
                         source=source,
                         error="EmptyOutputError: no text layer, and OCR is turned off",

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import random
+
+import pytest
 
 from markdown_sidekick.export import (
     build_front_matter,
@@ -490,6 +493,47 @@ class TestBinaryNoise:
         # artifact cleanup targets) must not read as binary garbage.
         doc = ("A real paragraph of readable text. " * 50) + "wor�d s�pots\n"
         r = assess_markdown(doc)
+        assert not r.binary_noise
+
+    def test_lossy_utf8_decode_of_bytes_flagged(self):
+        # markitdown's fallback for undecodable files. The valid pairs that
+        # survive contain few controls and pass for words; hopping between
+        # scripts inside a "word" is the only tell.
+        rng = random.Random(42)
+        raw = bytes(
+            ord(" ") if rng.random() < 0.14 else rng.randrange(0xA0, 0x100)
+            for _ in range(16_384)
+        )
+        r = assess_markdown(raw.decode("utf-8", errors="ignore"))
+        assert r.binary_noise
+        assert r.script_switch_ratio >= 0.5
+        assert r.noise_ratio < 0.10
+        assert r.word_ratio > 0.5
+        assert r.as_dict()["script_switch_ratio"] == round(r.script_switch_ratio, 3)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Python语言是一种广泛使用的API接口编程语言，它的HTTP库非常好用。使用JSON格式传输数据。",
+            "これはテストの文章です。カタカナとひらがな、そして漢字を混ぜて書きます。データベースをPythonで操作する。",
+            "대한민국(大韓民國)의 수도는 서울이다. 프로그래밍 언어 Python을 사용하여 데이터를 처리한다. ",
+            "यह हिंदी भाषा में एक नमूना पाठ है जो डिटेक्टर की जाँच करता है। ",
+            "نص تجريبي باللغة العربية. يستخدم البرنامج ملف PDF لتحويل النص. ",
+            "ðə kwɪk braʊn fɒks dʒʌmps ˈoʊvər ðə ˈleɪzi dɔɡ ",
+            # A multi-language manual: many scripts, but each word stays in one.
+            "Press the button. Нажмите кнопку. Πατήστε το κουμπί. اضغط على الزر. 電源を押してください。 שלום\n",
+            # Kanji and kana alternate constantly with no spaces, so these must
+            # count as one script, or a few foreign terms would look like salad.
+            "日本語の文章を読む。データとαとЖとאを書く。私の本を見る。",
+            # In-word switching at its most extreme, but between only two scripts.
+            "Δx Δy Δt ωt kΩ μF μm nΩ dθ dφ sinθ cosθ tanφ eλ eπ λx ",
+            "Pаypаl ассount vеrify сliсk hеrе now frее оffеr ",
+            # Compatibility forms aren't extra scripts: this is Latin and Greek.
+            "ℝn ℓp µm 𝑓x 𝐀b ªb ºc Ａb ﬁx Δx ",
+        ],
+    )
+    def test_real_multiscript_writing_not_flagged(self, text):
+        r = assess_markdown(text * 200)
         assert not r.binary_noise
 
 
