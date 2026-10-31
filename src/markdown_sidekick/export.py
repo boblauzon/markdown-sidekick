@@ -78,6 +78,9 @@ _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
 _HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+# A table's rule row, with or without outer pipes (the caller checks for a pipe:
+# "---" alone is a thematic break).
+_TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 _IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 _YAML_HOSTILE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")
 _LEAD_TITLE = "Front matter"
@@ -438,7 +441,8 @@ def split_for_ai(markdown: str, max_tokens: int, *, pack: bool = True) -> list[S
     "(part N)" pieces at blank lines outside code fences, falling back to any
     line outside a fence so blank-line-free text still splits. Every part fits
     the budget unless a single indivisible fenced block alone exceeds it —
-    fences are never split.
+    fences are never split. A table too long for one part repeats its header
+    in each part it continues into, so every part can be read on its own.
 
     With ``pack`` (export), small consecutive sections are then packed into
     parts up to the budget (see :func:`_pack`): a book of 130 one-page
@@ -536,6 +540,26 @@ def _is_lead(title: str) -> bool:
     return title == _LEAD_TITLE or title.startswith(f"{_LEAD_TITLE} (part ")
 
 
+def _table_heads(lines: list[str], is_fence: list[bool], in_fence: list[bool]) -> list[int]:
+    """Per line: the index of the header row of the table this line is the rule
+    or a body row of, else -1. A table ends at the first line without a pipe."""
+    heads = [-1] * len(lines)
+    head = -1
+    for i, line in enumerate(lines):
+        if in_fence[i] or is_fence[i] or "|" not in line or _HEADING_LINE_RE.match(line):
+            head = -1
+        elif head >= 0:
+            heads[i] = head
+        elif (
+            i
+            and _TABLE_RULE_RE.match(line)
+            and "|" in lines[i - 1]
+            and not (in_fence[i - 1] or is_fence[i - 1])
+        ):
+            head = heads[i] = i - 1
+    return heads
+
+
 def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     """Split lines into chunks of at most ``max_chars`` joined characters.
 
@@ -548,10 +572,16 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     marker disable splitting entirely. A cut never leaves a heading as a
     chunk's last line — it belongs with what it introduces (a heading over
     an indivisible listing travels with the listing).
+
+    A chunk that starts inside a table opens with that table's header and
+    rule, counted against the budget, unless they and the first row can't
+    share a chunk. A table's header, rule and first row stay together unless
+    nothing else fits the budget.
     """
     is_fence, in_fence = _fence_map(lines)
     if sum(is_fence) % 2:
         in_fence = [False] * len(lines)
+    heads = _table_heads(lines, is_fence, in_fence)
     cum = [0]
     for line in lines:
         cum.append(cum[-1] + len(line) + 1)
@@ -566,23 +596,33 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     chunks: list[str] = []
     start = 0
     while start < n:
-        if cum[n] - cum[start] <= max_chars:
+        head = heads[start]
+        repeat = ""
+        if head >= 0 and start >= head + 2:  # a body row: this chunk continues the table
+            repeat = "\n".join(lines[head : head + 2]) + "\n"
+            if len(repeat) + cum[start + 1] - cum[start] > max_chars:
+                repeat = ""
+        room = max_chars - len(repeat)
+        if cum[n] - cum[start] <= room:
             end = n
         else:
-            best_blank = best_soft = None
+            best_blank = best_soft = table_cut = None
             c = start + 1
-            while c < n and cum[c] - cum[start] <= max_chars:
+            while c < n and cum[c] - cum[start] <= room:
                 if not in_fence[c] and not after_heading[c]:
-                    best_soft = c
-                    if not lines[c - 1].strip():
-                        best_blank = c
+                    if heads[c] >= 0 and c <= heads[c] + 2:  # would part a table's opening
+                        table_cut = c
+                    else:
+                        best_soft = c
+                        if not lines[c - 1].strip():
+                            best_blank = c
                 c += 1
-            end = best_blank or best_soft
+            end = best_blank or best_soft or table_cut
             if end is None:  # indivisible fenced block: minimal overflow
                 while c < n and in_fence[c]:
                     c += 1
                 end = c if c < n else n
-        chunks.append("\n".join(lines[start:end]).strip())
+        chunks.append(repeat + "\n".join(lines[start:end]).strip())
         start = end
     return [chunk for chunk in chunks if chunk]
 
