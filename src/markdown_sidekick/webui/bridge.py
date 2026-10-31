@@ -121,7 +121,8 @@ def _comment_placeholders(state) -> None:
         for line in inline.content.split("\n") + [None]:
             m = _COMMENT_LINE.match(line) if line is not None else None
             if (m or line is None) and text:
-                out += [open_.copy(), inline.copy(content="\n".join(text)), close.copy()]
+                # A copy shares children, and inline parsing appends to them.
+                out += [open_.copy(), inline.copy(content="\n".join(text), children=[]), close.copy()]
                 text = []
             if m:
                 out.append(Token("html_block", "", 0, block=True,
@@ -172,6 +173,15 @@ class _Item:
         self.preparing = False
 
 
+def _ok_cancel_box(owner: int, title: str, message: str) -> bool:
+    """An OK/Cancel box owned by the window, so Windows disables the window
+    while it's up. pywebview's confirmation dialog has no owner: the window
+    stays live behind it, and a user could open a second one or drop files."""
+    u32 = ctypes.windll.user32
+    u32.MessageBoxW.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    return u32.MessageBoxW(owner, message, title, 0x1) == 1  # MB_OKCANCEL, IDOK
+
+
 def _set_clipboard(text: str) -> bool:
     """CF_UNICODETEXT on the Windows clipboard (the page can't hold a 5 MB
     book just to copy it)."""
@@ -220,6 +230,7 @@ class Api:
         self._toast = ""
         self._toast_until = 0.0
         self._window = None
+        self._prompt = threading.Lock()  # held while a confirmation box is up
         self._engine_obj = None
         self._engine_lock = threading.Lock()
         self._md = None
@@ -705,11 +716,25 @@ class Api:
         debuglog.event("ui.action", action="remove", front_end="webui")
         self._push(force=True)
 
+    def _confirm(self, message: str) -> bool:
+        """Ask OK/Cancel, one question at a time: a click that beats the box
+        to the screen counts as Cancel rather than opening a second box."""
+        if not self._prompt.acquire(blocking=False):
+            return False
+        try:
+            try:
+                owner = self._window.native.Handle.ToInt64()
+            except Exception as exc:  # still ask; pywebview answers None if the window has closed
+                debuglog.event("ui.confirm_unowned", error=f"{type(exc).__name__}: {exc}")
+                return bool(self._window.create_confirmation_dialog(__app_name__, message))
+            return _ok_cancel_box(owner, __app_name__, message)
+        finally:
+            self._prompt.release()
+
     def clear(self) -> bool:
         with self._lock:
             converted = sum(1 for i in self._items.values() if i.result is not None and i.result.ok)
-        if converted and not self._window.create_confirmation_dialog(
-            __app_name__,
+        if converted and not self._confirm(
             f"Discard {converted} converted result(s)?\n\nYour source files aren't touched, "
             "but re-adding them means converting from scratch.",
         ):
@@ -865,7 +890,7 @@ class Api:
             self._flash(f"Saved {picked.name}.{tail}", 8 if notes else 3)
             return
         self._flash(f"Saved {saved} file(s) to {picked}.{tail}", 8 if notes else 4)
-        if self._window.create_confirmation_dialog(__app_name__, f"Saved {saved} file(s) to:\n{picked}\n\nOpen the folder?"):
+        if self._confirm(f"Saved {saved} file(s) to:\n{picked}\n\nOpen the folder?"):
             os.startfile(picked)  # noqa: S606 - the folder the user just chose
 
     def _save_one(self, item: _Item, result, dest: Path, style: str, target: str, notes: list) -> int:
@@ -1024,8 +1049,8 @@ class Api:
         self._push(force=True)
         with self._lock:
             converted = sum(1 for i in self._items.values() if i.result is not None)
-        if converted and _RECONVERT_KEYS & changed.keys() and self._window.create_confirmation_dialog(
-            __app_name__, f"Re-convert the {converted} loaded file(s) with the new settings?"
+        if converted and _RECONVERT_KEYS & changed.keys() and self._confirm(
+            f"Re-convert the {converted} loaded file(s) with the new settings?"
         ):
             self._retry_where((), every=True)
         return {"ok": True, "clean": s.clean_output, "rendered": s.rendered_preview, "theme": s.theme}
@@ -1115,9 +1140,7 @@ class Api:
             self._flash(f"⚠ {incident.title} {incident.next_step} ({incident.code}, ref {incident.ref})", 10)
             return
         self._flash(f"Diagnostic report saved: {report}", 6)
-        if self._window.create_confirmation_dialog(
-            __app_name__, f"Diagnostic report saved:\n{report}\n\nOpen its folder?"
-        ):
+        if self._confirm(f"Diagnostic report saved:\n{report}\n\nOpen its folder?"):
             os.startfile(Path(report).parent)  # noqa: S606 - the folder the user just chose
 
     # -- probe mode (spike measurements) -------------------------------------

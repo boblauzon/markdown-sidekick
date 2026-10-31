@@ -16,6 +16,7 @@ This is the working list: what's being built, in order, and what waits on someth
 
 ## Done
 
+- 2026-10-30 · New window: a marker inside a paragraph no longer repeats its text; confirmation boxes are owned by the window, one at a time (found by `/verify`).
 - 2026-10-30 · New window shows page anchors and figure markers as muted placeholders, not escaped HTML (found by the frozen check).
 - 2026-10-30 · Dependencies: Pillow 13, fastmcp 4.1.4, only markitdown's local extras (`a66b988`).
 - 2026-10-30 · Updates: opt-in signed check, update bar, install when the app closes (`8b89862`).

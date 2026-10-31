@@ -93,6 +93,55 @@ def test_page_anchors_and_figure_markers_are_placeholders(api):
     assert "<code>&lt;!-- page 9 --&gt;\n</code>" in html  # fenced code is left alone
 
 
+def test_a_marker_inside_a_paragraph_splits_it_without_repeating_text(api):
+    html = api._renderer().render("Before **it**\n<!-- figure 2.1 -->\nAfter it\n<!-- page 3 -->\nLast\n")
+    assert html == (
+        "<p>Before <strong>it</strong></p>\n"
+        '<p class="mdc">⟨figure 2.1⟩</p>\n'
+        "<p>After it</p>\n"
+        '<p class="mdc">⟨page 3⟩</p>\n'
+        "<p>Last</p>\n"
+    )
+
+
+def test_confirmations_are_owned_by_the_window(api, monkeypatch):
+    # pywebview's own box has no owner, which leaves the window live behind it.
+    class Form:
+        class Handle:
+            ToInt64 = staticmethod(lambda: 4242)
+
+    asked = []
+    monkeypatch.setattr(bridge, "_ok_cancel_box", lambda owner, title, text: asked.append((owner, text)) or True)
+    api._window.native = Form()
+    assert api._confirm("Sure?") is True
+    assert asked == [(4242, "Sure?")] and api._window.prompts == []
+
+
+def test_no_window_handle_still_asks(api, monkeypatch):
+    # A silent Cancel would make Clear all do nothing, with no error to see.
+    class Broken:
+        @property
+        def Handle(self):
+            raise RuntimeError("pywebview changed")
+
+    asked = []
+    monkeypatch.setattr(bridge, "_ok_cancel_box", lambda *a: asked.append(a) or True)
+    api._window.native = Broken()
+    assert api._confirm("Discard?") is True
+    assert asked == [] and api._window.prompts == ["Discard?"]
+
+
+def test_only_one_confirmation_at_a_time(api, tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text("# Notes\n", encoding="utf-8")
+    _convert(api, src)
+    with api._prompt:  # a box is up: a second click counts as Cancel
+        assert api._confirm("Again?") is False
+        assert api.clear() is False
+    assert api._window.prompts == [] and len(api._items) == 1
+    assert api._confirm("Now?") is True and api._window.prompts == ["Now?"]
+
+
 def test_preview_is_capped_but_says_so(api, tmp_path):
     src = tmp_path / "big.md"
     para = "word " * 60

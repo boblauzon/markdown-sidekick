@@ -40,6 +40,9 @@ Then `node .claude/skills/verify/cdp.mjs 9333 <cmd>` (Node 22+, no deps):
   With several dialogs open it takes the one accepting input (a nested "replace?"
   prompt, not the Save As behind it), or the one whose title contains `-Title`;
   exit 2 means it couldn't tell. Works for the classic Tk window's dialogs too.
+  The new window's confirmations are OK/Cancel (1 or 2), the classic window's
+  Yes/No (6 or 7). With no window up yet it fails at once instead of waiting, so
+  wait for the window first.
 - Close a window with WM_CLOSE to its own `MainWindowHandle` (PowerShell
   `PostMessage(h, 0x10, 0, 0)`), not by killing it — that exercises the real close path.
 - Copy writes the user's real clipboard (`Get-Clipboard -Raw` to read it back).
