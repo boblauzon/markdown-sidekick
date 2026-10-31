@@ -48,8 +48,14 @@ a = Analysis(
         # Not used by the app.
         "IPython", "matplotlib", "pytest", "setuptools._distutils",
     ],
+    # True takes the archive out of both exes, but the loose modules are
+    # uncompressed and cost more. Measured: 559 vs 543 MB, 9,310 vs 3,324 files.
     noarchive=False,
 )
+
+# RapidOCR only reads images and audio goes through av, so OpenCV's video backend
+# (27 MB of FFmpeg, loaded on the first VideoCapture) is never used.
+a.binaries = [entry for entry in a.binaries if "opencv_videoio_ffmpeg" not in entry[0]]
 
 pyz = PYZ(a.pure)
 
