@@ -7,6 +7,7 @@ import base64
 import hashlib
 import http.server
 import json
+import ssl
 import threading
 from datetime import date
 from pathlib import Path
@@ -14,6 +15,7 @@ from pathlib import Path
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from tlsgen import issue, server_context, use_as_mozillas_list
 
 from markdown_sidekick import updates
 from markdown_sidekick.settings import Settings
@@ -36,11 +38,8 @@ def keys(monkeypatch):
     monkeypatch.setattr(updates, "PUBLIC_KEYS", (PUB,))
 
 
-@pytest.fixture
-def server(tmp_path):
-    """Serves tmp_path/www over http, honouring Range like GitHub does."""
-    root = tmp_path / "www"
-    root.mkdir()
+def _serve(root: Path, tls: ssl.SSLContext | None = None) -> http.server.ThreadingHTTPServer:
+    """Serves ``root``, honouring Range like GitHub does."""
 
     class Handler(http.server.SimpleHTTPRequestHandler):
         def __init__(self, *a, **k):
@@ -63,8 +62,31 @@ def server(tmp_path):
             super().do_GET()
 
     srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    if tls:
+        srv.socket = tls.wrap_socket(srv.socket, server_side=True)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv
+
+
+@pytest.fixture
+def server(tmp_path):
+    root = tmp_path / "www"
+    root.mkdir()
+    srv = _serve(root)
     yield root, f"http://127.0.0.1:{srv.server_address[1]}"
+    srv.shutdown()
+    srv.server_close()
+
+
+@pytest.fixture
+def secure_server(tmp_path, monkeypatch):
+    """Over https, with a root Windows hasn't fetched, as GitHub's can be on a new PC."""
+    root = tmp_path / "www"
+    root.mkdir()
+    authority = issue("Test Root", ca=True)
+    use_as_mozillas_list(monkeypatch, tmp_path, authority)
+    srv = _serve(root, tls=server_context(issue("127.0.0.1", authority), tmp_path))
+    yield root, f"https://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
     srv.server_close()
 
@@ -144,6 +166,27 @@ class TestDue:
         assert updates.due(Settings(update_check="weekly"), today=date(2026, 10, 27))  # never checked
         assert not updates.due(Settings(update_check="ask"), today=date(2026, 10, 27))
         assert not updates.due(Settings(update_check="off"), today=date(2026, 10, 27))
+
+
+class TestCertificates:
+    def test_a_check_works_before_windows_has_the_root(self, keys, secure_server):
+        root, base = secure_server
+        _publish(root, *_manifest())
+        assert updates.check("1.3.0", url=f"{base}/latest.json").version == "9.0.0"
+
+    def test_a_download_works_before_windows_has_the_root(self, secure_server, tmp_path):
+        root, base = secure_server
+        (root / "i.exe").write_bytes(b"installer bytes")
+        release = TestDownload()._release(base, b"installer bytes")
+        assert updates.download(release, tmp_path / "dl").read_bytes() == b"installer bytes"
+
+    def test_an_unknown_root_still_fails(self, keys, secure_server, monkeypatch, tmp_path):
+        root, base = secure_server
+        _publish(root, *_manifest())
+        use_as_mozillas_list(monkeypatch, tmp_path, issue("Other Root", ca=True))
+        with pytest.raises(updates.UpdateError) as err:
+            updates.check("1.3.0", url=f"{base}/latest.json")
+        assert err.value.code == "MS-701"
 
 
 class TestDownload:

@@ -29,6 +29,7 @@ dependencies = [
     "pypdfium2>=4.0.0",
     "faster-whisper>=1.0.0",
     "av>=11,<19",  # av 19 breaks faster-whisper 1.2.1 (see requirements.txt)
+    "certifi>=2025.1.31",  # downloads trust Mozilla's roots as well as Windows' (see requirements.txt)
 ]
 
 [project.optional-dependencies]

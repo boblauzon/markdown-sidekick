@@ -24,6 +24,10 @@ av>=11,<19
 # Claude Desktop / Cursor / VS Code over stdio.
 fastmcp>=3.0.0
 
+# Downloads (convert_url, the update check) trust Mozilla's certificate roots as
+# well as Windows' store, which holds only some until Windows is asked (netguard.py).
+certifi>=2025.1.31
+
 # Redesigned window (preview: `app.py --new-ui`). pywebview (BSD) drives the
 # Windows WebView2 runtime through pythonnet (MIT); markdown-it-py (MIT)
 # renders the preview.

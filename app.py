@@ -178,9 +178,12 @@ def _selftest() -> int:
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
 
         # Updates verify a signature offline: the crypto must be in the build.
-        from markdown_sidekick import updates
+        from markdown_sidekick import netguard, updates
 
         report["checks"]["update_signature"] = updates.selftest()
+
+        # Downloads trust Mozilla's certificate roots: their file must be in it too.
+        report["checks"]["url_certificates"] = netguard.selftest()
 
         # The MCP server (and fastmcp) must be present so `--mcp` works.
         try:

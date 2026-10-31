@@ -324,7 +324,9 @@ Tools exposed:
 - `convert_outline(file_path)` — document structure + per-section token counts,
   without the content (the conversion is cached for follow-up reads)
 - `convert_section(file_path, section_index)` — one chapter at a time
-- `convert_url(url)` — download and convert a web page or remote PDF
+- `convert_url(url)` — download and convert a web page or remote PDF. Addresses
+  on your computer or private network are refused (MS-133), so a document an AI
+  is reading can't talk it into fetching your router's pages
 - `list_capabilities()` — reports which engines are available
 - `convert_batch(inputs, output_root, naming, style, …)` — starts converting
   a whole library and returns a batch id straight away; `batch_status(id)`
@@ -552,6 +554,8 @@ your documents' text (file names and paths, yes).
 | MS-130 | The address couldn't be downloaded. | Check the address and your internet connection, then retry. | Retry |
 | MS-131 | That link can't be converted: only http/https downloads up to 50 MB are supported. | Download the file yourself and convert the local copy. | — |
 | MS-132 | There is no section with that number. | Get the section list from convert_outline and use one of its indexes (with the same max_tokens). | — |
+| MS-133 | That address is on this computer or a private network, so it wasn't downloaded. | If you meant that address, download the file yourself and convert the local copy. | — |
+| MS-134 | That site's security certificate couldn't be verified, so it wasn't downloaded. | The site's certificate may be faulty, or something on your network may be intercepting the connection. If you trust the site, download the file in your browser and convert the local copy. | — |
 | MS-199 | The conversion engine reported an unexpected error. | Retry. If it keeps failing, report it — the technical details say why. | Retry |
 
 **Saving**

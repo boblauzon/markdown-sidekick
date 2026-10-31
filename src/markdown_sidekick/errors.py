@@ -225,6 +225,17 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "(with the same max_tokens).",
     ),
     ErrorSpec(
+        "MS-133",
+        "That address is on this computer or a private network, so it wasn't downloaded.",
+        "If you meant that address, download the file yourself and convert the local copy.",
+    ),
+    ErrorSpec(
+        "MS-134",
+        "That site's security certificate couldn't be verified, so it wasn't downloaded.",
+        "The site's certificate may be faulty, or something on your network may be intercepting the "
+        "connection. If you trust the site, download the file in your browser and convert the local copy.",
+    ),
+    ErrorSpec(
         "MS-199",
         "The conversion engine reported an unexpected error.",
         "Retry. If it keeps failing, report it — the technical details say why.",

@@ -330,8 +330,8 @@ just plain markitdown. Tools:
   title, quality report, and per-section token estimates — no content
 - `convert_section(file_path, section_index)` — returns one chapter/section from
   the cached conversion
-- `convert_url(url)` — downloads (http/https, 50 MB cap) and converts a web page,
-  PDF, or image with the same local pipeline
+- `convert_url(url)` — downloads (http/https, 50 MB cap, public addresses only)
+  and converts a web page, PDF, or image with the same local pipeline
 - `list_capabilities()` — reports which local engines are available
 - `convert_batch(inputs, output_root, naming, style, …)` → `batch_status(batch_id)`
   / `cancel_batch(batch_id)` — library-scale conversion: starts at once, then poll;

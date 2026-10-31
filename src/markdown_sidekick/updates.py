@@ -82,9 +82,16 @@ def manifest_url() -> str:
     return override if override and debuglog.enabled() else MANIFEST_URL
 
 
+def _open(req: urllib.request.Request):
+    # Imported here: ui.py imports this module at startup, and certifi takes 50 ms to load.
+    from . import netguard
+
+    return urllib.request.urlopen(req, timeout=TIMEOUT_S, context=netguard.tls_context())
+
+
 def _get(url: str, *, headers: dict | None = None, limit: int | None = None) -> bytes:
     req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT, **(headers or {})})
-    with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+    with _open(req) as resp:
         data = resp.read(limit + 1 if limit else -1)
     if limit and len(data) > limit:
         raise UpdateError("MS-702", f"{url} is larger than an update manifest can be")
@@ -249,7 +256,7 @@ def download(release: Release, dest_dir: Path | None = None,
     headers = {"Range": f"bytes={have}-"} if have else {}
     req = urllib.request.Request(release.installer_url, headers={"User-Agent": _USER_AGENT, **headers})
     try:
-        with urllib.request.urlopen(req, timeout=TIMEOUT_S) as resp:
+        with _open(req) as resp:
             if have and resp.status != 206:  # the server ignored Range: start over
                 have = 0
             with open(part, "ab" if have else "wb") as out:

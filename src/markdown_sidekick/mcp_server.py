@@ -30,7 +30,7 @@ os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")  # Literal: stable|pre
 
 from fastmcp import FastMCP
 
-from . import __version__, debuglog, errors, export
+from . import __version__, debuglog, errors, export, netguard
 from .cleanup import clean_markdown
 from .converter import ConversionEngine, ConversionResult
 from .quality import assess_markdown
@@ -152,7 +152,15 @@ def _resolve(file_path: str) -> tuple[str | None, str | None]:
     return resolved, None
 
 
-@mcp.tool
+# Hints a client uses to decide whether to ask the user first. MCP assumes the
+# worst when a hint is missing (may destroy data, reaches the outside world),
+# so every tool states them. "Read-only" and "local" describe the user's files
+# and the network: the caches and the log don't count.
+_READS_LOCAL = {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False}
+
+
+# save_to can replace an existing file, so this one can't claim to be read-only.
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
 def convert_local_file(
     file_path: str,
     clean: bool = True,
@@ -229,7 +237,7 @@ def convert_local_file(
     return noise_note + markdown
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def convert_outline(
     file_path: str, clean: bool = True, max_tokens: int = export.DEFAULT_MAX_TOKENS
 ) -> dict:
@@ -262,7 +270,7 @@ def convert_outline(
     }
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def convert_section(
     file_path: str,
     section_index: int,
@@ -293,13 +301,18 @@ def convert_section(
 
 
 _URL_MAX_BYTES = 50 * 1024 * 1024
+# Wikipedia answers 403 to a bare product name: its policy asks for a link.
+_URL_USER_AGENT = f"MarkdownSidekick/{__version__} (https://github.com/boblauzon/markdown-sidekick)"
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True})
 def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
     """Download a document (web page, PDF, image, …) and convert it to
     Markdown with the same local pipeline. http/https only, 50 MB cap.
+    Addresses on this computer or a private network are refused, including
+    through a redirect; for those, convert a local copy with convert_local_file.
     """
+    import ssl
     import tempfile
     import urllib.parse
     import urllib.request
@@ -309,13 +322,16 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
         return _coded(errors.report("MS-131", where="mcp convert_url", detail=f"scheme '{parsed.scheme}'"))
     suffix = Path(parsed.path).suffix.lower() or ".html"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "MarkdownSidekick/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": _URL_USER_AGENT})
+        with netguard.opener().open(req, timeout=60) as resp:
             data = resp.read(_URL_MAX_BYTES + 1)
         if len(data) > _URL_MAX_BYTES:
             return _coded(errors.report("MS-131", where="mcp convert_url", detail="over 50 MB", url=url))
+    except netguard.BlockedAddress as exc:
+        return _coded(errors.report("MS-133", where="mcp convert_url", detail=str(exc), url=url))
     except Exception as exc:
-        return _coded(errors.report("MS-130", exc=exc, where="mcp convert_url", url=url))
+        certificate = isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError)
+        return _coded(errors.report("MS-134" if certificate else "MS-130", exc=exc, where="mcp convert_url", url=url))
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / f"download{suffix}"
@@ -333,7 +349,7 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
     return markdown
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def list_capabilities() -> dict:
     """Report which local conversion engines are available in this install."""
     from . import audio, mineru, ocr, pdflayout
@@ -395,7 +411,8 @@ def _batch_view(job: _Batch) -> dict:
     return view
 
 
-@mcp.tool
+# Re-runs replace the batch's own outputs, and overwrite=True replaces others.
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
 def convert_batch(
     inputs: list[str],
     output_root: str,
@@ -521,7 +538,7 @@ def convert_batch(
     }
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def batch_status(batch_id: str = "") -> dict:
     """Progress of a convert_batch run (the latest when batch_id is blank).
     When state is "done" (or "cancelled"), "summary" holds the totals, the
@@ -534,7 +551,7 @@ def batch_status(batch_id: str = "") -> dict:
     return _batch_view(job)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
 def cancel_batch(batch_id: str = "") -> dict:
     """Stop a running convert_batch (the latest when batch_id is blank).
     Files already converted are kept and listed in the manifest; the rest
