@@ -70,6 +70,9 @@ AI_TARGETS: dict[str, int] = {
 }
 # Targets exported as notebook sources (export_book(notebook=True)).
 NOTEBOOK_TARGETS = frozenset({"Gemini Notebook"})
+# Output shapes (Settings.export_style, batch --style): one .md file, a
+# chapter folder, or AI-sized parts for an AI_TARGETS budget. See save().
+STYLES = ("single", "chapters", "ai")
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
@@ -312,10 +315,13 @@ class ExportResult:
     manifest_path: Path | None = None
 
     @property
+    def files(self) -> list[Path]:
+        """Every file written: the parts, then index.md and manifest.json."""
+        return self.paths + [p for p in (self.index_path, self.manifest_path) if p]
+
+    @property
     def files_written(self) -> int:
-        return len(self.paths) + (1 if self.index_path else 0) + (
-            1 if self.manifest_path else 0
-        )
+        return len(self.files)
 
 
 def _fence_map(lines: list[str]) -> tuple[list[bool], list[bool]]:
@@ -955,3 +961,74 @@ def export_book(
     result.manifest_path = out_dir / "manifest.json"
     write_text_verified(result.manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
     return result
+
+
+def save(
+    markdown: str,
+    dest: Path,
+    *,
+    source: str,
+    style: str = "single",
+    ai_target: str = "",
+    details: dict | None = None,
+    front_matter: bool = True,
+    summary: str = "",
+    max_tokens: int = 0,
+) -> ExportResult:
+    """The one save step every front-end calls (ADR-002).
+
+    ``dest`` is the ``.md`` file for ``style="single"`` and the book folder
+    for ``"chapters"`` / ``"ai"``; ``"ai"`` sizes parts to the
+    ``ai_target``'s budget and writes notebook sources for a notebook
+    target. ``details`` is the book's own details as plain data —
+    ``ConversionResult.details``: engine, title, author, title_source, meta —
+    so no front-end can forget one (MCP ``save_to`` once titled 504 books
+    after their filenames). ``max_tokens`` overrides the chapter split's
+    budget (the CLI's ``--max-tokens``). Naming, figures and the summary stay
+    with the caller: that is where the front-ends really differ.
+    """
+    if style not in STYLES:
+        raise ValueError(f"style must be one of {', '.join(STYLES)}")
+    d = details or {}
+    common = dict(
+        source=source,
+        engine=d.get("engine", ""),
+        front_matter=front_matter,
+        summary=summary,
+        title=d.get("title", ""),
+        author=d.get("author", ""),
+        title_source=d.get("title_source", ""),
+        meta=d.get("meta") or {},
+    )
+    if style == "single":
+        return export_single(markdown, dest, **common)
+    if style == "ai":
+        return export_book(
+            markdown,
+            dest,
+            max_tokens=AI_TARGETS.get(ai_target, DEFAULT_MAX_TOKENS),
+            ai_sections=True,
+            notebook=ai_target in NOTEBOOK_TARGETS,
+            **common,
+        )
+    return export_book(markdown, dest, max_tokens=max_tokens or DEFAULT_MAX_TOKENS, **common)
+
+
+def figure_dirs(dest: Path, style: str) -> tuple[Path, str]:
+    """Where a save puts the source's figures, and the relative link prefix:
+    a book folder keeps ``images/`` beside its parts; a single file gets
+    ``images/<stem>/`` so several files can share one output folder."""
+    if style == "single":
+        return dest.parent / "images" / dest.stem, f"images/{dest.stem}"
+    return dest / "images", "images"
+
+
+def claim_name(stem: str, used: set[str]) -> str:
+    """``stem``, else ``stem-2``, ``stem-3``… — the first name not in
+    ``used``, which it joins. Same-named sources from different folders,
+    saved together, must never overwrite each other's output."""
+    name, n = stem, 2
+    while name in used:
+        name, n = f"{stem}-{n}", n + 1
+    used.add(name)
+    return name

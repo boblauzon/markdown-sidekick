@@ -119,6 +119,23 @@ class TestNothingLeavesTheComputer:
         ConversionEngine(enable_ocr=False, enable_audio=False).convert_file(source)
         assert google_calls == []
 
+    # The intercept tests above need speech_recognition, which our own
+    # requirements no longer install (ADR-001). These two hold either way.
+    def test_the_engine_has_no_online_audio_converter(self):
+        from markitdown.converters import AudioConverter
+
+        from markdown_sidekick.converter import ConversionEngine
+
+        engine = ConversionEngine(enable_ocr=False, enable_audio=False)
+        assert not any(isinstance(r.converter, AudioConverter) for r in engine._md._converters)
+
+    def test_our_requirements_never_install_the_speech_converter(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("requirements.txt", "pyproject.toml"):
+            text = (root / name).read_text(encoding="utf-8")
+            assert "markitdown[all]" not in text and "audio-transcription" not in text, name
+        assert "speechrecognition==" not in (root / "constraints.txt").read_text(encoding="utf-8").lower()
+
 
 _model_cached = (app_data_dir("models") / "faster-whisper-base").exists()
 _av_available = importlib.util.find_spec("av") is not None

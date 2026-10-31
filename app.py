@@ -177,6 +177,11 @@ def _selftest() -> int:
 
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
 
+        # Updates verify a signature offline: the crypto must be in the build.
+        from markdown_sidekick import updates
+
+        report["checks"]["update_signature"] = updates.selftest()
+
         # The MCP server (and fastmcp) must be present so `--mcp` works.
         try:
             import markdown_sidekick.mcp_server  # noqa: F401
@@ -234,6 +239,7 @@ Usage:
   MarkdownSidekick.exe --cli <command>    the same CLI from the windowed exe
   MarkdownSidekick.exe --mcp              MCP server over stdio, for AI clients
   MarkdownSidekick.exe --selftest         check the conversion pipeline (exit 0/1)
+  MarkdownSidekick.exe --new-ui           open the redesigned window (preview)
   --debug                                 add to any of the above to record a trace
   --help, --version                       print this or the version, and exit
 """
@@ -299,7 +305,19 @@ if __name__ == "__main__":
 
         args = sys.argv[sys.argv.index("--cli") + 1 :] if "--cli" in sys.argv else sys.argv[1:]
         sys.exit(cli_main(args))
-    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in _HELP_FLAGS]
+    if "--new-ui" in sys.argv and not any(a in _HELP_FLAGS for a in sys.argv[1:]):
+        # The redesigned window (pywebview), while it is being built.
+        extra = [a for a in sys.argv[1:] if a != "--new-ui"]
+        if extra:
+            _ensure_stdout()
+            print(f"--new-ui takes no other arguments (got: {' '.join(extra)})\n", file=sys.stderr)
+            print(USAGE.format(version=_version()))
+            sys.exit(2)
+        from markdown_sidekick.webui import run as run_webui
+
+        run_webui()
+        sys.exit(0)
+    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in _HELP_FLAGS + ("--new-ui",)]
     if any(a in _HELP_FLAGS for a in sys.argv[1:]) or unknown:
         # Never fall through to the GUI on a flag we don't know: a script or
         # an agent asking for --help must get text back, not a window.

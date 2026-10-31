@@ -30,7 +30,7 @@ os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")  # Literal: stable|pre
 
 from fastmcp import FastMCP
 
-from . import debuglog, errors, export
+from . import __version__, debuglog, errors, export
 from .cleanup import clean_markdown
 from .converter import ConversionEngine, ConversionResult
 from .quality import assess_markdown
@@ -45,6 +45,7 @@ logger = logging.getLogger("MarkdownSidekickMCP")
 
 mcp = FastMCP(
     name="Markdown Sidekick",
+    version=__version__,  # serverInfo: the app's version, not fastmcp's
     instructions=(
         "Converts local documents, images, scanned/vector PDFs and audio files to "
         "Markdown using a local offline pipeline (markitdown + RapidOCR + "
@@ -101,8 +102,8 @@ def _conversion_error(result: ConversionResult) -> str:
 # Warnings from the conversion behind each cached result (a better route
 # failed and a lesser one produced the text) — relayed with the Markdown.
 _convert_notes: dict[str, list[str]] = {}
-# The source's own metadata from the last conversion of each path (export
-# keyword arguments: title, author, title_source, meta) for save_to.
+# The source's own details from the last conversion of each path
+# (ConversionResult.details: engine, title, author, title_source, meta) for save_to.
 _convert_meta: dict[str, dict] = {}
 
 
@@ -133,13 +134,7 @@ def _convert_cached(resolved: str, clean: bool) -> tuple[str | None, str | None]
     _convert_notes[resolved] = [
         f"{w.code}: {w.title} Next step: {w.next_step} (ref {w.ref})" for w in result.warnings
     ]
-    _convert_meta[resolved] = {
-        "engine": result.engine,
-        "title": result.doc_title,
-        "author": result.doc_author,
-        "title_source": result.title_source,
-        "meta": dict(result.doc_meta),
-    }
+    _convert_meta[resolved] = result.details
     while len(_convert_cache) >= _CACHE_MAX:
         _convert_cache.pop(next(iter(_convert_cache)))
     _convert_cache[key] = markdown
@@ -206,19 +201,19 @@ def convert_local_file(
     if save_to:
         out_path = os.path.abspath(os.path.expanduser(save_to))
         try:
-            export.export_single(
+            export.save(
                 markdown,
                 Path(out_path),
                 source=os.path.basename(resolved),
+                details=_convert_meta.get(resolved),
                 front_matter=Settings.load().export_front_matter,
-                **_convert_meta.get(resolved, {}),
             )
         except OSError as exc:
             return _coded(
                 errors.report(errors.classify_os_error(exc), exc=exc, where="mcp save_to", target=out_path),
                 f"saving to '{out_path}'",
             )
-        # export_single read the file back, so this is a confirmed save.
+        # export.save read the file back, so this is a confirmed save.
         title = _convert_meta.get(resolved, {}).get("title", "")
         titled = f" Title: {title}." if title else ""
         return f"Saved Markdown to {out_path} (verified on disk).{titled} {report.summary()}"
@@ -553,8 +548,22 @@ def cancel_batch(batch_id: str = "") -> dict:
     return _batch_view(job)
 
 
+# Held while the server runs: the installer looks for it to say why an AI
+# tool is about to lose its connection (Restart Manager then closes us).
+_running_mutex = None
+
+
+def _hold_running_mutex() -> None:
+    global _running_mutex
+    if sys.platform == "win32" and _running_mutex is None:
+        import ctypes
+
+        _running_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "MarkdownSidekickMCP")
+
+
 def main() -> None:
     errors.install_crash_hooks()
+    _hold_running_mutex()
     settings = Settings.load()
     if settings.debug_mode or debuglog.debug_requested():
         # Files only — stdout stays reserved for JSON-RPC.

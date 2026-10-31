@@ -13,14 +13,13 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
-from . import __app_name__, __version__, debuglog, errors
+from . import __app_name__, __version__, debuglog, errors, updates
 from . import settings as settings_store
 from .cleanup import clean_markdown
 from .converter import (
     SUPPORTED_EXTENSIONS,
     ConversionEngine,
     ConversionResult,
-    default_output_path,
 )
 from . import export as md_export
 from .errorview import NoticeBar, show_error_dialog
@@ -150,6 +149,16 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.status_var.set(f"Debug mode is on — tracing to {debuglog.session_dir()}")
         if settings_store.LOAD_INCIDENT is not None:
             self.after(300, lambda: self._show_notice(settings_store.LOAD_INCIDENT))
+        # Updates run on their own threads; their news comes through the
+        # event queue like conversion progress (never Tk from a worker).
+        self._update_flow = updates.UpdateFlow(
+            self.settings,
+            self._save_settings_quietly,
+            on_change=lambda: self._events.put(("update",)),
+            on_message=lambda text: self._events.put(("update_msg", text)),
+        )
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(900, self._start_updates)
         self._poll_events()
 
     # -- styling -------------------------------------------------------------
@@ -475,6 +484,12 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.progress.pack(fill="x", pady=(0, 8))
         self.notice = NoticeBar(footer, self._error_handlers)
         self.notice.place_in(fill="x", pady=(0, 8), before=self.progress)
+        # A new version, drawn from updates.UpdateFlow (hidden until one is found).
+        self.update_bar = ttk.Frame(footer, style="Notice.TFrame", padding=(10, 6))
+        self._update_text = ttk.Label(self.update_bar, style="Notice.TLabel", justify="left", wraplength=640)
+        self._update_text.pack(side="left", fill="x", expand=True)
+        self._update_btns = ttk.Frame(self.update_bar, style="Notice.TFrame")
+        self._update_btns.pack(side="right")
 
         self.status_var = tk.StringVar(value="Ready — drop files anywhere to convert.")
         ttk.Label(footer, textvariable=self.status_var, style="Muted.TLabel").pack(
@@ -565,6 +580,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         caption_v = tk.StringVar(dlg, value=self.settings.caption_model)
         summary_v = tk.StringVar(dlg, value=self.settings.summary_model)
         debug_v = tk.BooleanVar(dlg, value=self.settings.debug_mode)
+        weekly_v = tk.BooleanVar(dlg, value=self.settings.update_check == "weekly")
         snapshots_v = tk.BooleanVar(dlg, value=self.settings.debug_snapshots)
         detect_v = tk.StringVar(dlg, value="")
 
@@ -762,6 +778,16 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             style="PanelMuted.TLabel",
             justify="left",
         ).grid(row=8, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        section(diag, "Updates", 9)
+        check(diag, "Check for updates once a week", weekly_v, 10)
+        upd_btns = ttk.Frame(diag, style="Panel.TFrame")
+        upd_btns.grid(row=11, column=0, columnspan=3, sticky="w", pady=(4, 0))
+        ttk.Button(upd_btns, text="Check now", command=self.check_for_updates).pack(side="left")
+        ttk.Label(
+            upd_btns,
+            text="Only the latest version number is fetched — nothing about you or your files is sent.",
+            style="PanelMuted.TLabel",
+        ).pack(side="left", padx=(8, 0))
 
         def run_detect(auto: bool = False) -> None:
             """Probe Ollama on a worker thread and fill the model pickers.
@@ -845,6 +871,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.settings.summary_model = summary_v.get()
             self.settings.debug_mode = debug_v.get()
             self.settings.debug_snapshots = snapshots_v.get()
+            self.settings.update_check = "weekly" if weekly_v.get() else "off"
             if not self._save_settings(parent=dlg):
                 return  # the dialog stays open so nothing typed is lost
             changed = {
@@ -874,6 +901,81 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 nb.select(tab_id)
         dlg.update_idletasks()
         dlg.grab_set()
+
+    # -- updates (updates.py; this window only draws UpdateFlow's state) ------
+    def _start_updates(self) -> None:
+        """First run: ask once whether to check weekly (privacy-first: No is
+        the default). Then report an update that didn't take, and run the
+        weekly check when it's due."""
+        if self.settings.update_check == "ask":
+            weekly = messagebox.askyesno(
+                "Check for updates?",
+                "Markdown Sidekick can look for a new version once a week.\n\n"
+                "It only asks GitHub for the latest version number — nothing about you or your "
+                "files is sent. You can change this in Settings → Diagnostics.",
+                default="no",
+                parent=self,
+            )
+            self.settings.update_check = "weekly" if weekly else "off"
+            self._save_settings_quietly()
+            debuglog.event("ui.update_choice", weekly=weekly, front_end="tk")
+        incident = self._update_flow.start()
+        if incident is not None:
+            self._show_notice(incident)
+
+    def _save_settings_quietly(self) -> None:
+        """Persist from any thread: a failure becomes a notice, never a dialog."""
+        try:
+            self.settings.save()
+        except Exception as exc:
+            incident = errors.report("MS-502", exc=exc, where="settings save")
+            self._events.put(("update_msg", f"⚠ {incident.title} ({incident.code})"))
+
+    def check_for_updates(self) -> None:
+        self.status_var.set("Checking for updates…")
+        self._update_flow.check(manual=True)
+
+    def _draw_update_bar(self) -> None:
+        snap = self._update_flow.snapshot()
+        if snap is None:
+            self.update_bar.pack_forget()
+            return
+        what = (f"Markdown Sidekick {snap['version']} includes a privacy or security fix."
+                if snap["important"] else f"Markdown Sidekick {snap['version']} is available.")
+        if snap["state"] == "downloading":
+            what += f"  Downloading… {snap['pct']}%"
+        elif snap["state"] == "ready":
+            what += "  It installs when you close Markdown Sidekick."
+        if snap["notes"] and snap["state"] == "available":
+            what += f"\n{snap['notes']}"
+        self._update_text.configure(text=f"↑  {what}")
+        for child in self._update_btns.winfo_children():
+            child.destroy()
+
+        def button(text: str, command) -> None:
+            ttk.Button(self._update_btns, text=text, style="Notice.TButton", command=command).pack(
+                side="left", padx=(6, 0)
+            )
+
+        if snap["state"] == "available":
+            if snap["canUpdate"]:
+                button("Update", self._update_flow.download)
+            else:  # the zip, pip or a source checkout: no installer to run
+                button("Download", lambda: webbrowser.open(snap["releasesUrl"]))
+            button("Skip this version", self._update_flow.skip)
+        elif snap["state"] == "ready":
+            button("Restart now", self._update_restart)
+        if not self.update_bar.winfo_ismapped():
+            self.update_bar.pack(fill="x", pady=(0, 8), before=self.progress)
+
+    def _update_restart(self) -> None:
+        if self._update_flow.install():
+            self.destroy()
+
+    def _on_close(self) -> None:
+        """Closing the window installs a downloaded update (spec R12)."""
+        self._update_flow.install()
+        self.destroy()
 
     def _on_ocr_toggle(self) -> None:
         """Panel OCR checkbox is a live shortcut for settings.enable_ocr — keep
@@ -1410,6 +1512,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.status_var.set(f"Converting… {index}/{total}  ({result.title})")
             if self.tree.selection() and self.tree.selection()[0] == iid:
                 self._on_select_file()
+        elif kind == "update":
+            self._draw_update_bar()
+        elif kind == "update_msg":
+            self.status_var.set(event[1])
         elif kind == "pack":
             # Precomputed cleanup/quality arriving after its progress event.
             _, source, clean_flag, pack = event
@@ -1542,23 +1648,17 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         result = self.files.get(path)
         try:
             with debuglog.file_context(path):
-                text = self._with_figures(
-                    path, text, dest_path.parent / "images" / dest_path.stem, f"images/{dest_path.stem}"
-                )
+                text = self._with_figures(path, text, *md_export.figure_dirs(dest_path, "single"))
                 summary = ""
                 if self.settings.export_front_matter:
                     summary = self._summarize_for_export(text, path.name, result)
-                md_export.export_single(
+                md_export.save(
                     text,
                     dest_path,
                     source=path.name,
-                    engine=result.engine if result else "",
+                    details=result.details if result else None,
                     front_matter=self.settings.export_front_matter,
                     summary=summary,
-                    title=result.doc_title if result else "",
-                    author=result.doc_author if result else "",
-                    title_source=result.title_source if result else "",
-                    meta=result.doc_meta if result else None,
                 )
         except Exception as exc:
             self._show_error(self._save_incident(exc, dest_path))
@@ -1674,15 +1774,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         out = Path(out_dir)
         style = self._export_style_key()
         target = self.target_var.get()
-        max_tokens = md_export.AI_TARGETS.get(target, md_export.DEFAULT_MAX_TOKENS)
-        notebook = style == "ai" and target in md_export.NOTEBOOK_TARGETS
         saved = 0
         used_names: set[str] = set()
         failed: list[tuple[Path, errors.Incident]] = []
         for path in converted:
             try:
                 with debuglog.file_context(path):
-                    saved += self._save_one(path, out, style, notebook, max_tokens, used_names)
+                    saved += self._save_one(path, out, style, target, used_names)
             except Exception as exc:  # one bad file must not lose the rest
                 failed.append((path, self._save_incident(exc, out / path.stem)))
         if failed:
@@ -1698,83 +1796,33 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ):
             self._open_path(out)
 
-    def _save_one(
-        self,
-        path: Path,
-        out: Path,
-        style: str,
-        notebook: bool,
-        max_tokens: int,
-        used_names: set[str],
-    ) -> int:
+    def _save_one(self, path: Path, out: Path, style: str, target: str, used_names: set[str]) -> int:
         """Write one source's output in a batch save; returns files written."""
-        split = style in ("chapters", "ai")
         text = self._export_text_for(path)
         if text is None:
             return 0
         result = self.files.get(path)
-        engine = result.engine if result else ""
-        title = result.doc_title if result else ""
-        author = result.doc_author if result else ""
-        meta_kw = {
-            "title_source": result.title_source if result else "",
-            "meta": result.doc_meta if result else None,
-        }
-        if split:
-            # Disambiguate same-stem sources so one book folder can never
-            # silently overwrite another's chapters/index/manifest.
-            folder = path.stem
-            if folder in used_names:
-                n = 2
-                while f"{path.stem}-{n}" in used_names:
-                    n += 1
-                folder = f"{path.stem}-{n}"
-            used_names.add(folder)
-            book_dir = out / folder
-            text = self._with_figures(path, text, book_dir / "images", "images")
-            # A book folder always has somewhere to put the summary (index +
-            # manifest), whether or not parts carry front matter.
-            summary = self._summarize_for_export(text, path.name, result)
-            res = md_export.export_book(
-                text,
-                book_dir,
-                source=path.name,
-                engine=engine,
-                front_matter=self.settings.export_front_matter,
-                max_tokens=max_tokens if style == "ai" else md_export.DEFAULT_MAX_TOKENS,
-                ai_sections=style == "ai",
-                summary=summary,
-                title=title,
-                author=author,
-                notebook=notebook,
-                **meta_kw,
-            )
-            return len(res.paths)
-        dest = default_output_path(path, out)
-        # Disambiguate same-stem files from different folders so we never
-        # silently overwrite one output with another.
-        if dest.name in used_names:
-            n = 2
-            while (candidate := out / f"{path.stem}-{n}.md").name in used_names:
-                n += 1
-            dest = candidate
-        used_names.add(dest.name)
-        text = self._with_figures(path, text, out / "images" / dest.stem, f"images/{dest.stem}")
+        # Same-stem sources from different folders get "-2", "-3"… so one
+        # can never silently overwrite another's file or book folder.
+        name = md_export.claim_name(path.stem, used_names)
+        dest = out / name if style != "single" else out / f"{name}.md"
+        text = self._with_figures(path, text, *md_export.figure_dirs(dest, style))
+        # A book folder always has somewhere to put the summary (index +
+        # manifest), whether or not parts carry front matter.
         summary = ""
-        if self.settings.export_front_matter:
+        if style != "single" or self.settings.export_front_matter:
             summary = self._summarize_for_export(text, path.name, result)
-        md_export.export_single(
+        res = md_export.save(
             text,
             dest,
             source=path.name,
-            engine=engine,
+            style=style,
+            ai_target=target,
+            details=result.details if result else None,
             front_matter=self.settings.export_front_matter,
             summary=summary,
-            title=title,
-            author=author,
-            **meta_kw,
         )
-        return 1
+        return len(res.paths)
 
     # -- errors ------------------------------------------------------------------
     def _error_handlers(self) -> dict:

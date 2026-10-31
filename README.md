@@ -125,7 +125,7 @@ available inside the app via the **❓ Help** button.
   button — one file gets a save dialog, a batch gets a folder (Copy/Save respect
   the Clean-output setting)
 - **Per-file status** (done / error) with the error message shown inline in the preview
-- Powered by `markitdown[all]`, so it understands a wide range of formats:
+- Powered by `markitdown` (only its local converters — nothing that uploads), so it understands a wide range of formats:
 
   | Category   | Formats |
   |------------|---------|

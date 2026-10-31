@@ -21,7 +21,7 @@ classifiers = [
 ]
 
 dependencies = [
-    "markitdown[all]>=0.1.0",
+    "markitdown[docx,outlook,pdf,pptx,xls,xlsx]>=0.1.0",  # not [all]: no online speech, YouTube or Azure clients (ADR-001)
     "tkinterdnd2>=0.4.0",
     "rapidocr>=3.0",
     "onnxruntime-directml>=1.20; sys_platform == 'win32'",
@@ -34,6 +34,8 @@ dependencies = [
 [project.optional-dependencies]
 # The MCP server for Claude Desktop / Cursor / VS Code is opt-in.
 mcp = ["fastmcp>=3.0.0"]
+# The redesigned window (`app.py --new-ui`), still a preview.
+webui = ["pywebview>=6.2; sys_platform == 'win32'", "markdown-it-py>=3.0"]
 
 [project.gui-scripts]
 markdown-sidekick = "markdown_sidekick.ui:run"
@@ -49,4 +51,4 @@ Repository = "https://github.com/boblauzon/markdown-sidekick"
 where = ["src"]
 
 [tool.setuptools.package-data]
-markdown_sidekick = ["USERGUIDE.md"]
+markdown_sidekick = ["USERGUIDE.md", "webui/static/*"]

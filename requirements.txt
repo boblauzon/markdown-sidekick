@@ -1,5 +1,7 @@
 # Markdown Sidekick dependencies
-markitdown[all]>=0.1.0
+# Only the converters the app uses: [all] would also install the audio
+# converter that sends audio to Google, plus YouTube and Azure clients (ADR-001).
+markitdown[docx,outlook,pdf,pptx,xls,xlsx]>=0.1.0
 tkinterdnd2>=0.4.0
 
 # OCR pipeline (Phase 3): local, offline, permissively licensed.
@@ -21,3 +23,9 @@ av>=11,<19
 # MCP server (Phase 5): exposes the conversion pipeline as a tool for
 # Claude Desktop / Cursor / VS Code over stdio.
 fastmcp>=3.0.0
+
+# Redesigned window (preview: `app.py --new-ui`). pywebview (BSD) drives the
+# Windows WebView2 runtime through pythonnet (MIT); markdown-it-py (MIT)
+# renders the preview.
+pywebview>=6.2; sys_platform == 'win32'
+markdown-it-py>=3.0
