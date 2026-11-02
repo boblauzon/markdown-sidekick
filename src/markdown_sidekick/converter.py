@@ -454,7 +454,7 @@ class ConversionEngine:
                 # markitdown 0.1.8+ decodes binary junk with some multi-byte
                 # codec instead of returning "None": a salad of scripts that
                 # passes the \w test. The quality gauge's binary-noise check
-                # catches it (incl. its mixed-script signal).
+                # catches it (incl. its script-switch signal).
                 from .quality import assess_markdown
 
                 has_text = not assess_markdown(text).binary_noise

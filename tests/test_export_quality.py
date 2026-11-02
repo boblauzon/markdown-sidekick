@@ -602,6 +602,12 @@ class TestBinaryNoise:
         [
             "Python语言是一种广泛使用的API接口编程语言，它的HTTP库非常好用。使用JSON格式传输数据。",
             "これはテストの文章です。カタカナとひらがな、そして漢字を混ぜて書きます。データベースをPythonで操作する。",
+            # Latin terms and a Greek letter glued to the words around them. A
+            # rule counting words that mix scripts refused all of these as corrupt.
+            "Pythonでデータベースを操作する。HTTPリクエストはJSON形式で送信されます。\n応答時間は100μs以下です。\n",
+            "使用Python语言编写API接口。\n通过HTTP协议传输JSON数据。\n响应时间小于100μs。\n",
+            "대한민국(大韓民國)에서 Python을 배운다. HTTP와 JSON을 쓴다. α값은 작다. ",
+            "Δx ℝn 𝑓x ωt λ𝑥 μF ",
             "프로그래밍 언어 Python을 사용하여 데이터를 처리한다. HTTP 요청은 JSON 형식으로 전송된다. ",
             "यह हिंदी भाषा में एक नमूना पाठ है जो डिटेक्टर की जाँच करता है। ",
             "نص تجريبي باللغة العربية. يستخدم البرنامج ملف PDF لتحويل النص. ",

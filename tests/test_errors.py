@@ -167,6 +167,22 @@ class TestEmptyOutputGuard:
         assert res.ok
         assert not assess_markdown(res.markdown).binary_noise
 
+    @pytest.mark.parametrize("ext", [".txt", ".md", ".html"])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Pythonでデータベースを操作する。HTTPリクエストはJSON形式で送信されます。\n応答時間は100μs以下です。\n",
+            "使用Python语言编写API接口。\n通过HTTP协议传输JSON数据。\n响应时间小于100μs。\n",
+        ],
+    )
+    def test_technical_text_mixing_scripts_stays_ok(self, tmp_path, text, ext):
+        # Big enough to be refused, not just warned about, if it rated as noise.
+        p = tmp_path / f"manual{ext}"
+        p.write_text(text * 400, encoding="utf-8")
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert not assess_markdown(res.markdown).binary_noise
+
     def test_small_empty_file_stays_ok(self, tmp_path):
         # Below the size floor an empty conversion is not evidence of
         # corruption — small-but-real empty documents pass through.

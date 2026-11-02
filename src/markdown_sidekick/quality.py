@@ -45,15 +45,6 @@ def _is_noise_char(ch: str) -> bool:
     return unicodedata.category(ch) in ("Co", "Cn")
 
 
-# Third signal, for bytes decoded with the wrong multi-byte codec (markitdown
-# 0.1.8 turns binary junk into Hangul + CJK + Armenian + Arabic salad, all of
-# which are "word-like"): real text keeps to one script per word. On 483 real
-# converted books the share of mixed-script words peaked at 0.1% (at most 3
-# script groups per book); codec salad mixes ~90% of words over ~9 groups.
-_MIXED_SCRIPT_RATIO = 0.20
-_MIXED_SCRIPT_GROUPS = 3
-
-
 def _script_group(ch: str) -> str | None:
     if not ch.isalpha():
         return None
@@ -82,21 +73,11 @@ def _script_group(ch: str) -> str | None:
     return "other"
 
 
-def _script_mix(tokens: list[str]) -> tuple[float, int]:
-    """(share of words mixing two or more scripts, distinct script groups)."""
-    words = [t for t in tokens if sum(c.isalpha() for c in t) >= 2]
-    seen: set[str] = set()
-    mixed = 0
-    for word in words:
-        groups = {g for g in map(_script_group, word) if g}
-        seen |= groups
-        mixed += len(groups) >= 2
-    return (mixed / len(words) if words else 0.0), len(seen)
-
-
-# Fourth signal, for salad with too few spaces to count as words: bytes that are
-# all 0x80 or above decode to long runs nothing splits. Math ("Δx") and homoglyph
-# spam change script as often, but between two scripts; salad roams across many.
+# Third signal, for binary junk that passes as words: markitdown 0.1.8 decodes it
+# to Hangul + CJK + Armenian + Arabic salad, and bytes that are all 0x80 or above
+# to long runs nothing splits, so no word count. Math ("Δx") and homoglyph spam
+# change script as often, but between two scripts; salad roams across many. Words
+# mixing scripts prove nothing: Japanese and Chinese glue on Latin ("Pythonで").
 _SWITCH_MIN_RATIO = 0.5
 _SWITCH_MIN_PAIRS = 100
 _SWITCH_MIN_GROUPS = 6
@@ -163,7 +144,6 @@ class QualityReport:
     doubled_words: int = 0
     noise_ratio: float = 0.0
     word_ratio: float = 1.0
-    script_mix: float = 0.0  # share of words mixing scripts (wrong-codec salad)
     script_switch: float = 0.0  # share of neighbouring letters changing script
     binary_noise: bool = False
     issues: list[str] = field(default_factory=list)
@@ -197,7 +177,6 @@ class QualityReport:
             "doubled_words": self.doubled_words,
             "noise_ratio": round(self.noise_ratio, 3),
             "word_ratio": round(self.word_ratio, 3),
-            "script_mix": round(self.script_mix, 3),
             "script_switch": round(self.script_switch, 3),
             "binary_noise": self.binary_noise,
             "issues": list(self.issues),
@@ -241,11 +220,10 @@ def _assess(text: str) -> QualityReport:
     sample = text[:_NOISE_SAMPLE_CHARS]
     r.noise_ratio = sum(1 for ch in sample if _is_noise_char(ch)) / len(sample)
     tokens = sample.split()
-    groups = switch_pairs = switch_groups = 0
+    switch_pairs = switch_groups = 0
     if tokens:
         wordlike = sum(1 for t in tokens if all(_is_wordlike_char(c) for c in t))
         r.word_ratio = wordlike / len(tokens)
-        r.script_mix, groups = _script_mix(tokens)
         r.script_switch, switch_pairs, switch_groups = _script_switches(tokens)
     if len(sample) >= _NOISE_MIN_CHARS:
         r.binary_noise = (
@@ -258,7 +236,6 @@ def _assess(text: str) -> QualityReport:
                 r.noise_ratio >= 0.10
                 or (r.noise_ratio >= 0.02 and r.word_ratio <= 0.15)
                 or r.word_ratio <= 0.05
-                or (r.script_mix >= _MIXED_SCRIPT_RATIO and groups >= _MIXED_SCRIPT_GROUPS)
             )
         )
 
