@@ -21,6 +21,9 @@ for pkg in (
     "av",
     "markitdown",
     "fastmcp",  # the exe hosts the MCP server via `MarkdownSidekick.exe --mcp`
+    "webview",  # the redesigned window (`--new-ui`): WebView2 DLLs + its JS
+    "pythonnet",  # Python.Runtime.dll, which pywebview drives WebView2 through
+    "clr_loader",
 ):
     d, b, h = collect_all(pkg)
     datas += d
@@ -29,6 +32,11 @@ for pkg in (
 
 # Bundled user guide (package data, loaded via importlib.resources).
 datas += [("src/markdown_sidekick/USERGUIDE.md", "markdown_sidekick")]
+# The web UI's page, and the window icon it sets.
+datas += [
+    ("src/markdown_sidekick/webui/static", "markdown_sidekick/webui/static"),
+    ("assets/MarkdownSidekick.ico", "markdown_sidekick/webui/static"),
+]
 
 a = Analysis(
     ["app.py"],
@@ -40,8 +48,14 @@ a = Analysis(
         # Not used by the app.
         "IPython", "matplotlib", "pytest", "setuptools._distutils",
     ],
+    # True takes the archive out of both exes, but the loose modules are
+    # uncompressed and cost more. Measured: 559 vs 543 MB, 9,310 vs 3,324 files.
     noarchive=False,
 )
+
+# RapidOCR only reads images and audio goes through av, so OpenCV's video backend
+# (27 MB of FFmpeg, loaded on the first VideoCapture) is never used.
+a.binaries = [entry for entry in a.binaries if "opencv_videoio_ffmpeg" not in entry[0]]
 
 pyz = PYZ(a.pure)
 

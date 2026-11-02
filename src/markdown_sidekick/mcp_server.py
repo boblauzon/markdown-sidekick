@@ -30,7 +30,7 @@ os.environ.setdefault("FASTMCP_CHECK_FOR_UPDATES", "off")  # Literal: stable|pre
 
 from fastmcp import FastMCP
 
-from . import debuglog, errors, export
+from . import __version__, debuglog, errors, export, netguard
 from .cleanup import clean_markdown
 from .converter import ConversionEngine, ConversionResult
 from .quality import assess_markdown
@@ -45,6 +45,7 @@ logger = logging.getLogger("MarkdownSidekickMCP")
 
 mcp = FastMCP(
     name="Markdown Sidekick",
+    version=__version__,  # serverInfo: the app's version, not fastmcp's
     instructions=(
         "Converts local documents, images, scanned/vector PDFs and audio files to "
         "Markdown using a local offline pipeline (markitdown + RapidOCR + "
@@ -101,8 +102,8 @@ def _conversion_error(result: ConversionResult) -> str:
 # Warnings from the conversion behind each cached result (a better route
 # failed and a lesser one produced the text) — relayed with the Markdown.
 _convert_notes: dict[str, list[str]] = {}
-# The source's own metadata from the last conversion of each path (export
-# keyword arguments: title, author, title_source, meta) for save_to.
+# The source's own details from the last conversion of each path
+# (ConversionResult.details: engine, title, author, title_source, meta) for save_to.
 _convert_meta: dict[str, dict] = {}
 
 
@@ -133,13 +134,7 @@ def _convert_cached(resolved: str, clean: bool) -> tuple[str | None, str | None]
     _convert_notes[resolved] = [
         f"{w.code}: {w.title} Next step: {w.next_step} (ref {w.ref})" for w in result.warnings
     ]
-    _convert_meta[resolved] = {
-        "engine": result.engine,
-        "title": result.doc_title,
-        "author": result.doc_author,
-        "title_source": result.title_source,
-        "meta": dict(result.doc_meta),
-    }
+    _convert_meta[resolved] = result.details
     while len(_convert_cache) >= _CACHE_MAX:
         _convert_cache.pop(next(iter(_convert_cache)))
     _convert_cache[key] = markdown
@@ -157,7 +152,15 @@ def _resolve(file_path: str) -> tuple[str | None, str | None]:
     return resolved, None
 
 
-@mcp.tool
+# Hints a client uses to decide whether to ask the user first. MCP assumes the
+# worst when a hint is missing (may destroy data, reaches the outside world),
+# so every tool states them. "Read-only" and "local" describe the user's files
+# and the network: the caches and the log don't count.
+_READS_LOCAL = {"readOnlyHint": True, "idempotentHint": True, "openWorldHint": False}
+
+
+# save_to can replace an existing file, so this one can't claim to be read-only.
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": True, "openWorldHint": False})
 def convert_local_file(
     file_path: str,
     clean: bool = True,
@@ -206,19 +209,19 @@ def convert_local_file(
     if save_to:
         out_path = os.path.abspath(os.path.expanduser(save_to))
         try:
-            export.export_single(
+            export.save(
                 markdown,
                 Path(out_path),
                 source=os.path.basename(resolved),
+                details=_convert_meta.get(resolved),
                 front_matter=Settings.load().export_front_matter,
-                **_convert_meta.get(resolved, {}),
             )
         except OSError as exc:
             return _coded(
                 errors.report(errors.classify_os_error(exc), exc=exc, where="mcp save_to", target=out_path),
                 f"saving to '{out_path}'",
             )
-        # export_single read the file back, so this is a confirmed save.
+        # export.save read the file back, so this is a confirmed save.
         title = _convert_meta.get(resolved, {}).get("title", "")
         titled = f" Title: {title}." if title else ""
         return f"Saved Markdown to {out_path} (verified on disk).{titled} {report.summary()}"
@@ -234,7 +237,7 @@ def convert_local_file(
     return noise_note + markdown
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def convert_outline(
     file_path: str, clean: bool = True, max_tokens: int = export.DEFAULT_MAX_TOKENS
 ) -> dict:
@@ -267,7 +270,7 @@ def convert_outline(
     }
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def convert_section(
     file_path: str,
     section_index: int,
@@ -298,13 +301,18 @@ def convert_section(
 
 
 _URL_MAX_BYTES = 50 * 1024 * 1024
+# Wikipedia answers 403 to a bare product name: its policy asks for a link.
+_URL_USER_AGENT = f"MarkdownSidekick/{__version__} (https://github.com/boblauzon/markdown-sidekick)"
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": True, "idempotentHint": True, "openWorldHint": True})
 def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
     """Download a document (web page, PDF, image, …) and convert it to
     Markdown with the same local pipeline. http/https only, 50 MB cap.
+    Addresses on this computer or a private network are refused, including
+    through a redirect; for those, convert a local copy with convert_local_file.
     """
+    import ssl
     import tempfile
     import urllib.parse
     import urllib.request
@@ -314,13 +322,16 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
         return _coded(errors.report("MS-131", where="mcp convert_url", detail=f"scheme '{parsed.scheme}'"))
     suffix = Path(parsed.path).suffix.lower() or ".html"
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "MarkdownSidekick/1.0"})
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        req = urllib.request.Request(url, headers={"User-Agent": _URL_USER_AGENT})
+        with netguard.opener().open(req, timeout=60) as resp:
             data = resp.read(_URL_MAX_BYTES + 1)
         if len(data) > _URL_MAX_BYTES:
             return _coded(errors.report("MS-131", where="mcp convert_url", detail="over 50 MB", url=url))
+    except netguard.BlockedAddress as exc:
+        return _coded(errors.report("MS-133", where="mcp convert_url", detail=str(exc), url=url))
     except Exception as exc:
-        return _coded(errors.report("MS-130", exc=exc, where="mcp convert_url", url=url))
+        certificate = isinstance(getattr(exc, "reason", None), ssl.SSLCertVerificationError)
+        return _coded(errors.report("MS-134" if certificate else "MS-130", exc=exc, where="mcp convert_url", url=url))
 
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td) / f"download{suffix}"
@@ -338,7 +349,7 @@ def convert_url(url: str, clean: bool = True, max_chars: int = 150_000) -> str:
     return markdown
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def list_capabilities() -> dict:
     """Report which local conversion engines are available in this install."""
     from . import audio, mineru, ocr, pdflayout
@@ -400,7 +411,8 @@ def _batch_view(job: _Batch) -> dict:
     return view
 
 
-@mcp.tool
+# Re-runs replace the batch's own outputs, and overwrite=True replaces others.
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": True, "idempotentHint": False, "openWorldHint": False})
 def convert_batch(
     inputs: list[str],
     output_root: str,
@@ -526,7 +538,7 @@ def convert_batch(
     }
 
 
-@mcp.tool
+@mcp.tool(annotations=_READS_LOCAL)
 def batch_status(batch_id: str = "") -> dict:
     """Progress of a convert_batch run (the latest when batch_id is blank).
     When state is "done" (or "cancelled"), "summary" holds the totals, the
@@ -539,7 +551,7 @@ def batch_status(batch_id: str = "") -> dict:
     return _batch_view(job)
 
 
-@mcp.tool
+@mcp.tool(annotations={"readOnlyHint": False, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False})
 def cancel_batch(batch_id: str = "") -> dict:
     """Stop a running convert_batch (the latest when batch_id is blank).
     Files already converted are kept and listed in the manifest; the rest
@@ -553,8 +565,22 @@ def cancel_batch(batch_id: str = "") -> dict:
     return _batch_view(job)
 
 
+# Held while the server runs: the installer looks for it to say why an AI
+# tool is about to lose its connection (Restart Manager then closes us).
+_running_mutex = None
+
+
+def _hold_running_mutex() -> None:
+    global _running_mutex
+    if sys.platform == "win32" and _running_mutex is None:
+        import ctypes
+
+        _running_mutex = ctypes.windll.kernel32.CreateMutexW(None, False, "MarkdownSidekickMCP")
+
+
 def main() -> None:
     errors.install_crash_hooks()
+    _hold_running_mutex()
     settings = Settings.load()
     if settings.debug_mode or debuglog.debug_requested():
         # Files only — stdout stays reserved for JSON-RPC.

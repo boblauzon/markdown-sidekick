@@ -116,7 +116,33 @@ def _build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--sessions", type=int, default=1, help="how many of the newest debug sessions to include (default 1)")
     diag.add_argument("--report", type=Path, default=None, help="also write a shareable .zip (digest + logs + settings) to this path")
     diag.add_argument("--no-snapshots", action="store_true", help="leave the Markdown snapshots (document text) out of the --report zip")
+    upd = sub.add_parser(
+        "update",
+        help="check GitHub for a newer version (exit 0: up to date, 10: one is available, 1: couldn't check)",
+    )
+    upd.add_argument("--check", action="store_true", help="only check (the default; installing is done from the app)")
     return parser
+
+
+def _update_check() -> int:
+    """Ask GitHub for the latest version, once. The CLI never checks on its
+    own; installing is the app's job (it can close and reopen itself)."""
+    from . import __version__, updates
+
+    try:
+        release = updates.check()
+    except updates.UpdateError as exc:
+        _print_incident(errors.report(exc.code, where="cli update", detail=str(exc)))
+        return 1
+    if release is None:
+        print(f"Markdown Sidekick {__version__} is the latest version.")
+        return 0
+    print(f"Markdown Sidekick {release.version} is available (you have {__version__})."
+          + (" It includes a privacy or security fix." if release.important else ""))
+    if release.notes:
+        print(release.notes)
+    print(f"Get it: {updates.RELEASES_URL}")
+    return 10
 
 
 def _print_capabilities() -> int:
@@ -374,16 +400,12 @@ def _write_outputs(
             notes.append(failure)
 
     out_dir = args.out if args.out is not None else path.parent
-    book = bool(args.split_chapters or args.ai_target)
+    style = "ai" if args.ai_target else "chapters" if args.split_chapters else "single"
+    dest = default_output_path(path, out_dir) if style == "single" else out_dir / path.stem
     from . import figures
 
     if want_images and path.suffix.lower() == ".pdf":
-        # Book folders keep images/ beside the parts; single files get a
-        # per-document subfolder so several conversions can share out_dir.
-        if book:
-            images_dir, rel_dir = out_dir / path.stem / "images", "images"
-        else:
-            images_dir, rel_dir = out_dir / "images" / path.stem, f"images/{path.stem}"
+        images_dir, rel_dir = export.figure_dirs(dest, style)
         try:
             figs = figures.extract_pdf_figures(path, images_dir)
         except Exception as exc:  # the Markdown is still worth saving
@@ -406,44 +428,18 @@ def _write_outputs(
             record["figures"] = len(figs)
     else:
         markdown = figures.strip_figure_markers(markdown)
-    if book:
-        res = export.export_book(
-            markdown,
-            out_dir / path.stem,
-            source=path.name,
-            engine=result.engine,
-            front_matter=not args.no_front_matter,
-            max_tokens=(
-                export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
-            ),
-            ai_sections=args.ai_target is not None,
-            summary=summary,
-            title=result.doc_title,
-            author=result.doc_author,
-            notebook=args.ai_target in export.NOTEBOOK_TARGETS,
-            title_source=result.title_source,
-            meta=result.doc_meta,
-        )
-        written = [str(p) for p in res.paths]
-        if res.index_path:
-            written.append(str(res.index_path))
-        if res.manifest_path:
-            written.append(str(res.manifest_path))
-    else:
-        out_path = default_output_path(path, out_dir)
-        export.export_single(
-            markdown,
-            out_path,
-            source=path.name,
-            engine=result.engine,
-            front_matter=not args.no_front_matter,
-            summary=summary,
-            title=result.doc_title,
-            author=result.doc_author,
-            title_source=result.title_source,
-            meta=result.doc_meta,
-        )
-        written = [str(out_path)]
+    res = export.save(
+        markdown,
+        dest,
+        source=path.name,
+        style=style,
+        ai_target=args.ai_target or "",
+        details=result.details,
+        front_matter=not args.no_front_matter,
+        summary=summary,
+        max_tokens=args.max_tokens,  # chapters only; --ai-target sets its own budget
+    )
+    written = [str(p) for p in res.files]
     record["written"] = written
 
     report = assess_markdown(markdown)
@@ -464,6 +460,8 @@ def main(argv: list[str] | None = None) -> int:
             return _diagnostics(args)
         if args.command == "batch":
             return _batch(args)
+        if args.command == "update":
+            return _update_check()
         return _convert(args)
     except Exception as exc:  # a bug, not a bad input: code it and say where to look
         _print_incident(errors.report("MS-900", exc=exc, where=f"cli {args.command}"))

@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-# markitdown's audio converter imports pydub, which warns on import when no
-# ffmpeg is on PATH. Audio goes through faster-whisper and PyAV's bundled
-# FFmpeg instead, so the warning is noise on every CLI run and MCP start.
+# Where pydub is installed (our requirements no longer pull it in), markitdown's
+# audio converter imports it and it warns when no ffmpeg is on PATH. Audio goes
+# through faster-whisper and PyAV's bundled FFmpeg, so the warning is noise.
 warnings.filterwarnings("ignore", message=r"Couldn't find ff(?:mpeg|probe)", category=RuntimeWarning)
 
 try:
@@ -25,7 +25,7 @@ try:
 except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
     raise ImportError(
         "The 'markitdown' package is not installed. Activate the project "
-        "virtual environment or run: pip install \"markitdown[all]\""
+        "virtual environment or run: pip install -r requirements.txt -c constraints.txt"
     ) from exc
 
 from . import audio, debuglog, errors, metadata, mineru, ocr, pdflayout
@@ -111,6 +111,18 @@ class ConversionResult:
     @property
     def title(self) -> str:
         return self.source.name
+
+    @property
+    def details(self) -> dict:
+        """The book's details as ``export.save`` takes them — plain data, so
+        a batch worker can return it and the MCP server can cache it."""
+        return {
+            "engine": self.engine,
+            "title": self.doc_title,
+            "author": self.doc_author,
+            "title_source": self.title_source,
+            "meta": dict(self.doc_meta),
+        }
 
 
 def _attach_metadata(result: ConversionResult) -> None:
