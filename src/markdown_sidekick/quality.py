@@ -94,6 +94,30 @@ def _script_mix(tokens: list[str]) -> tuple[float, int]:
     return (mixed / len(words) if words else 0.0), len(seen)
 
 
+# Fourth signal, for salad with too few spaces to count as words: bytes that are
+# all 0x80 or above decode to long runs nothing splits. Math ("Δx") and homoglyph
+# spam change script as often, but between two scripts; salad roams across many.
+_SWITCH_MIN_RATIO = 0.5
+_SWITCH_MIN_PAIRS = 100
+_SWITCH_MIN_GROUPS = 6
+
+
+def _script_switches(tokens: list[str]) -> tuple[float, int, int]:
+    """(share of neighbouring letters changing script, letter pairs, groups changed between)."""
+    pairs = switches = 0
+    seen: set[str] = set()
+    for token in tokens:
+        prev = None
+        for group in filter(None, map(_script_group, token)):
+            if prev:
+                pairs += 1
+                if group != prev:
+                    switches += 1
+                    seen.update((prev, group))
+            prev = group
+    return (switches / pairs if pairs else 0.0), pairs, len(seen)
+
+
 def _is_wordlike_char(ch: str) -> bool:
     o = ord(ch)
     if o < 127:
@@ -140,6 +164,7 @@ class QualityReport:
     noise_ratio: float = 0.0
     word_ratio: float = 1.0
     script_mix: float = 0.0  # share of words mixing scripts (wrong-codec salad)
+    script_switch: float = 0.0  # share of neighbouring letters changing script
     binary_noise: bool = False
     issues: list[str] = field(default_factory=list)
     score: int = 100  # 0-100; 100 = no detected artifacts, good structure
@@ -173,6 +198,7 @@ class QualityReport:
             "noise_ratio": round(self.noise_ratio, 3),
             "word_ratio": round(self.word_ratio, 3),
             "script_mix": round(self.script_mix, 3),
+            "script_switch": round(self.script_switch, 3),
             "binary_noise": self.binary_noise,
             "issues": list(self.issues),
         }
@@ -215,17 +241,25 @@ def _assess(text: str) -> QualityReport:
     sample = text[:_NOISE_SAMPLE_CHARS]
     r.noise_ratio = sum(1 for ch in sample if _is_noise_char(ch)) / len(sample)
     tokens = sample.split()
-    groups = 0
+    groups = switch_pairs = switch_groups = 0
     if tokens:
         wordlike = sum(1 for t in tokens if all(_is_wordlike_char(c) for c in t))
         r.word_ratio = wordlike / len(tokens)
         r.script_mix, groups = _script_mix(tokens)
-    if len(sample) >= _NOISE_MIN_CHARS and len(tokens) >= _NOISE_MIN_TOKENS:
+        r.script_switch, switch_pairs, switch_groups = _script_switches(tokens)
+    if len(sample) >= _NOISE_MIN_CHARS:
         r.binary_noise = (
-            r.noise_ratio >= 0.10
-            or (r.noise_ratio >= 0.02 and r.word_ratio <= 0.15)
-            or r.word_ratio <= 0.05
-            or (r.script_mix >= _MIXED_SCRIPT_RATIO and groups >= _MIXED_SCRIPT_GROUPS)
+            r.script_switch >= _SWITCH_MIN_RATIO
+            and switch_pairs >= _SWITCH_MIN_PAIRS
+            and switch_groups >= _SWITCH_MIN_GROUPS
+        ) or (
+            len(tokens) >= _NOISE_MIN_TOKENS
+            and (
+                r.noise_ratio >= 0.10
+                or (r.noise_ratio >= 0.02 and r.word_ratio <= 0.15)
+                or r.word_ratio <= 0.05
+                or (r.script_mix >= _MIXED_SCRIPT_RATIO and groups >= _MIXED_SCRIPT_GROUPS)
+            )
         )
 
     score = 100

@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import random
+
+import pytest
 
 from markdown_sidekick.export import (
     build_front_matter,
@@ -580,6 +583,51 @@ class TestBinaryNoise:
         # artifact cleanup targets) must not read as binary garbage.
         doc = ("A real paragraph of readable text. " * 50) + "wor�d s�pots\n"
         r = assess_markdown(doc)
+        assert not r.binary_noise
+
+    def test_salad_with_no_spaces_flagged(self):
+        # markitdown's lossy decode of bytes that are all 0x80 or above: too few
+        # words for the other signals, so changing script is the only tell.
+        rng = random.Random(42)
+        raw = bytes(rng.randrange(0x80, 0x100) for _ in range(16_384))
+        text = raw.decode("utf-8", errors="ignore")
+        assert len(text.split()) < 40
+        r = assess_markdown(text)
+        assert r.binary_noise
+        assert r.script_switch >= 0.5
+        assert r.as_dict()["script_switch"] == round(r.script_switch, 3)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Python语言是一种广泛使用的API接口编程语言，它的HTTP库非常好用。使用JSON格式传输数据。",
+            "これはテストの文章です。カタカナとひらがな、そして漢字を混ぜて書きます。データベースをPythonで操作する。",
+            "프로그래밍 언어 Python을 사용하여 데이터를 처리한다. HTTP 요청은 JSON 형식으로 전송된다. ",
+            "यह हिंदी भाषा में एक नमूना पाठ है जो डिटेक्टर की जाँच करता है। ",
+            "نص تجريبي باللغة العربية. يستخدم البرنامج ملف PDF لتحويل النص. ",
+            "ðə kwɪk braʊn fɒks dʒʌmps ˈoʊvər ðə ˈleɪzi dɔɡ ",
+            # A multi-language manual: many scripts, but each word stays in one.
+            "Press the button. Нажмите кнопку. Πατήστε το κουμπί. اضغط على الزر. 電源を押してください。 שלום\n",
+            # The same with no spaces at all: one long "word", still few switches.
+            "PressthebuttonНажмитекнопкуΠατήστετοκουμπίاضغطعلىالزر電源を押してくださいשלום한국어",
+            # Kanji and kana alternate constantly with no spaces, so they must
+            # count as one script, or a few foreign terms would look like salad.
+            "日本語の文章を読む。データとαとЖとאを書く。私の本を見る。",
+            # In-word switching at its most extreme, but between only two scripts.
+            "Δx Δy Δt ωt kΩ μF μm nΩ dθ dφ sinθ cosθ tanφ eλ eπ λx ",
+            "Pаypаl ассount vеrify сliсk hеrе now frее оffеr ",
+            "ℝn ℓp 𝑓x 𝐀b ﬁx ",
+        ],
+    )
+    def test_real_multiscript_writing_not_flagged(self, text):
+        r = assess_markdown(text * 200)
+        assert not r.binary_noise
+
+    def test_too_few_letters_to_judge_by_switches(self):
+        # A page of numbers with one odd word: half its letter pairs change
+        # script, but five changes prove nothing.
+        r = assess_markdown("1 2 3 4 " * 60 + "an " * 5 + "aБγאدあ")
+        assert r.script_switch == 0.5
         assert not r.binary_noise
 
 

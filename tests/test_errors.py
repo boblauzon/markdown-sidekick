@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from markdown_sidekick.converter import ConversionEngine, explain_error
+from markdown_sidekick.quality import assess_markdown
 
 
 class TestExplainError:
@@ -123,6 +126,46 @@ class TestEmptyOutputGuard:
         res = self._engine().convert_file(p)
         assert not res.ok
         assert "produced no text" in (res.error or "")
+
+    @pytest.mark.parametrize("seed", [42, 7, 1234])
+    @pytest.mark.parametrize("ext", [".txt", ".csv", ".docx", ".xlsx", ".epub", ".bin", ".pdf"])
+    def test_garbage_with_no_ascii_bytes_reports_error(self, tmp_path, ext, seed):
+        # No byte below 0x80 means no spaces in the decoded text, so too few
+        # words for the word-based noise signals to run at all.
+        rng = random.Random(seed)
+        p = tmp_path / f"garbage{ext}"
+        p.write_bytes(bytes(rng.randrange(0x80, 0x100) for _ in range(16_384)))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+
+    @pytest.mark.parametrize("ext", [".txt", ".csv", ".docx", ".epub", ".pdf"])
+    def test_real_start_then_zeros_reports_error(self, tmp_path, ext):
+        # What a crash or a failed sync leaves. NUL is valid UTF-8, so only the
+        # output gives this away: asking whether the bytes decode would pass it.
+        p = tmp_path / f"partial{ext}"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 45 + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+
+    @pytest.mark.parametrize(
+        "text, encoding",
+        [
+            ("Le coeur de l'été déjà passé, où êtes-vous allé à Noël ? ", "latin-1"),
+            ("Это пример текста на русском языке для проверки детектора. ", "cp1251"),
+            ("これはテストの文章です。日本語のカタカナとひらがな、漢字を混ぜます。\n", "shift_jis"),
+            ("这是一段用于测试编码检测器的中文文本，内容没有特别的意义。\n", "gb18030"),
+            ("A perfectly ordinary paragraph of plain English text. ", "utf-16"),
+        ],
+    )
+    def test_real_text_in_legacy_encodings_stays_ok(self, tmp_path, text, encoding):
+        # Not UTF-8, so these are the guard's likeliest false errors. Only the
+        # verdict is checked: charset detection can still pick a neighbouring
+        # code page, which isn't this guard's concern.
+        p = tmp_path / "legacy.txt"
+        p.write_bytes((text * 800).encode(encoding))
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert not assess_markdown(res.markdown).binary_noise
 
     def test_small_empty_file_stays_ok(self, tmp_path):
         # Below the size floor an empty conversion is not evidence of
