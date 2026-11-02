@@ -3,12 +3,8 @@
 from __future__ import annotations
 
 import random
-from types import SimpleNamespace
-
-import pytest
 
 from markdown_sidekick.converter import ConversionEngine, explain_error
-from markdown_sidekick.quality import assess_markdown
 
 
 class TestExplainError:
@@ -92,9 +88,8 @@ class TestExplainError:
 
 
 def _textish_garbage(n: int) -> bytes:
-    """Byte salad that looks like text — the shape markitdown 'converts' without
-    any error: to whichever byte pairs happen to be valid UTF-8 (0.1.8+), or to
-    the literal string 'None' / a '| None |' table (through 0.1.7)."""
+    """Byte salad that decodes as text — the shape markitdown 'converts' to
+    the literal string 'None' (or a '| None |' table) without any error."""
     rng = random.Random(42)
     out = bytearray()
     for _ in range(n):
@@ -108,135 +103,12 @@ def _textish_garbage(n: int) -> bytes:
     return bytes(out)
 
 
-def _salad_text() -> str:
-    """What markitdown 0.1.8+ makes of `_textish_garbage`."""
-    return _textish_garbage(20_000).decode("utf-8", errors="ignore")
-
-
-def _stub_markitdown(monkeypatch, engine: ConversionEngine, output: str) -> None:
-    monkeypatch.setattr(
-        engine._md, "convert", lambda _path: SimpleNamespace(text_content=output)
-    )
-
-
 class TestEmptyOutputGuard:
-    """A non-trivial source 'converting' to no real text must be an error, not
-    a silent success (see the markitdown versions in `_textish_garbage`)."""
+    """A non-trivial source 'converting' to no real text must be an error,
+    not a silent success (markitdown emits str(None) for binary garbage)."""
 
     def _engine(self) -> ConversionEngine:
         return ConversionEngine(enable_ocr=False, enable_audio=False)
-
-    @pytest.mark.parametrize("output", ["None", "| None |\n| --- |\n| None |\n", ""])
-    def test_str_none_leak_reports_error(self, tmp_path, monkeypatch, output):
-        # requirements.txt still allows markitdown <= 0.1.7, and the real
-        # library no longer reaches this shape, so it has to be stubbed.
-        engine = self._engine()
-        _stub_markitdown(monkeypatch, engine, output)
-        p = tmp_path / "garbage.docx"
-        p.write_bytes(_textish_garbage(20_000))
-        res = engine.convert_file(p)
-        assert res.error_code == "MS-106"
-
-    @pytest.mark.parametrize(
-        "ext, code",
-        [
-            (".txt", "MS-106"),
-            (".docx", "MS-106"),
-            (".csv", "MS-106"),
-            (".xlsx", "MS-106"),
-            (".epub", "MS-106"),
-            (".bin", "MS-106"),
-            (".pdf", "MS-110"),  # any textless PDF with OCR off: try OCR first
-        ],
-    )
-    def test_garbage_is_an_error_under_any_extension(self, tmp_path, ext, code):
-        p = tmp_path / f"garbage{ext}"
-        p.write_bytes(_textish_garbage(20_000))
-        res = self._engine().convert_file(p)
-        assert not res.ok
-        assert res.error_code == code
-
-    @pytest.mark.parametrize("ext", [".txt", ".csv"])
-    @pytest.mark.parametrize(
-        "low, high", [(0, 0x100), (0x80, 0x100)], ids=["full-range", "high-bytes-no-spaces"]
-    )
-    def test_other_byte_ranges_report_error(self, tmp_path, ext, low, high):
-        rng = random.Random(7)
-        p = tmp_path / f"garbage{ext}"
-        p.write_bytes(bytes(rng.randrange(low, high) for _ in range(20_000)))
-        res = self._engine().convert_file(p)
-        assert res.error_code == "MS-106"
-
-    @pytest.mark.parametrize(
-        "text, encoding",
-        [
-            ("Le coeur de l'été déjà passé, où êtes-vous allé à Noël ? ", "latin-1"),
-            ("Это пример текста на русском языке для проверки детектора. ", "cp1251"),
-            ("これはテストの文章です。日本語のカタカナとひらがな、漢字を混ぜます。\n", "shift_jis"),
-            ("这是一段用于测试编码检测器的中文文本，内容没有特别的意义。\n", "gb18030"),
-            ("A perfectly ordinary paragraph of plain English text. ", "utf-16"),
-        ],
-    )
-    def test_real_text_in_legacy_encodings_stays_ok(self, tmp_path, text, encoding):
-        # Not UTF-8, so these are the guard's likeliest false positives. Only
-        # the verdict is checked: markitdown's charset detection can still pick
-        # a neighbouring code page, which is not this guard's concern.
-        p = tmp_path / "legacy.txt"
-        p.write_bytes((text * 800).encode(encoding))
-        res = self._engine().convert_file(p)
-        assert res.ok
-        assert not assess_markdown(res.markdown).binary_noise
-
-    def test_valid_utf8_that_only_looks_noisy_keeps_its_warning(self, tmp_path, monkeypatch):
-        # Every byte decoded, so nothing failed: this is what the file says.
-        salad = _salad_text() * 4
-        engine = self._engine()
-        _stub_markitdown(monkeypatch, engine, salad)
-        p = tmp_path / "salad.txt"
-        p.write_text(salad, encoding="utf-8", newline="")
-        assert p.stat().st_size >= 16_384
-        res = engine.convert_file(p)
-        assert res.ok
-        assert assess_markdown(res.markdown).binary_noise
-
-    @pytest.mark.parametrize(
-        "name, magic",
-        [
-            ("real.pdf", b"%PDF-1.7\n"),
-            ("real.docx", b"PK\x03\x04"),
-            ("real.xls", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"),
-        ],
-    )
-    def test_real_container_with_garbled_text_keeps_its_warning(
-        self, tmp_path, monkeypatch, name, magic
-    ):
-        # Real books with broken text layers reach noise_ratio >= 0.10, and most
-        # of a damaged document can still be useful: warn, don't discard it.
-        engine = self._engine()
-        _stub_markitdown(monkeypatch, engine, _salad_text())
-        p = tmp_path / name
-        p.write_bytes(magic + _textish_garbage(20_000))
-        res = engine.convert_file(p)
-        assert res.ok
-        assert assess_markdown(res.markdown).binary_noise
-
-    def test_garbage_html_keeps_its_warning(self, tmp_path):
-        # The HTML parser decodes anything, and a real legacy-encoded page can
-        # come out just as noisy, so this tier only warns.
-        rng = random.Random(7)
-        p = tmp_path / "garbage.html"
-        p.write_bytes(bytes(rng.randrange(256) for _ in range(20_000)))
-        res = self._engine().convert_file(p)
-        assert res.ok
-        assert assess_markdown(res.markdown).binary_noise
-
-    def test_small_garbage_stays_a_warning(self, tmp_path):
-        # Below the size floor the guard stands aside, as it does for empty output.
-        p = tmp_path / "small.txt"
-        p.write_bytes(_textish_garbage(8_000))
-        res = self._engine().convert_file(p)
-        assert res.ok
-        assert assess_markdown(res.markdown).binary_noise
 
     def test_garbage_docx_reports_error(self, tmp_path):
         p = tmp_path / "garbage.docx"

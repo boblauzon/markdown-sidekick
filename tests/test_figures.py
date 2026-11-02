@@ -149,3 +149,19 @@ class TestEndToEnd:
         figs = figures.extract_pdf_figures(p, tmp_path / "images")
         out = insert_figure_links(md, figs)
         assert out.index("Intro text") < out.index("![Figure 1.1](images/fig_p1_1.") < out.index("Closing text")
+
+
+def test_figure_extraction_is_quiet(tmp_path, caplog):
+    """pypdfium2 5.14 logs "potentially unsafe" whenever a foreign bitmap is
+    closed; ours are copied first, so extraction must not log it."""
+    import logging
+
+    from markdown_sidekick import figures
+    from pdfgen import Image, make_layout_pdf
+
+    pdf = tmp_path / "f.pdf"
+    pdf.write_bytes(make_layout_pdf([[Image((160, 130), (72, 300, 200, 160))]]))
+    with caplog.at_level(logging.WARNING):
+        figs = figures.extract_pdf_figures(pdf, tmp_path / "images")
+    assert figs
+    assert not [r for r in caplog.records if "potentially unsafe" in r.getMessage()]

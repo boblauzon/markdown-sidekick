@@ -76,6 +76,38 @@ def _build_parser() -> argparse.ArgumentParser:
     conv.add_argument("--whisper-model", default=None, help="whisper model size (tiny/base/small/medium)")
     conv.add_argument("--debug", action="store_true", help="record a detailed trace of this run (timings, routing decisions, cleanup passes) under the log folder; see the diagnostics command")
 
+    from . import batch
+
+    bat = sub.add_parser(
+        "batch",
+        help="convert a whole folder (a library) into an output folder, with a manifest; re-runs skip what is unchanged",
+        description="Convert every document and ebook under the given folders (and any files "
+        "listed) into --out, mirroring the folder structure. Writes _manifest.json and "
+        "_manifest.csv in --out with one row per input. Prints one JSON summary to stdout "
+        "(totals, failures, low-quality outputs); progress goes to stderr. Exit code 1 when "
+        "any input failed.",
+    )
+    bat.add_argument("inputs", nargs="+", help="folders to walk and/or files")
+    bat.add_argument("--out", type=Path, required=True, help="output root (created if missing; mirrored folder structure)")
+    bat.add_argument("--naming", choices=batch.NAMING_MODES, default="source", help="output file names: the source's name (default), the book's title, or title - first author")
+    bat.add_argument("--style", choices=batch.STYLES, default="single", help="one .md per source (default), a chapter folder, or AI-sized parts (see --ai-target)")
+    bat.add_argument("--ai-target", choices=list(export.AI_TARGETS), default="Claude", help="budget for --style ai (default Claude)")
+    bat.add_argument("--include", action="append", default=[], metavar="GLOB", help="filename globs to include instead of the default documents/ebooks (repeatable), e.g. --include *.png --include *.mp3")
+    bat.add_argument("--exclude", action="append", default=[], metavar="GLOB", help="skip files or folders matching this glob, by name or path relative to the input folder (repeatable)")
+    bat.add_argument("--no-skip-existing", action="store_true", help="convert everything again, even sources unchanged since the last run")
+    bat.add_argument("--overwrite", action="store_true", help="allow replacing files this batch didn't write (default: pick a free name instead)")
+    bat.add_argument("--workers", type=int, default=None, help=f"parallel conversions (default {batch.default_workers()}: cores minus one, at most 4)")
+    bat.add_argument("--no-dedupe", action="store_true", help="convert every copy, even when the same book is there as epub and pdf or in several folders")
+    bat.add_argument("--prefer", default="", metavar="EXTS", help="formats to keep when a book is held in several, best first (default epub,azw3,mobi,pdf)")
+    bat.add_argument("--dry-run", action="store_true", help="show what would be converted, skipped and de-duplicated; convert and write nothing")
+    bat.add_argument("--images", action="store_true", help="extract PDF figures to images/ folders")
+    bat.add_argument("--no-clean", action="store_true", help="skip the cleanup pass")
+    bat.add_argument("--no-front-matter", action="store_true", help="omit YAML front matter")
+    bat.add_argument("--no-ocr", action="store_true", help="disable the OCR route")
+    bat.add_argument("--no-audio", action="store_true", help="disable audio/video transcription")
+    bat.add_argument("--quiet", action="store_true", help="no per-file progress lines")
+    bat.add_argument("--debug", action="store_true", help="record a detailed trace of this run under the log folder")
+
     sub.add_parser("capabilities", help="report which local engines are available")
     diag = sub.add_parser(
         "diagnostics",
@@ -84,7 +116,33 @@ def _build_parser() -> argparse.ArgumentParser:
     diag.add_argument("--sessions", type=int, default=1, help="how many of the newest debug sessions to include (default 1)")
     diag.add_argument("--report", type=Path, default=None, help="also write a shareable .zip (digest + logs + settings) to this path")
     diag.add_argument("--no-snapshots", action="store_true", help="leave the Markdown snapshots (document text) out of the --report zip")
+    upd = sub.add_parser(
+        "update",
+        help="check GitHub for a newer version (exit 0: up to date, 10: one is available, 1: couldn't check)",
+    )
+    upd.add_argument("--check", action="store_true", help="only check (the default; installing is done from the app)")
     return parser
+
+
+def _update_check() -> int:
+    """Ask GitHub for the latest version, once. The CLI never checks on its
+    own; installing is the app's job (it can close and reopen itself)."""
+    from . import __version__, updates
+
+    try:
+        release = updates.check()
+    except updates.UpdateError as exc:
+        _print_incident(errors.report(exc.code, where="cli update", detail=str(exc)))
+        return 1
+    if release is None:
+        print(f"Markdown Sidekick {__version__} is the latest version.")
+        return 0
+    print(f"Markdown Sidekick {release.version} is available (you have {__version__})."
+          + (" It includes a privacy or security fix." if release.important else ""))
+    if release.notes:
+        print(release.notes)
+    print(f"Get it: {updates.RELEASES_URL}")
+    return 10
 
 
 def _print_capabilities() -> int:
@@ -93,11 +151,17 @@ def _print_capabilities() -> int:
     info = {
         "ocr": ocr.ocr_available(),
         "pdf_ocr": ocr.pdf_ocr_available(),
+        "ocr_gpu": ocr.gpu_status(),
         "audio": audio.audio_available(),
         "settings": str(Settings.config_path()),
         "logs": str(debuglog.log_dir()),
     }
+    if info["ocr_gpu"] == "shadowed":
+        info["ocr_gpu_fix"] = ocr.GPU_FIX
     print(json.dumps(info, indent=2))
+    if info["ocr_gpu"] == "shadowed":
+        print(f"warn   OCR runs on the CPU: a CPU-only onnxruntime hides the GPU build. Fix: {ocr.GPU_FIX}",
+              file=sys.stderr)
     return 0
 
 
@@ -235,6 +299,56 @@ def _convert(args: argparse.Namespace) -> int:
     return 1 if failures else 0
 
 
+def _batch(args: argparse.Namespace) -> int:
+    from . import batch
+
+    settings = Settings.load()
+    if args.debug or settings.debug_mode or debuglog.debug_requested():
+        session = debuglog.enable("cli", snapshots=settings.debug_snapshots)
+        if session is not None:
+            print(f"Debug trace: {session}", file=sys.stderr)
+    options = batch.BatchOptions(
+        output_root=args.out,
+        naming=args.naming,
+        skip_existing=not args.no_skip_existing,
+        overwrite=args.overwrite,
+        clean=not args.no_clean,
+        style=args.style,
+        ai_target=args.ai_target,
+        front_matter=not args.no_front_matter,
+        images=args.images,
+        workers=args.workers if args.workers is not None else batch.default_workers(),
+        include=tuple(args.include),
+        exclude=tuple(args.exclude),
+        engine=batch.engine_config(settings, no_ocr=args.no_ocr, no_audio=args.no_audio),
+        dedupe=not args.no_dedupe,
+        prefer=tuple(e.strip() for e in args.prefer.split(",") if e.strip()),
+    )
+    for stream in (sys.stdout, sys.stderr):  # titles carry characters a legacy code page can't encode
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8", errors="replace")
+
+    def progress(done: int, total: int, row: "batch.BatchRow") -> None:
+        if args.quiet:
+            return
+        name = Path(row.output).name if row.output else Path(row.source).name
+        extra = f" q{row.quality}" if row.quality is not None and row.status == "converted" else ""
+        why = f" {row.reason}" if row.reason else ""
+        code = f" [{row.code}]" if row.code else ""
+        print(f"[{done}/{total}] {row.status:<9}{why}{code}{extra}  {name}", file=sys.stderr, flush=True)
+
+    if args.dry_run:
+        plan = batch.plan_batch(args.inputs, options)
+        print(json.dumps(plan, indent=2, ensure_ascii=False))
+        return 0 if plan["total"] else 1
+    summary = batch.run_batch(args.inputs, options, on_progress=progress)
+    print(json.dumps(summary.as_dict(), indent=2, ensure_ascii=False))
+    if summary.total == 0:
+        print("No documents found under the inputs (see --include).", file=sys.stderr)
+        return 1
+    return 1 if summary.failed or summary.cancelled else 0
+
+
 def _write_outputs(
     path: Path,
     result: ConversionResult,
@@ -286,16 +400,12 @@ def _write_outputs(
             notes.append(failure)
 
     out_dir = args.out if args.out is not None else path.parent
-    book = bool(args.split_chapters or args.ai_target)
+    style = "ai" if args.ai_target else "chapters" if args.split_chapters else "single"
+    dest = default_output_path(path, out_dir) if style == "single" else out_dir / path.stem
     from . import figures
 
     if want_images and path.suffix.lower() == ".pdf":
-        # Book folders keep images/ beside the parts; single files get a
-        # per-document subfolder so several conversions can share out_dir.
-        if book:
-            images_dir, rel_dir = out_dir / path.stem / "images", "images"
-        else:
-            images_dir, rel_dir = out_dir / "images" / path.stem, f"images/{path.stem}"
+        images_dir, rel_dir = export.figure_dirs(dest, style)
         try:
             figs = figures.extract_pdf_figures(path, images_dir)
         except Exception as exc:  # the Markdown is still worth saving
@@ -318,40 +428,18 @@ def _write_outputs(
             record["figures"] = len(figs)
     else:
         markdown = figures.strip_figure_markers(markdown)
-    if book:
-        res = export.export_book(
-            markdown,
-            out_dir / path.stem,
-            source=path.name,
-            engine=result.engine,
-            front_matter=not args.no_front_matter,
-            max_tokens=(
-                export.AI_TARGETS[args.ai_target] if args.ai_target else args.max_tokens
-            ),
-            ai_sections=args.ai_target is not None,
-            summary=summary,
-            title=result.doc_title,
-            author=result.doc_author,
-            notebook=args.ai_target in export.NOTEBOOK_TARGETS,
-        )
-        written = [str(p) for p in res.paths]
-        if res.index_path:
-            written.append(str(res.index_path))
-        if res.manifest_path:
-            written.append(str(res.manifest_path))
-    else:
-        out_path = default_output_path(path, out_dir)
-        export.export_single(
-            markdown,
-            out_path,
-            source=path.name,
-            engine=result.engine,
-            front_matter=not args.no_front_matter,
-            summary=summary,
-            title=result.doc_title,
-            author=result.doc_author,
-        )
-        written = [str(out_path)]
+    res = export.save(
+        markdown,
+        dest,
+        source=path.name,
+        style=style,
+        ai_target=args.ai_target or "",
+        details=result.details,
+        front_matter=not args.no_front_matter,
+        summary=summary,
+        max_tokens=args.max_tokens,  # chapters only; --ai-target sets its own budget
+    )
+    written = [str(p) for p in res.files]
     record["written"] = written
 
     report = assess_markdown(markdown)
@@ -370,6 +458,10 @@ def main(argv: list[str] | None = None) -> int:
             return _print_capabilities()
         if args.command == "diagnostics":
             return _diagnostics(args)
+        if args.command == "batch":
+            return _batch(args)
+        if args.command == "update":
+            return _update_check()
         return _convert(args)
     except Exception as exc:  # a bug, not a bad input: code it and say where to look
         _print_incident(errors.report("MS-900", exc=exc, where=f"cli {args.command}"))

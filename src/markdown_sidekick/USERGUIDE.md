@@ -1,7 +1,9 @@
 # Markdown Sidekick — User Guide
 
 Convert documents, images, scanned PDFs and audio into clean Markdown — entirely
-on your own computer. Nothing is uploaded anywhere; every engine runs locally.
+on your own computer. Your files never leave it; every engine runs locally. The
+only thing the app ever fetches is the latest version number, and only if you turn
+update checks on (see *Updates*).
 
 Markdown Sidekick is **freeware** by VibeProSoft. If it saves you time, you can
 support development at [ko-fi.com/roblauzon](https://ko-fi.com/roblauzon) ☕
@@ -230,7 +232,7 @@ Settings are grouped into four tabs — **Conversion**, **Output**,
 | Conversion | MinerU endpoint URL | Optional high-fidelity PDF server (blank = off) |
 | Output | Default output folder | Pre-selected in every save dialog |
 | Output | Clean output / Rendered preview | Default states for the preview toggles |
-| Output | Front matter / source header | Saved files start with title/source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
+| Output | Front matter / source header | Saved files start with the book's own title, subtitle, authors, publisher, date, language and ISBN (from an epub's package or a PDF's metadata/title page — `title_source` says which) plus source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | On by default: images of at least 120 px land in an `images/` folder, linked right where they appear in the text |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
@@ -322,16 +324,32 @@ Tools exposed:
 - `convert_outline(file_path)` — document structure + per-section token counts,
   without the content (the conversion is cached for follow-up reads)
 - `convert_section(file_path, section_index)` — one chapter at a time
-- `convert_url(url)` — download and convert a web page or remote PDF
+- `convert_url(url)` — download and convert a web page or remote PDF. Addresses
+  on your computer or private network are refused (MS-133), so a document an AI
+  is reading can't talk it into fetching your router's pages
 - `list_capabilities()` — reports which engines are available
+- `convert_batch(inputs, output_root, naming, style, …)` — starts converting
+  a whole library and returns a batch id straight away; `batch_status(id)`
+  reports progress and, when finished, the totals, failures and manifest path;
+  `cancel_batch(id)` stops it. One call instead of one per book.
 
 There is also a **command line** for scripts and automation:
 
 ```
 markdown-sidekick-cli convert book.pdf --split-chapters --quality
 markdown-sidekick-cli convert book.pdf --ai-target Claude
-MarkdownSidekick.exe --cli convert book.pdf --split-chapters   (standalone app)
+MarkdownSidekick-cli.exe convert book.pdf --split-chapters   (standalone app)
 ```
+
+`MarkdownSidekick-cli.exe` sits next to `MarkdownSidekick.exe` in the install
+folder. It is the same program built as a console app, so a terminal (or a
+script, or an AI agent) waits for it and sees its output. `MarkdownSidekick.exe
+--help` prints the usage and exits — a command-line option never opens the
+window.
+
+Every saved file is read back before it counts as saved. If antivirus removes
+or blocks it you get `MS-205`; if a synced folder (OneDrive, Dropbox) can't
+hand it back you get `MS-206` — never a silent "Saved".
 
 `--ai-target` (Claude / ChatGPT / Gemini / "Gemini Notebook" / "Local LLM")
 writes the same AI-sized book folders as the export bar — every part fits
@@ -343,6 +361,76 @@ their error code, the next step and the log reference; `--debug` traces the
 run and `diagnostics` summarises the logs (see *Debug mode and diagnostic
 reports*).
 
+### Converting a whole library
+
+`batch` converts every document and ebook under one or more folders in a
+single run, into an output folder that mirrors your folder structure:
+
+```
+MarkdownSidekick-cli.exe batch "D:\eBooks" --out "D:\eBooks-md" --naming title
+```
+
+- **What it picks up:** PDF, EPUB, DOCX, PPTX, XLSX and HTML files. It skips
+  tool folders (`.venv`, `node_modules`, `site-packages`, `.git`), hidden
+  folders and the output folder itself. Add other types with
+  `--include "*.png"` (repeatable) and leave things out with `--exclude`.
+- **Names:** `--naming source` (the default) keeps file names; `title` uses
+  the book's own title (`Algorithms_and_Data_Structures_for_Massi.epub`
+  becomes `Algorithms and Data Structures for Massive Datasets.md`);
+  `title_author` adds the first author. A name that another file already
+  has is never overwritten — the edition, then the author, then " (2)" is
+  added (`--overwrite` turns this off).
+- **Every input gets one row** in `_manifest.json` and `_manifest.csv` in the
+  output folder: converted, skipped (unchanged since the last run, an
+  unsupported format such as `.mobi`, or cancelled) or failed with its
+  error code. A file only counts as converted once it has been read back.
+- **Re-runs are quick:** sources that haven't changed since the last run
+  (same size, date and settings, outputs still there) are skipped without
+  being opened, so adding five books doesn't redo five hundred.
+- **One copy per book:** when a book is there more than once — as an epub
+  and a PDF, or copied into several bundle folders — only one copy is
+  converted (epub first, then PDF; change the order with `--prefer pdf,epub`)
+  and the others are listed as duplicates of it. Copies count as the same
+  book when they are identical files, share an ISBN, or have the same title
+  or file name with nothing contradicting it: different editions ("Third
+  Edition" / "Fourth Edition") and volumes are never merged. `--no-dedupe`
+  converts every copy.
+- `--dry-run` shows what a run would do — how many books convert, what is
+  skipped and why, which files are duplicates of which — without converting
+  or writing anything.
+- `--style chapters` or `--style ai --ai-target Claude` writes a folder per
+  book instead of one file; `--workers N` sets how many files convert at
+  once (default: cores minus one, at most 4). The summary printed at the end
+  lists failures and the outputs whose quality score is worth a look.
+
+---
+
+## Updates
+
+The first time it starts, Markdown Sidekick asks whether to check for a new version
+once a week. Change your answer any time: Settings → *Diagnostics* (classic window)
+or Settings → *Updates* (new window), which also has **Check now**. The command line
+has `markdown-sidekick-cli update --check`.
+
+**What a check sends.** One request to github.com for a small file holding the latest
+version number. GitHub sees your IP address and that request, and counts downloads in
+total. Nothing about you, your files or your settings is sent. With checks off,
+nothing is fetched unless you click **Check now**.
+
+**Updating.** When a new version is out, a bar says so (and says plainly when it
+includes a privacy or security fix). **Update** downloads it in the background; it
+installs **when you close the app**, which then reopens on the new version — no
+installer screens and no administrator prompt. **Restart now** does it at once. Every
+download is checked against update information signed with Markdown Sidekick's own
+key before anything runs; one that doesn't match is deleted (MS-702). **Skip this
+version** stops reminders for that release.
+
+The portable zip, a pip install and a source checkout can't install updates
+themselves: their bar has a **Download** button that opens the release page instead.
+
+If Claude Desktop or another AI tool is using Markdown Sidekick when it updates, the
+installer closes that connection too; restart the AI tool afterwards.
+
 ---
 
 ## Where files live
@@ -350,6 +438,7 @@ reports*).
 | What | Where |
 | ---- | ----- |
 | Settings | `%LOCALAPPDATA%\MarkdownSidekick\settings.json` |
+| Downloaded updates (deleted once installed) | `%LOCALAPPDATA%\MarkdownSidekick\updates\` |
 | Whisper models | `%LOCALAPPDATA%\MarkdownSidekick\models\` |
 | Error log (always on) | `%LOCALAPPDATA%\MarkdownSidekick\logs\errors.jsonl` |
 | Debug traces (debug mode only) | `%LOCALAPPDATA%\MarkdownSidekick\logs\sessions\` |
@@ -369,6 +458,14 @@ You launched the exe from the `build\` folder of a source checkout. Only
 `dist\MarkdownSidekick\MarkdownSidekick.exe` is the complete app — `build\` is
 temporary scaffolding. When sharing the app, zip the whole
 `dist\MarkdownSidekick` folder, not just the exe.
+
+**OCR is slow after installing with pip (not the standalone app)**
+Run `markdown-sidekick-cli capabilities` and look at `ocr_gpu`. `shadowed`
+means a CPU-only `onnxruntime` package (installed by a dependency) is
+hiding the GPU build, so OCR runs about five times slower. The fix is
+printed with it: `pip uninstall -y onnxruntime`, then
+`pip install --force-reinstall --no-deps onnxruntime-directml`.
+(`setup.bat` and the standalone app already do this.)
 
 **A PDF converts to (almost) empty output**
 Turn **OCR images & scanned PDFs** on and re-convert — the PDF likely has no
@@ -447,6 +544,7 @@ your documents' text (file names and paths, yes).
 | MS-113 | The OCR engine failed. | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
 | MS-114 | The MinerU server didn't return a result, so the PDF was converted locally. *(warning)* | Check the server is running at the endpoint in Settings → Conversion, or clear the endpoint to stop using it. | Open Conversion settings |
 | MS-115 | Audio/video transcription is turned off. | Turn on transcription to convert this file. | Turn on transcription & retry |
+| MS-116 | This file is online-only (OneDrive, Dropbox, iCloud…) and couldn't be downloaded. | Make sure the sync app is running and signed in, or mark the file "Always keep on this device" in File Explorer, then convert it again. | Retry |
 | MS-120 | The column-aware PDF reader failed, so the basic reader was used — columns and tables may be out of order. *(warning)* | Retry. If it happens again, report it with this error's reference. | Retry |
 | MS-121 | OCR failed on this PDF's scanned pages, so only its text layer was kept. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
 | MS-122 | OCR failed on this image, so only basic image information was extracted. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
@@ -456,6 +554,8 @@ your documents' text (file names and paths, yes).
 | MS-130 | The address couldn't be downloaded. | Check the address and your internet connection, then retry. | Retry |
 | MS-131 | That link can't be converted: only http/https downloads up to 50 MB are supported. | Download the file yourself and convert the local copy. | — |
 | MS-132 | There is no section with that number. | Get the section list from convert_outline and use one of its indexes (with the same max_tokens). | — |
+| MS-133 | That address is on this computer or a private network, so it wasn't downloaded. | If you meant that address, download the file yourself and convert the local copy. | — |
+| MS-134 | That site's security certificate couldn't be verified, so it wasn't downloaded. | The site's certificate may be faulty, or something on your network may be intercepting the connection. If you trust the site, download the file in your browser and convert the local copy. | — |
 | MS-199 | The conversion engine reported an unexpected error. | Retry. If it keeps failing, report it — the technical details say why. | Retry |
 
 **Saving**
@@ -466,6 +566,8 @@ your documents' text (file names and paths, yes).
 | MS-202 | The disk is full. | Free up space, or choose a folder on another drive. | Choose another folder… |
 | MS-203 | The save location's path is too long for Windows. | Choose a folder with a shorter path, such as C:\Markdown. | Choose another folder… |
 | MS-204 | A file being saved is open in another program. | Close the program that has it open (often a Markdown editor), then save again. | Save again |
+| MS-205 | Windows Security (or another antivirus) blocked a saved file, so it is missing. | Check your antivirus's protection history. If you trust the document (security books often quote malware samples), add an exclusion for the output folder in your antivirus yourself, then save again. | Save again |
+| MS-206 | A saved file couldn't be read back, so it may be missing or incomplete. | If the folder is synced (OneDrive, Dropbox), let syncing settle or choose a folder that isn't synced, then save again. Antivirus can also remove a file right after it is written. | Choose another folder… |
 | MS-299 | The Markdown couldn't be saved. | Try saving to a different folder. If it keeps failing, report it with this error's reference. | Choose another folder… |
 
 **Local AI (optional extras — the save itself still succeeds)**
@@ -500,6 +602,16 @@ your documents' text (file names and paths, yes).
 | MS-602 | Windows couldn't open that folder. *(warning)* | Open it yourself — its path is in the details. | — |
 | MS-603 | The diagnostic report couldn't be created. | Choose another folder for the report, or open the log folder and send the files from there. | Open log folder |
 | MS-604 | The built-in user guide couldn't be loaded — a file is missing from this installation. | Reinstall Markdown Sidekick to restore it. | — |
+| MS-605 | The new window can't start — a part it needs isn't on this PC. | Start Markdown Sidekick without --new-ui to use the classic window. To use the new one, install Microsoft's Edge WebView2 Runtime; the details say what was missing. | — |
+
+**Installing and updating**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-701 | Couldn't check for updates — GitHub didn't answer. *(warning)* | Check your internet connection and try again later, or see the latest release at github.com/boblauzon/markdown-sidekick/releases. | — |
+| MS-702 | The update didn't pass its safety check, so it wasn't used. | Nothing was installed. Try again later, or download the latest release from github.com/boblauzon/markdown-sidekick/releases. If it keeps happening, report it with this reference. | — |
+| MS-703 | The update couldn't be downloaded. *(warning)* | Check your internet connection and free disk space, then choose Update again; the download resumes where it stopped. | — |
+| MS-704 | The update didn't install, so you're still on the previous version. | Choose Update to try again, or run the installer from the latest release yourself. The installer's log is in the details. | Open log folder |
 
 **Unexpected errors**
 

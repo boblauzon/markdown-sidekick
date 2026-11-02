@@ -13,9 +13,11 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from . import errors
-from .export import AI_TARGETS
+from .export import AI_TARGETS, STYLES
 
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
+THEMES = ("system", "light", "dark")
+UPDATE_CHECKS = ("ask", "weekly", "off")
 
 # The incident from the last load of an unreadable settings file (MS-501),
 # for the GUI to surface once at startup; None when the file was fine.
@@ -74,6 +76,14 @@ class Settings:
     debug_mode: bool = False  # detailed session trace under logs/sessions
     # In debug mode, also keep each conversion's raw + cleaned Markdown.
     debug_snapshots: bool = True
+    # The new window's theme (THEMES); the classic window has one look.
+    theme: str = "system"
+    # -- updates (updates.py) --------------------------------------------------
+    # "ask" until the first-run question is answered, then "weekly" or "off".
+    # Nothing is fetched unless the user chose "weekly" or clicks Check.
+    update_check: str = "ask"
+    update_last_check: str = ""  # ISO date of the last weekly check
+    update_skip_version: str = ""  # a release the user chose to skip
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -134,7 +144,7 @@ class Settings:
         self.mineru_endpoint = str(self.mineru_endpoint or "").strip()
         self.default_output_dir = str(self.default_output_dir or "").strip()
         self.export_front_matter = bool(self.export_front_matter)
-        if self.export_style not in ("single", "chapters", "ai"):
+        if self.export_style not in STYLES:
             self.export_style = "single"
         if self.ai_target not in AI_TARGETS:
             self.ai_target = "Claude"
@@ -146,3 +156,9 @@ class Settings:
         self.summary_model = str(self.summary_model or "").strip()
         self.debug_mode = bool(self.debug_mode)
         self.debug_snapshots = bool(self.debug_snapshots)
+        if self.theme not in THEMES:
+            self.theme = "system"
+        if self.update_check not in UPDATE_CHECKS:
+            self.update_check = "ask"
+        self.update_last_check = str(self.update_last_check or "").strip()
+        self.update_skip_version = str(self.update_skip_version or "").strip()

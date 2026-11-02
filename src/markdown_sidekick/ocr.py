@@ -82,6 +82,37 @@ def pdfium_available() -> bool:
     return _PDFIUM_AVAILABLE
 
 
+GPU_FIX = (
+    "pip uninstall -y onnxruntime && "
+    "pip install --force-reinstall --no-deps onnxruntime-directml"
+)
+
+
+def gpu_status() -> str:
+    """Which OCR backend onnxruntime offers: "directml" (GPU), "cpu", or
+    "shadowed" — onnxruntime-directml is installed but the CPU-only
+    "onnxruntime" package (a dependency of magika) was installed over it
+    into the same folder, silently putting OCR on the CPU (~5x slower).
+    GPU_FIX repairs a shadowed install. Imports onnxruntime: call it for
+    diagnostics, not on the startup path."""
+    try:
+        import onnxruntime
+
+        providers = onnxruntime.get_available_providers()
+    except Exception as exc:  # broken or missing install: report, don't raise
+        debuglog.exception("ocr.gpu_status", exc)
+        return "unavailable"
+    if "DmlExecutionProvider" in providers:
+        return "directml"
+    from importlib import metadata as md
+
+    try:
+        md.version("onnxruntime-directml")
+    except md.PackageNotFoundError:
+        return "cpu"
+    return "shadowed"
+
+
 @dataclass
 class PdfAnalysis:
     """Per-page triage of a PDF used to decide on the conversion route."""
@@ -193,7 +224,12 @@ class OcrEngine:
                         device = "gpu" if "DmlExecutionProvider" in providers else "cpu"
                 sp["device"] = device
                 self._engine = RapidOCR(
-                    params={"EngineConfig.onnxruntime.use_dml": device == "gpu"}
+                    params={
+                        "EngineConfig.onnxruntime.use_dml": device == "gpu",
+                        # Its INFO lines (a dozen per engine, colour-coded)
+                        # flooded the CLI's stderr — once per batch worker.
+                        "Global.log_level": "warning",
+                    }
                 )
         return self._engine
 
@@ -209,8 +245,9 @@ class OcrEngine:
         """Render one pypdfium2 page and return its recognised text."""
         bitmap = page.render(scale=self.render_scale)
         try:
-            pil = bitmap.to_pil().convert("RGB")
+            pil = bitmap.to_pil().convert("RGB")  # convert copies the buffer
         finally:
+            bitmap.warn_on_close = False  # safe after the copy (pypdfium2 5.14+ warns)
             bitmap.close()  # free the native render buffer
         return self._recognise(np.asarray(pil)).strip()
 

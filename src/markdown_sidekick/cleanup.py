@@ -142,9 +142,41 @@ _CID_RE = re.compile(r"\(cid:\d+\)")
 _FORM_FEED_RE = re.compile(r"(?:[ \t]*\n)*(?:[ \t]*\f(?:[ \t]*\n)*)+")
 
 
+_UNDERLINE_TAG_RE = re.compile(r"</?u>")
+_CODE_SPAN_SPLIT_RE = re.compile(r"(`+[^`]*`+)")
+_FENCE_LINE_RE = re.compile(r"^\s*(```|~~~)")
+
+
+def _unwrap_underline(text: str) -> tuple[str, int]:
+    """Drop ``<u>``/``</u>``: markitdown 0.1.8 emits them for underlined
+    runs in epub/docx. Underline carries no meaning for an AI reader, the
+    preview can't render it, and in tables it wraps lone symbols
+    ("0 <u><</u> t", an underlined "<" standing in for "≤"). Code — fenced
+    or inline — is untouched: an HTML tutorial's ``<u>`` is content."""
+    if "<u>" not in text and "</u>" not in text:
+        return text, 0
+    lines = text.split("\n")
+    count = 0
+    in_fence = False
+    for i, line in enumerate(lines):
+        if _FENCE_LINE_RE.match(line):
+            in_fence = not in_fence
+            continue
+        if in_fence or "<u>" not in line and "</u>" not in line:
+            continue
+        parts = _CODE_SPAN_SPLIT_RE.split(line)  # odd indices are code spans
+        for k in range(0, len(parts), 2):
+            parts[k], n = _UNDERLINE_TAG_RE.subn("", parts[k])
+            count += n
+        lines[i] = "".join(parts)
+    return "\n".join(lines), count
+
+
 def normalize_characters(text: str, stats: CleanupStats) -> str:
     stats.chars_normalized += sum(text.count(ch) for ch in _CHAR_MAP)
     text = text.translate(_CHAR_TRANSLATION)
+    text, n = _unwrap_underline(text)
+    stats.chars_normalized += n
     if "(cid:" in text:
         text, n = _CID_RE.subn("", text)
         stats.chars_normalized += n

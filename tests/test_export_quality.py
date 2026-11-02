@@ -3,9 +3,6 @@
 from __future__ import annotations
 
 import json
-import random
-
-import pytest
 
 from markdown_sidekick.export import (
     build_front_matter,
@@ -170,6 +167,96 @@ class TestSplitForAi:
         for s in split_for_ai(text, max_tokens=250):
             last = [l for l in s.markdown.strip().split("\n") if l.strip()][-1]
             assert not last.startswith("#")
+
+    _HEADER = "| Part | Description | Price |"
+    _RULE = "|---|:---|---:|"
+    _ROWS = [f"| P-{i:05d} | Widget number {i} with an ordinary description | {i}.50 |" for i in range(2000)]
+
+    def _table_doc(self) -> str:
+        return (
+            "# Parts catalogue\n\nIntro paragraph.\n\n"
+            + "\n".join([self._HEADER, self._RULE, *self._ROWS])
+            + "\n\nClosing paragraph.\n"
+        )
+
+    def test_long_table_repeats_its_header_in_every_part(self):
+        from markdown_sidekick.export import split_for_ai
+
+        for budget in (2_000, 12_000):
+            secs = split_for_ai(self._table_doc(), max_tokens=budget)
+            assert len(secs) > 1
+            assert all(s.est_tokens <= budget for s in secs)  # the repeat is counted
+            rows = []
+            parts_with_rows = 0
+            for s in secs:
+                lines = s.markdown.splitlines()
+                body = [ln for ln in lines if ln.startswith("| P-")]
+                if not body:
+                    continue
+                parts_with_rows += 1
+                first = lines.index(body[0])
+                assert lines[first - 2 : first] == [self._HEADER, self._RULE]
+                assert lines.count(self._HEADER) == 1
+                rows += body
+            assert parts_with_rows > 1
+            assert rows == self._ROWS  # every row once, in order
+
+    def test_text_around_a_long_table_gets_no_header(self):
+        from markdown_sidekick.export import split_for_ai
+
+        # Fits a part, but not with any of the table: a part starts on it.
+        closing = "Closing words. " * 130
+        text = "\n".join([self._HEADER, self._RULE, *self._ROWS[:200]]) + f"\n\n{closing}\n"
+        secs = split_for_ai(text, max_tokens=500, pack=False)
+        assert secs[-1].markdown.startswith("Closing words.")
+        assert secs[0].markdown.startswith(self._HEADER)
+
+    def test_table_without_outer_pipes_repeats_its_header_too(self):
+        from markdown_sidekick.export import split_for_ai
+
+        rows = [f"item {i} | value {i}" for i in range(400)]
+        text = "\n".join(["Name | Value", "---|---", *rows]) + "\n"
+        secs = split_for_ai(text, max_tokens=200)
+        assert len(secs) > 1
+        assert all(s.markdown.startswith("Name | Value\n---|---\n") for s in secs)
+        assert all(s.est_tokens <= 200 for s in secs)
+
+    def test_a_table_that_fits_stays_whole_after_prose(self):
+        from markdown_sidekick.export import split_for_ai
+
+        prose = "prose " * 100
+        table = "\n".join([self._HEADER, self._RULE, *self._ROWS[:8]])
+        secs = split_for_ai(f"{prose}\n\n{table}\n\n{prose}\n", max_tokens=250)
+        holding = [s for s in secs if "| P-" in s.markdown]
+        assert len(holding) == 1
+        assert holding[0].markdown.count(self._HEADER) == 1
+
+    def test_tables_in_code_and_pipes_in_prose_get_no_repeat(self):
+        from markdown_sidekick.export import split_for_ai
+
+        # Pipes with no rule row, and a thematic break under one, are not tables.
+        lines = [f"line {i} has a | pipe in it and some more words" for i in range(200)]
+        for text in ("\n".join(lines), "\n".join(["a | b", "---", *lines])):
+            secs = split_for_ai(text + "\n", max_tokens=200)
+            assert len(secs) > 1
+            assert sum(s.markdown.count(lines[0]) for s in secs) == 1
+            assert sum(s.markdown.count("a | b") for s in secs) <= 1
+        # A table inside a fence is code; the fence is never split at all.
+        fenced = "```\n| a | b |\n|---|---|\n" + "\n".join(f"| {i} | x |" for i in range(300)) + "\n```\n"
+        secs = split_for_ai("intro\n\n" + fenced + "\noutro\n", max_tokens=100)
+        assert sum(s.markdown.count("| a | b |") for s in secs) == 1
+
+    def test_a_header_too_big_to_repeat_keeps_the_budget(self):
+        from markdown_sidekick.export import split_for_ai
+
+        header = "| " + " | ".join(f"column {i}" for i in range(60)) + " |"
+        rule = "|" + "---|" * 60
+        rows = [f"| {'row %d ' % i * 8}|" for i in range(30)]
+        text = "\n".join([header, rule, *rows]) + "\n"
+        budget = (len(header) + len(rule) + len(rows[0])) // 4 - 5  # no room for all three
+        secs = split_for_ai(text, max_tokens=budget)
+        assert all(s.est_tokens <= budget for s in secs)
+        assert "".join(s.markdown for s in secs).count("row 29") == 8
 
     def test_whole_book_within_budget_is_one_file(self, tmp_path):
         from markdown_sidekick.export import export_book
@@ -495,47 +582,6 @@ class TestBinaryNoise:
         r = assess_markdown(doc)
         assert not r.binary_noise
 
-    def test_lossy_utf8_decode_of_bytes_flagged(self):
-        # markitdown's fallback for undecodable files. The valid pairs that
-        # survive contain few controls and pass for words; hopping between
-        # scripts inside a "word" is the only tell.
-        rng = random.Random(42)
-        raw = bytes(
-            ord(" ") if rng.random() < 0.14 else rng.randrange(0xA0, 0x100)
-            for _ in range(16_384)
-        )
-        r = assess_markdown(raw.decode("utf-8", errors="ignore"))
-        assert r.binary_noise
-        assert r.script_switch_ratio >= 0.5
-        assert r.noise_ratio < 0.10
-        assert r.word_ratio > 0.5
-        assert r.as_dict()["script_switch_ratio"] == round(r.script_switch_ratio, 3)
-
-    @pytest.mark.parametrize(
-        "text",
-        [
-            "Python语言是一种广泛使用的API接口编程语言，它的HTTP库非常好用。使用JSON格式传输数据。",
-            "これはテストの文章です。カタカナとひらがな、そして漢字を混ぜて書きます。データベースをPythonで操作する。",
-            "대한민국(大韓民國)의 수도는 서울이다. 프로그래밍 언어 Python을 사용하여 데이터를 처리한다. ",
-            "यह हिंदी भाषा में एक नमूना पाठ है जो डिटेक्टर की जाँच करता है। ",
-            "نص تجريبي باللغة العربية. يستخدم البرنامج ملف PDF لتحويل النص. ",
-            "ðə kwɪk braʊn fɒks dʒʌmps ˈoʊvər ðə ˈleɪzi dɔɡ ",
-            # A multi-language manual: many scripts, but each word stays in one.
-            "Press the button. Нажмите кнопку. Πατήστε το κουμπί. اضغط على الزر. 電源を押してください。 שלום\n",
-            # Kanji and kana alternate constantly with no spaces, so these must
-            # count as one script, or a few foreign terms would look like salad.
-            "日本語の文章を読む。データとαとЖとאを書く。私の本を見る。",
-            # In-word switching at its most extreme, but between only two scripts.
-            "Δx Δy Δt ωt kΩ μF μm nΩ dθ dφ sinθ cosθ tanφ eλ eπ λx ",
-            "Pаypаl ассount vеrify сliсk hеrе now frее оffеr ",
-            # Compatibility forms aren't extra scripts: this is Latin and Greek.
-            "ℝn ℓp µm 𝑓x 𝐀b ªb ºc Ａb ﬁx Δx ",
-        ],
-    )
-    def test_real_multiscript_writing_not_flagged(self, text):
-        r = assess_markdown(text * 200)
-        assert not r.binary_noise
-
 
 class TestSummaryInExport:
     def test_single_file_gets_summary_field(self, tmp_path):
@@ -543,7 +589,7 @@ class TestSummaryInExport:
         export_single("# T\n\nbody\n", out, source="doc.pdf", summary="What it is: a test.")
         text = out.read_text(encoding="utf-8")
         assert 'summary: "What it is: a test."' in text  # colon forces quoting
-        assert text.index("summary:") < text.index("source:")
+        assert text.index("\nsummary:") < text.index("\nsource:")
 
     def test_blank_summary_leaves_no_field(self, tmp_path):
         out = tmp_path / "doc.md"

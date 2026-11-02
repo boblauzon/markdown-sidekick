@@ -131,3 +131,21 @@ class TestSummarize:
         monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: pytest.fail("called"))
         rc = cli.main(["convert", str(html_doc), "--out", str(tmp_path / "out")])
         assert rc == 0
+
+
+class TestOcrGpuStatus:
+    def test_capabilities_reports_the_ocr_backend(self, capsys):
+        from markdown_sidekick import cli
+
+        assert cli.main(["capabilities"]) == 0
+        info = json.loads(capsys.readouterr().out)
+        assert info["ocr_gpu"] in ("directml", "cpu", "shadowed", "unavailable")
+
+    def test_shadowed_install_is_named_with_its_fix(self, monkeypatch, capsys):
+        from markdown_sidekick import cli, ocr
+
+        monkeypatch.setattr(ocr, "gpu_status", lambda: "shadowed")
+        cli.main(["capabilities"])
+        out = capsys.readouterr()
+        assert json.loads(out.out)["ocr_gpu_fix"] == ocr.GPU_FIX
+        assert "onnxruntime-directml" in out.err

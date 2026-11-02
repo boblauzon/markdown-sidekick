@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import http.server
 import json
+import ssl
 import threading
+import urllib.error
 
 import pytest
 
 fastmcp = pytest.importorskip("fastmcp")
 
-from markdown_sidekick import mcp_server  # noqa: E402
+from markdown_sidekick import mcp_server, netguard  # noqa: E402
 
 
 def _call(tool: str, **kwargs):
@@ -55,6 +57,20 @@ class TestConvertLocalFile:
         out = _text(_call("convert_local_file", file_path=str(big_html), save_to=str(dest)))
         assert "Saved Markdown to" in out and "Quality" in out
         assert dest.exists()
+
+    def test_save_to_writes_the_books_own_title(self, tmp_path):
+        # The library run's top defect: every saved epub was titled after its
+        # filename because save_to never received the converter's metadata.
+        from test_library_trust import _GROKKING, make_epub
+
+        src = make_epub(tmp_path / "Grokking_Algorithms.epub", _GROKKING)
+        dest = tmp_path / "out" / "grokking.md"
+        out = _text(_call("convert_local_file", file_path=str(src), save_to=str(dest)))
+        assert "verified on disk" in out and "Title: Grokking Algorithms." in out
+        header = dest.read_text(encoding="utf-8").split("---")[1]
+        assert "title: Grokking Algorithms\n" in header
+        assert "title_source: opf" in header
+        assert "isbn:9781617292231" in header
 
     def test_missing_file(self):
         out = _text(_call("convert_local_file", file_path="Z:/nope/missing.pdf"))
@@ -102,7 +118,7 @@ class TestOutlineAndSections:
 
 
 class TestConvertUrl:
-    def test_fetches_and_converts(self, tmp_path):
+    def _serve(self, tmp_path):
         (tmp_path / "page.html").write_text(
             "<h1>Remote Title</h1><p>Remote body.</p>", encoding="utf-8"
         )
@@ -110,8 +126,12 @@ class TestConvertUrl:
             *a, directory=str(tmp_path), **kw
         )
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_fetches_and_converts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(netguard, "_is_public", lambda ip: True)  # the test server is local
+        server = self._serve(tmp_path)
         try:
             port = server.server_address[1]
             out = _text(_call("convert_url", url=f"http://127.0.0.1:{port}/page.html"))
@@ -119,12 +139,131 @@ class TestConvertUrl:
         finally:
             server.shutdown()
 
+    def test_refuses_this_computer(self, tmp_path):
+        server = self._serve(tmp_path)
+        try:
+            out = _text(_call("convert_url", url=f"http://127.0.0.1:{server.server_address[1]}/page.html"))
+            assert out.startswith("Error MS-133") and "Remote Title" not in out
+        finally:
+            server.shutdown()
+
     def test_rejects_non_http(self):
         out = _text(_call("convert_url", url="file:///etc/passwd"))
         assert out.startswith("Error")
+
+    @pytest.mark.parametrize(
+        "reason, code",
+        [
+            (ssl.SSLCertVerificationError("unable to get local issuer certificate"), "MS-134"),
+            (OSError("no route to host"), "MS-130"),
+        ],
+    )
+    def test_a_certificate_failure_doesnt_blame_the_connection(self, monkeypatch, reason, code):
+        class Failing:
+            def open(self, *args, **kwargs):
+                raise urllib.error.URLError(reason)
+
+        monkeypatch.setattr(netguard, "opener", Failing)
+        assert _text(_call("convert_url", url="https://example.invalid/page")).startswith(f"Error {code}")
+
+    def test_identifies_itself_with_a_link(self, monkeypatch):
+        # A bare product name gets a 403 from Wikipedia.
+        agents = []
+
+        class Recording:
+            def open(self, req, **kwargs):
+                agents.append(req.get_header("User-agent"))
+                raise urllib.error.URLError("stop here")
+
+        monkeypatch.setattr(netguard, "opener", Recording)
+        _call("convert_url", url="https://example.invalid/page")
+        assert agents[0].startswith(f"MarkdownSidekick/{mcp_server.__version__} (https://")
 
 
 class TestCapabilities:
     def test_capabilities(self):
         data = json.loads(_text(_call("list_capabilities")))
         assert "image_ocr" in data
+
+
+class TestAnnotations:
+    """What each tool declares it does: clients decide from this whether to ask."""
+
+    def _tools(self) -> dict:
+        async def run():
+            async with fastmcp.Client(mcp_server.mcp) as client:
+                return await client.list_tools()
+
+        return {tool.name: tool.annotations for tool in asyncio.run(run())}
+
+    def test_every_tool_states_its_effects(self):
+        tools = self._tools()
+        assert len(tools) >= 8
+        for name, hints in tools.items():
+            assert hints is not None, f"{name} has no annotations"
+            assert hints.read_only_hint is not None, name
+            assert hints.idempotent_hint is not None, name
+            assert hints.open_world_hint is not None, name
+            if not hints.read_only_hint:
+                assert hints.destructive_hint is not None, name
+
+    def test_the_hints_match_what_the_tools_do(self):
+        tools = self._tools()
+        assert {n for n, h in tools.items() if not h.read_only_hint} == {
+            "convert_local_file", "convert_batch", "cancel_batch"  # save_to, the outputs, the job
+        }
+        assert {n for n, h in tools.items() if h.open_world_hint} == {"convert_url"}
+        assert {n for n, h in tools.items() if h.destructive_hint} == {"convert_local_file", "convert_batch"}
+
+
+class TestBatch:
+    """convert_batch starts and returns; batch_status reports until done."""
+
+    def _poll(self, batch_id: str, timeout: float = 180.0) -> dict:
+        import time
+
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            status = json.loads(_text(_call("batch_status", batch_id=batch_id)))
+            if status["state"] != "running":
+                return status
+            time.sleep(0.5)
+        raise AssertionError(f"batch {batch_id} still running after {timeout}s")
+
+    def test_start_then_poll_to_done(self, tmp_path):
+        from test_library_trust import _GROKKING, make_epub
+
+        lib = tmp_path / "lib"
+        (lib / "sub").mkdir(parents=True)
+        make_epub(lib / "sub" / "Grokking_Algorithms.epub", _GROKKING)
+        (lib / "page.html").write_text(
+            "<h1>Batch Page</h1>" + "".join(f"<p>Line {i} is distinct.</p>" for i in range(5)),
+            encoding="utf-8",
+        )
+        out = tmp_path / "out"
+        started = json.loads(_text(_call(
+            "convert_batch", inputs=[str(lib)], output_root=str(out), naming="title", workers=1,
+        )))
+        assert started["state"] == "running" and started["batch_id"]
+        status = self._poll(started["batch_id"])
+        assert status["state"] == "done", status
+        summary = status["summary"]
+        assert (summary["total"], summary["converted"], summary["failed"]) == (2, 2, 0)
+        assert (out / "sub" / "Grokking Algorithms.md").exists()
+        assert summary["manifest"].endswith("_manifest.json")
+        assert len(json.dumps(summary)) < 4096
+
+    def test_bad_inputs_are_reported_not_started(self, tmp_path):
+        missing = json.loads(_text(_call(
+            "convert_batch", inputs=["Z:/no/such/folder"], output_root=str(tmp_path / "o"),
+        )))
+        assert missing["state"] == "error" and "MS-103" in missing["error"]
+        (tmp_path / "lib").mkdir()
+        bad = json.loads(_text(_call(
+            "convert_batch", inputs=[str(tmp_path / "lib")], output_root=str(tmp_path / "o"), naming="nope",
+        )))
+        assert bad["state"] == "error" and "naming" in bad["error"]
+
+    def test_unknown_batch(self):
+        status = json.loads(_text(_call("batch_status", batch_id="nope")))
+        assert status["state"] == "unknown"

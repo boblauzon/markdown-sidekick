@@ -8,7 +8,10 @@ model has not been cached locally yet, so the suite never downloads ~150 MB.
 from __future__ import annotations
 
 import importlib.util
+import io
 import math
+import wave
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -45,6 +48,93 @@ class TestVideoRouting:
         assert ".mp4" in audio.MEDIA_EXTENSIONS
         assert ".mkv" in audio.MEDIA_EXTENSIONS
         assert ".mp3" in audio.MEDIA_EXTENSIONS
+
+
+class TestNothingLeavesTheComputer:
+    """markitdown's audio converter uploads to Google's speech API; no route
+    may ever reach it. The call is intercepted, so nothing is sent."""
+
+    @pytest.fixture
+    def google_calls(self, monkeypatch):
+        sr = pytest.importorskip("speech_recognition")
+        calls = []
+
+        def intercept(self, audio_data, *args, **kwargs):
+            calls.append(len(audio_data.frame_data))
+            raise sr.RequestError("intercepted: would have uploaded to Google")
+
+        monkeypatch.setattr(sr.Recognizer, "recognize_google", intercept)
+        return calls
+
+    @staticmethod
+    def _wav_bytes() -> bytes:
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(b"\x00\x01" * 16000)
+        return buf.getvalue()
+
+    def test_audio_turned_off(self, tmp_path, google_calls):
+        from markdown_sidekick.converter import ConversionEngine
+
+        wav = tmp_path / "talk.wav"
+        wav.write_bytes(self._wav_bytes())
+        res = ConversionEngine(enable_ocr=False, enable_audio=False).convert_file(wav)
+        assert google_calls == []
+        assert not res.ok and res.error_code == "MS-115"
+
+    def test_whisper_failure(self, tmp_path, google_calls, monkeypatch):
+        from markdown_sidekick.converter import ConversionEngine
+
+        class Broken:
+            model_size = "base"
+
+            def transcribe_to_markdown(self, *args, **kwargs):
+                raise RuntimeError("CUDA out of luck")
+
+        wav = tmp_path / "talk.wav"
+        wav.write_bytes(self._wav_bytes())
+        monkeypatch.setattr(audio, "audio_available", lambda: True)
+        engine = ConversionEngine(enable_ocr=False)
+        monkeypatch.setattr(engine, "_audio_engine", lambda: Broken())
+        res = engine.convert_file(wav)
+        assert google_calls == []
+        assert not res.ok and res.error_code == "MS-112"
+
+    # Both reached Google before the guard: markitdown sniffs the bare file
+    # as audio, and its ZIP converter converts members with the same instance.
+    @pytest.mark.parametrize("kind", ["no_extension", "inside_zip"])
+    def test_sniffed_and_zipped_audio(self, tmp_path, google_calls, kind):
+        from markdown_sidekick.converter import ConversionEngine
+
+        if kind == "no_extension":
+            source = tmp_path / "recording"
+            source.write_bytes(self._wav_bytes())
+        else:
+            source = tmp_path / "meeting.zip"
+            with zipfile.ZipFile(source, "w") as z:
+                z.writestr("meeting.wav", self._wav_bytes())
+        ConversionEngine(enable_ocr=False, enable_audio=False).convert_file(source)
+        assert google_calls == []
+
+    # The intercept tests above need speech_recognition, which our own
+    # requirements no longer install (ADR-001). These two hold either way.
+    def test_the_engine_has_no_online_audio_converter(self):
+        from markitdown.converters import AudioConverter
+
+        from markdown_sidekick.converter import ConversionEngine
+
+        engine = ConversionEngine(enable_ocr=False, enable_audio=False)
+        assert not any(isinstance(r.converter, AudioConverter) for r in engine._md._converters)
+
+    def test_our_requirements_never_install_the_speech_converter(self):
+        root = Path(__file__).resolve().parents[1]
+        for name in ("requirements.txt", "pyproject.toml"):
+            text = (root / name).read_text(encoding="utf-8")
+            assert "markitdown[all]" not in text and "audio-transcription" not in text, name
+        assert "speechrecognition==" not in (root / "constraints.txt").read_text(encoding="utf-8").lower()
 
 
 _model_cached = (app_data_dir("models") / "faster-whisper-base").exists()

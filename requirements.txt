@@ -1,5 +1,7 @@
 # Markdown Sidekick dependencies
-markitdown[all]>=0.1.0
+# Only the converters the app uses: [all] would also install the audio
+# converter that sends audio to Google, plus YouTube and Azure clients (ADR-001).
+markitdown[docx,outlook,pdf,pptx,xls,xlsx]>=0.1.0
 tkinterdnd2>=0.4.0
 
 # OCR pipeline (Phase 3): local, offline, permissively licensed.
@@ -14,7 +16,20 @@ pypdfium2>=4.0.0
 # so MP3/M4A/WAV/FLAC decode with no system ffmpeg on PATH. The Whisper model
 # downloads once on first use to %LOCALAPPDATA%\MarkdownSidekick\models.
 faster-whisper>=1.0.0
+# av 19 removed the open() argument faster-whisper 1.2.1 passes (metadata_errors):
+# transcription fails with a TypeError. Lift the cap once faster-whisper catches up.
+av>=11,<19
 
 # MCP server (Phase 5): exposes the conversion pipeline as a tool for
 # Claude Desktop / Cursor / VS Code over stdio.
 fastmcp>=3.0.0
+
+# Downloads (convert_url, the update check) trust Mozilla's certificate roots as
+# well as Windows' store, which holds only some until Windows is asked (netguard.py).
+certifi>=2025.1.31
+
+# Redesigned window (preview: `app.py --new-ui`). pywebview (BSD) drives the
+# Windows WebView2 runtime through pythonnet (MIT); markdown-it-py (MIT)
+# renders the preview.
+pywebview>=6.2; sys_platform == 'win32'
+markdown-it-py>=3.0

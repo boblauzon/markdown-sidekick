@@ -8,7 +8,8 @@ a one-click trigger the GUI renders as a button ("Turn on OCR & retry").
 message on screen leads straight to the traceback on disk.
 
 Areas: 1xx conversion · 2xx saving · 3xx local AI · 4xx figures ·
-5xx settings · 6xx system (clipboard, folders, reports) · 9xx unexpected.
+5xx settings · 6xx system (clipboard, folders, reports) · 7xx install and
+updates · 9xx unexpected.
 
 Stdlib only — settings.py imports this module.
 """
@@ -156,6 +157,13 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "enable_audio",
     ),
     ErrorSpec(
+        "MS-116",
+        "This file is online-only (OneDrive, Dropbox, iCloud…) and couldn't be downloaded.",
+        "Make sure the sync app is running and signed in, or mark the file "
+        "\"Always keep on this device\" in File Explorer, then convert it again.",
+        "retry",
+    ),
+    ErrorSpec(
         "MS-120",
         "The column-aware PDF reader failed, so the basic reader was used — "
         "columns and tables may be out of order.",
@@ -217,6 +225,17 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "(with the same max_tokens).",
     ),
     ErrorSpec(
+        "MS-133",
+        "That address is on this computer or a private network, so it wasn't downloaded.",
+        "If you meant that address, download the file yourself and convert the local copy.",
+    ),
+    ErrorSpec(
+        "MS-134",
+        "That site's security certificate couldn't be verified, so it wasn't downloaded.",
+        "The site's certificate may be faulty, or something on your network may be intercepting the "
+        "connection. If you trust the site, download the file in your browser and convert the local copy.",
+    ),
+    ErrorSpec(
         "MS-199",
         "The conversion engine reported an unexpected error.",
         "Retry. If it keeps failing, report it — the technical details say why.",
@@ -246,6 +265,22 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "A file being saved is open in another program.",
         "Close the program that has it open (often a Markdown editor), then save again.",
         "save_again",
+    ),
+    ErrorSpec(
+        "MS-205",
+        "Windows Security (or another antivirus) blocked a saved file, so it is missing.",
+        "Check your antivirus's protection history. If you trust the document (security "
+        "books often quote malware samples), add an exclusion for the output folder in "
+        "your antivirus yourself, then save again.",
+        "save_again",
+    ),
+    ErrorSpec(
+        "MS-206",
+        "A saved file couldn't be read back, so it may be missing or incomplete.",
+        "If the folder is synced (OneDrive, Dropbox), let syncing settle or choose a "
+        "folder that isn't synced, then save again. Antivirus can also remove a file "
+        "right after it is written.",
+        "choose_folder",
     ),
     ErrorSpec(
         "MS-299",
@@ -348,6 +383,40 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "The built-in user guide couldn't be loaded — a file is missing from this installation.",
         "Reinstall Markdown Sidekick to restore it.",
     ),
+    ErrorSpec(
+        "MS-605",
+        "The new window can't start — a part it needs isn't on this PC.",
+        "Start Markdown Sidekick without --new-ui to use the classic window. To use the new one, "
+        "install Microsoft's Edge WebView2 Runtime; the details say what was missing.",
+    ),
+    # -- 7xx install and updates --------------------------------------------------
+    ErrorSpec(
+        "MS-701",
+        "Couldn't check for updates — GitHub didn't answer.",
+        "Check your internet connection and try again later, or see the latest release at "
+        "github.com/boblauzon/markdown-sidekick/releases.",
+        severity="warning",
+    ),
+    ErrorSpec(
+        "MS-702",
+        "The update didn't pass its safety check, so it wasn't used.",
+        "Nothing was installed. Try again later, or download the latest release from "
+        "github.com/boblauzon/markdown-sidekick/releases. If it keeps happening, report it with this reference.",
+    ),
+    ErrorSpec(
+        "MS-703",
+        "The update couldn't be downloaded.",
+        "Check your internet connection and free disk space, then choose Update again; "
+        "the download resumes where it stopped.",
+        severity="warning",
+    ),
+    ErrorSpec(
+        "MS-704",
+        "The update didn't install, so you're still on the previous version.",
+        "Choose Update to try again, or run the installer from the latest release yourself. "
+        "The installer's log is in the details.",
+        "open_logs",
+    ),
     # -- 9xx unexpected ---------------------------------------------------------
     ErrorSpec(
         "MS-900",
@@ -385,6 +454,7 @@ _AREAS = (
     ("4", "Figures"),
     ("5", "Settings"),
     ("6", "Clipboard, folders, reports, help"),
+    ("7", "Installing and updating"),
     ("9", "Unexpected errors"),
 )
 
@@ -547,6 +617,10 @@ _CONVERSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), code)
     for pattern, code in (
         (r"password|encrypt|decrypt", "MS-101"),
+        # ERROR_CLOUD_FILE_* (WinError 358-404): the sync provider couldn't
+        # deliver a placeholder's contents. Before MS-102, whose "Permission
+        # denied" a cloud access-denied would otherwise match.
+        (r"WinError (?:3[5-9]\d|40[0-4])\b|cloud file|cloud operation|CloudFileUnavailable", "MS-116"),
         (
             r"WinError 32|being used by another process|Errno 13|Permission denied|"
             r"PermissionError",
@@ -597,8 +671,13 @@ def is_network_error(exc: BaseException | str) -> bool:
 
 def classify_os_error(exc: BaseException) -> str:
     """The saving code for an exception raised while writing files."""
+    ms_code = getattr(exc, "ms_code", "")  # export.SaveVerificationError
+    if ms_code:
+        return ms_code
     winerror = getattr(exc, "winerror", None)
     err = getattr(exc, "errno", None)
+    if winerror in (225, 226):  # ERROR_VIRUS_INFECTED / ERROR_VIRUS_DELETED
+        return "MS-205"
     if winerror in (32, 33):  # sharing / lock violation: the file is open
         return "MS-204"
     if winerror in (39, 112) or err == errno.ENOSPC:

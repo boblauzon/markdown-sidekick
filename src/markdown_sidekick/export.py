@@ -25,8 +25,13 @@ index.md / manifest.json (see :func:`split_for_notebook`).
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import hashlib
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -65,11 +70,17 @@ AI_TARGETS: dict[str, int] = {
 }
 # Targets exported as notebook sources (export_book(notebook=True)).
 NOTEBOOK_TARGETS = frozenset({"Gemini Notebook"})
+# Output shapes (Settings.export_style, batch --style): one .md file, a
+# chapter folder, or AI-sized parts for an AI_TARGETS budget. See save().
+STYLES = ("single", "chapters", "ai")
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
 _HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+# A table's rule row, with or without outer pipes (the caller checks for a pipe:
+# "---" alone is a thematic break).
+_TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 _IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 _YAML_HOSTILE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")
 _LEAD_TITLE = "Front matter"
@@ -95,20 +106,199 @@ def _one_line(value: str) -> str:
     return re.sub(r"\s*[\r\n]+\s*", " ", _YAML_HOSTILE_RE.sub("", value)).strip()
 
 
+# A plain scalar that YAML would read as something other than the string:
+# a number, a boolean/null (YAML 1.1 and 1.2 spellings), or one that starts
+# with an indicator character ("*NIX" is an alias, "- x" a sequence, "!" a tag).
+_YAML_NON_STRING_RE = re.compile(
+    r"^(?:[-+]?(?:\d[\d_]*)?\.?\d+(?:[eE][-+]?\d+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+    r"|0x[0-9a-fA-F]+|0o[0-7]+|~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+    r"|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF|y|Y|n|N)$"
+)
+_YAML_LEADING_RE = re.compile(r"^[-?:,\[\]{}#&*!|>'\"%@`\s]")
+_YAML_INNER_RE = re.compile(r"[:#\[\]{}\"'|>&%@`,]|\s$")
+
+
+def _yaml_scalar(value: str) -> str:
+    if _YAML_INNER_RE.search(value) or _YAML_LEADING_RE.match(value) or _YAML_NON_STRING_RE.match(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return value
+
+
 def build_front_matter(fields: dict[str, object]) -> str:
-    """Minimal YAML front matter. Values are scalars; strings are quoted only
-    when they contain YAML-significant characters."""
+    """Minimal YAML front matter. Values are scalars or lists of strings;
+    strings are quoted only when YAML would otherwise misread them."""
     lines = ["---"]
     for key, value in fields.items():
+        if isinstance(value, (list, tuple)):
+            items = [_one_line(str(v)) for v in value]
+            items = [v for v in items if v]
+            if items:
+                lines.append(f"{key}:")
+                lines.extend(f"  - {_yaml_scalar(v)}" for v in items)
+            continue
         if isinstance(value, str):
             value = _one_line(value)
         if value is None or value == "":
             continue
-        if isinstance(value, str) and re.search(r"[:#\[\]{}\"'|>&%@`,]", value):
-            value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        if isinstance(value, str):
+            value = _yaml_scalar(value)
         lines.append(f"{key}: {value}")
     lines.append("---")
     return "\n".join(lines) + "\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Verified, atomic writes
+# ---------------------------------------------------------------------------
+class SaveVerificationError(OSError):
+    """A file was written but could not be confirmed on disk afterwards.
+
+    ``ms_code`` is the error code to show (errors.classify_os_error reads
+    it): MS-205 when Windows reports antivirus interference, else MS-206.
+    """
+
+    def __init__(self, path: Path, ms_code: str, detail: str) -> None:
+        super().__init__(errno.EIO, detail, str(path))
+        self.ms_code = ms_code
+
+
+# Seconds to wait between attempts at a transient failure (a sync client or
+# scanner briefly holding the file): about 15 s in all before giving up.
+_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
+_VIRUS_WINERRORS = frozenset({225, 226})  # ERROR_VIRUS_INFECTED / _DELETED
+# Sharing/lock violations, a user-mapped section, cloud-file provider states.
+_TRANSIENT_WINERRORS = frozenset({32, 33, 1224, 362, 383, 388, 390, 395})
+
+
+def _is_transient(exc: OSError, *, replacing: bool = False) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror in _VIRUS_WINERRORS:
+        return False
+    if winerror in _TRANSIENT_WINERRORS or exc.errno == 22:  # EINVAL: OneDrive mid-sync
+        return True
+    # A scanner or indexer opening the new file makes a rename briefly fail
+    # with "access denied"; a folder we really can't write to fails earlier,
+    # when the temporary file is created.
+    return replacing and isinstance(exc, PermissionError)
+
+
+def _virus_error(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in _VIRUS_WINERRORS
+
+
+def write_text_verified(path: Path, content: str) -> None:
+    """Write ``content`` (UTF-8, platform line endings — what ``write_text``
+    wrote before) atomically, then read it back and compare.
+
+    The text goes to a temporary file in the same folder, which replaces the
+    target in one step, so a reader never sees half a file. Reading the
+    result back is what surfaces antivirus quarantine (opening a flagged
+    file fails) and cloud-sync placeholders; transient failures are retried
+    with backoff. Raises an ``OSError`` — :class:`SaveVerificationError` when
+    the write itself succeeded but the file can't be confirmed — so
+    "saved" is only ever reported for a file that is really there.
+    """
+    data = content.replace("\n", os.linesep).encode("utf-8")
+    digest = hashlib.sha256(data).digest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            _retrying(lambda: os.replace(tmp, path), path, replacing=True)
+        except PermissionError:
+            # An editor holding the old file open blocks the rename with
+            # "access denied". Writing in place either works (most editors
+            # share the file) or fails with the error that names the cause —
+            # "in use by another program" rather than "not allowed".
+            with open(path, "wb") as fh:
+                fh.write(data)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+    _verify(path, len(data), digest)
+
+
+def _retrying(op, path: Path, *, replacing: bool = False) -> None:
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        try:
+            op()
+            return
+        except FileNotFoundError as exc:
+            # Our own temporary file vanished between write and rename.
+            raise SaveVerificationError(path, "MS-206", "the file disappeared right after it was written") from exc
+        except OSError as exc:
+            if _virus_error(exc):
+                raise SaveVerificationError(path, "MS-205", "antivirus blocked the file") from exc
+            if delay is None or not _is_transient(exc, replacing=replacing):
+                raise
+            debuglog.event("export.retry", level="warning", path=str(path), attempt=attempt + 1,
+                           error=f"{type(exc).__name__}: {exc}")
+            time.sleep(delay)
+
+
+# Asks Windows Defender whether it flagged the file in the last few minutes.
+# The path arrives through the environment, never inside the command text.
+_DEFENDER_QUERY = (
+    "$p = $env:MS_SIDEKICK_SAVED.ToLower(); "
+    "$since = (Get-Date).AddMinutes(-10); "
+    "$hit = Get-MpThreatDetection -ErrorAction Stop | Where-Object { "
+    "$_.InitialDetectionTime -gt $since -and "
+    "($_.Resources | Where-Object { $_ -and $_.ToLower().Contains($p) }) }; "
+    "if ($hit) { 'flagged' } else { 'clean' }"
+)
+
+
+def _defender_flagged(path: Path) -> bool:
+    """Did Windows Defender just quarantine this file? Defender removes a
+    flagged file moments after it is written, so the read-back finds it
+    *missing* rather than failing with ERROR_VIRUS_INFECTED; its detection
+    history is the only way to tell that from a sync client or a disk.
+    Asked only when a just-written file has vanished (rare), never for a
+    normal save. Any failure (not Windows, no Defender, no rights) -> False."""
+    if os.name != "nt":
+        return False
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _DEFENDER_QUERY],
+            env={**os.environ, "MS_SIDEKICK_SAVED": str(path.resolve())},
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        debuglog.exception("export.defender_query", exc, path=str(path))
+        return False
+    flagged = proc.stdout.strip().endswith("flagged")
+    debuglog.event("export.defender_query", path=str(path), flagged=flagged, rc=proc.returncode)
+    return flagged
+
+
+def _verify(path: Path, size: int, digest: bytes) -> None:
+    last = "the saved file doesn't match what was written"
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        try:
+            with open(path, "rb") as fh:
+                back = fh.read()
+            if len(back) == size and hashlib.sha256(back).digest() == digest:
+                return
+        except FileNotFoundError:
+            last = "the saved file is missing"
+        except OSError as exc:
+            if _virus_error(exc):
+                raise SaveVerificationError(path, "MS-205", "antivirus blocked the file") from exc
+            last = f"the saved file can't be read ({type(exc).__name__}: {exc})"
+        if delay is None:
+            break
+        debuglog.event("export.verify_retry", level="warning", path=str(path), attempt=attempt + 1, problem=last)
+        time.sleep(delay)
+    if last == "the saved file is missing" and _defender_flagged(path):
+        raise SaveVerificationError(path, "MS-205", "antivirus removed the file right after it was written")
+    raise SaveVerificationError(path, "MS-206", last)
 
 
 @dataclass
@@ -128,10 +318,13 @@ class ExportResult:
     manifest_path: Path | None = None
 
     @property
+    def files(self) -> list[Path]:
+        """Every file written: the parts, then index.md and manifest.json."""
+        return self.paths + [p for p in (self.index_path, self.manifest_path) if p]
+
+    @property
     def files_written(self) -> int:
-        return len(self.paths) + (1 if self.index_path else 0) + (
-            1 if self.manifest_path else 0
-        )
+        return len(self.files)
 
 
 def _fence_map(lines: list[str]) -> tuple[list[bool], list[bool]]:
@@ -248,7 +441,8 @@ def split_for_ai(markdown: str, max_tokens: int, *, pack: bool = True) -> list[S
     "(part N)" pieces at blank lines outside code fences, falling back to any
     line outside a fence so blank-line-free text still splits. Every part fits
     the budget unless a single indivisible fenced block alone exceeds it —
-    fences are never split.
+    fences are never split. A table too long for one part repeats its header
+    in each part it continues into, so every part can be read on its own.
 
     With ``pack`` (export), small consecutive sections are then packed into
     parts up to the budget (see :func:`_pack`): a book of 130 one-page
@@ -346,6 +540,26 @@ def _is_lead(title: str) -> bool:
     return title == _LEAD_TITLE or title.startswith(f"{_LEAD_TITLE} (part ")
 
 
+def _table_heads(lines: list[str], is_fence: list[bool], in_fence: list[bool]) -> list[int]:
+    """Per line: the index of the header row of the table this line is the rule
+    or a body row of, else -1. A table ends at the first line without a pipe."""
+    heads = [-1] * len(lines)
+    head = -1
+    for i, line in enumerate(lines):
+        if in_fence[i] or is_fence[i] or "|" not in line or _HEADING_LINE_RE.match(line):
+            head = -1
+        elif head >= 0:
+            heads[i] = head
+        elif (
+            i
+            and _TABLE_RULE_RE.match(line)
+            and "|" in lines[i - 1]
+            and not (in_fence[i - 1] or is_fence[i - 1])
+        ):
+            head = heads[i] = i - 1
+    return heads
+
+
 def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     """Split lines into chunks of at most ``max_chars`` joined characters.
 
@@ -358,10 +572,16 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     marker disable splitting entirely. A cut never leaves a heading as a
     chunk's last line — it belongs with what it introduces (a heading over
     an indivisible listing travels with the listing).
+
+    A chunk that starts inside a table opens with that table's header and
+    rule, counted against the budget, unless they and the first row can't
+    share a chunk. A table's header, rule and first row stay together unless
+    nothing else fits the budget.
     """
     is_fence, in_fence = _fence_map(lines)
     if sum(is_fence) % 2:
         in_fence = [False] * len(lines)
+    heads = _table_heads(lines, is_fence, in_fence)
     cum = [0]
     for line in lines:
         cum.append(cum[-1] + len(line) + 1)
@@ -376,35 +596,101 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     chunks: list[str] = []
     start = 0
     while start < n:
-        if cum[n] - cum[start] <= max_chars:
+        head = heads[start]
+        repeat = ""
+        if head >= 0 and start >= head + 2:  # a body row: this chunk continues the table
+            repeat = "\n".join(lines[head : head + 2]) + "\n"
+            if len(repeat) + cum[start + 1] - cum[start] > max_chars:
+                repeat = ""
+        room = max_chars - len(repeat)
+        if cum[n] - cum[start] <= room:
             end = n
         else:
-            best_blank = best_soft = None
+            best_blank = best_soft = table_cut = None
             c = start + 1
-            while c < n and cum[c] - cum[start] <= max_chars:
+            while c < n and cum[c] - cum[start] <= room:
                 if not in_fence[c] and not after_heading[c]:
-                    best_soft = c
-                    if not lines[c - 1].strip():
-                        best_blank = c
+                    if heads[c] >= 0 and c <= heads[c] + 2:  # would part a table's opening
+                        table_cut = c
+                    else:
+                        best_soft = c
+                        if not lines[c - 1].strip():
+                            best_blank = c
                 c += 1
-            end = best_blank or best_soft
+            end = best_blank or best_soft or table_cut
             if end is None:  # indivisible fenced block: minimal overflow
                 while c < n and in_fence[c]:
                     c += 1
                 end = c if c < n else n
-        chunks.append("\n".join(lines[start:end]).strip())
+        chunks.append(repeat + "\n".join(lines[start:end]).strip())
         start = end
     return [chunk for chunk in chunks if chunk]
+
+
+# First headings that name a section of the book, not the book: a title
+# guessed from the first heading must never be one of these.
+_SECTION_HEADING_RE = re.compile(
+    r"^(?:(?:table\s+of\s+)?contents|preface|foreword|introduction|acknowledge?ments?|"
+    r"contributors|about\s+the\s+(?:authors?|reviewers?|book)|dedication|copyright(?:\s+.*)?|"
+    r"credits|title\s+page|cover|half[\s-]title|epigraph|other\s+books\s+.*|"
+    r"(?:also\s+)?by\s+the\s+same\s+author.*|praise\s+for\s+.*|index|glossary)$",
+    re.IGNORECASE,
+)
+# Copy suffixes on downloaded files: "name (1)", "name_V2", "name - Copy".
+_COPY_SUFFIX_RE = re.compile(r"(?:\s*\(\d+\)|[_\s-]+v\d+|\s+-\s+copy(?:\s*\(\d+\))?)$", re.IGNORECASE)
 
 
 def document_title(markdown: str, fallback: str) -> str:
     for line in markdown.split("\n"):
         m = _H1_RE.match(line)
         if m:
-            return m.group(1)
+            heading = m.group(1).strip("*_ ").strip()
+            return fallback if _SECTION_HEADING_RE.match(heading) else m.group(1)
         if line.strip():
             break
     return fallback
+
+
+def tidy_filename_title(stem: str) -> str:
+    """A readable title from a filename: ``Grokking_Algorithms (1)`` ->
+    ``Grokking Algorithms``. Run-together names stay as they are — there is
+    no safe way to re-space ``ccnacertificationstudyguide``."""
+    text = stem
+    while (shorter := _COPY_SUFFIX_RE.sub("", text)) != text and shorter.strip():
+        text = shorter
+    text = re.sub(r"[_]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .-")
+    return text or stem
+
+
+def resolve_title(markdown: str, source: str, title: str = "", title_source: str = "") -> tuple[str, str]:
+    """The document's title and where it came from (metadata.py's
+    ``title_source`` vocabulary): the converter's own (source metadata or
+    title page), else the first heading unless it names a section such as
+    "Preface", else the filename, tidied."""
+    if title:
+        return title, title_source or "metadata"
+    stem = Path(source).stem
+    heading = document_title(markdown, "")
+    if heading:
+        return heading, "heading"
+    return tidy_filename_title(stem), "filename"
+
+
+def _meta_fields(meta: dict | None, author: str) -> dict[str, object]:
+    """Front-matter fields from the source's metadata, in display order.
+    ``author`` stays a single line (its meaning since 1.0); ``authors`` is
+    the list form, written when there is more than one name."""
+    meta = meta or {}
+    authors = [a for a in meta.get("authors") or [] if a]
+    return {
+        "author": author or ", ".join(authors),
+        "authors": authors if len(authors) > 1 else None,
+        "publisher": meta.get("publisher", ""),
+        "date": meta.get("date", ""),
+        "language": meta.get("language", ""),
+        "identifier": meta.get("identifier", ""),
+    }
 
 
 _IMAGE_ALT_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -502,26 +788,35 @@ def export_single(
     title: str = "",
     author: str = "",
     notebook: bool = False,
+    title_source: str = "",
+    meta: dict | None = None,
 ) -> ExportResult:
     """Write one decorated Markdown file.
 
     ``summary`` (optional, from the local-AI pass) becomes a ``summary:``
     front-matter field; blank means the field is simply absent. ``title`` /
-    ``author`` come from the source's own metadata when the converter could
-    vouch for them; a blank title falls back to the document's first heading.
+    ``author`` / ``meta`` come from the source's own metadata when the
+    converter could vouch for them (``ConversionResult.doc_title``,
+    ``doc_author``, ``doc_meta``, with ``title_source`` saying where the
+    title came from); a blank title falls back to the document's first
+    heading, then the filename (see :func:`resolve_title`).
     ``notebook`` writes a Gemini Notebook source (see :func:`export_book`).
+    The file is written atomically and read back (:func:`write_text_verified`).
     """
     content = markdown
+    title, title_source = resolve_title(markdown, source, title, title_source)
+    meta = meta or {}
     if notebook:
         content = notebook_figures(markdown)
         if front_matter:
-            book = title or document_title(markdown, Path(source).stem)
-            content = _notebook_header(book, author, summary=summary) + content
+            content = _notebook_header(title, author or ", ".join(meta.get("authors") or []), summary=summary) + content
     elif front_matter:
         content = build_front_matter(
             {
-                "title": title or document_title(markdown, Path(source).stem),
-                "author": author,
+                "title": title,
+                "subtitle": meta.get("subtitle", ""),
+                "title_source": title_source,
+                **_meta_fields(meta, author),
                 "summary": summary,
                 "source": source,
                 "converted": date.today().isoformat(),
@@ -530,8 +825,7 @@ def export_single(
                 "image_count": count_images(markdown) or None,
             }
         ) + markdown
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(content, encoding="utf-8")
+    write_text_verified(out_path, content)
     debuglog.event(
         "export.single",
         path=str(out_path),
@@ -556,6 +850,8 @@ def export_book(
     title: str = "",
     author: str = "",
     notebook: bool = False,
+    title_source: str = "",
+    meta: dict | None = None,
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -576,9 +872,14 @@ def export_book(
     YAML (summary and list of parts on the first part only), image links
     reduced to their captions, and no index.md or manifest.json — every file
     in the folder is a source to upload.
+
+    ``title`` / ``author`` / ``title_source`` / ``meta`` are as for
+    :func:`export_single`; every file is written atomically and read back.
     """
     stem = Path(source).stem
-    title = title or document_title(markdown, stem)
+    title, title_source = resolve_title(markdown, source, title, title_source)
+    meta = meta or {}
+    author = author or ", ".join(meta.get("authors") or [])
     if notebook:
         markdown = notebook_figures(markdown)
         sections = split_for_notebook(markdown, max_tokens)
@@ -598,6 +899,8 @@ def export_book(
             title=title,
             author=author,
             notebook=notebook,
+            title_source=title_source,
+            meta=meta,
         )
 
     result = ExportResult()
@@ -633,6 +936,8 @@ def export_book(
                     "title": sec.title or title,
                     "book": title,
                     "author": author,
+                    "authors": _meta_fields(meta, author)["authors"],
+                    "identifier": meta.get("identifier", ""),
                     "book_summary": summary,
                     "part": f"{n} of {total}",
                     "source": source,
@@ -642,7 +947,7 @@ def export_book(
                     "image_count": images or None,
                 }
             ) + sec.markdown
-        path.write_text(content, encoding="utf-8")
+        write_text_verified(path, content)
         result.paths.append(path)
         manifest_files.append(
             {
@@ -673,11 +978,18 @@ def export_book(
     for entry in manifest_files:
         index_lines.append(f"- [{entry['title'] or 'Front matter'}]({entry['file']})")
     result.index_path = out_dir / "index.md"
-    result.index_path.write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+    write_text_verified(result.index_path, "\n".join(index_lines) + "\n")
 
     manifest = {
         "title": title,
+        "subtitle": meta.get("subtitle", ""),
+        "title_source": title_source,
         "author": author,
+        "authors": list(meta.get("authors") or ([author] if author else [])),
+        "publisher": meta.get("publisher", ""),
+        "date": meta.get("date", ""),
+        "language": meta.get("language", ""),
+        "identifier": meta.get("identifier", ""),
         "summary": summary,
         "source": source,
         "engine": engine,
@@ -687,7 +999,76 @@ def export_book(
         "files": manifest_files,
     }
     result.manifest_path = out_dir / "manifest.json"
-    result.manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_text_verified(result.manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
     return result
+
+
+def save(
+    markdown: str,
+    dest: Path,
+    *,
+    source: str,
+    style: str = "single",
+    ai_target: str = "",
+    details: dict | None = None,
+    front_matter: bool = True,
+    summary: str = "",
+    max_tokens: int = 0,
+) -> ExportResult:
+    """The one save step every front-end calls (ADR-002).
+
+    ``dest`` is the ``.md`` file for ``style="single"`` and the book folder
+    for ``"chapters"`` / ``"ai"``; ``"ai"`` sizes parts to the
+    ``ai_target``'s budget and writes notebook sources for a notebook
+    target. ``details`` is the book's own details as plain data —
+    ``ConversionResult.details``: engine, title, author, title_source, meta —
+    so no front-end can forget one (MCP ``save_to`` once titled 504 books
+    after their filenames). ``max_tokens`` overrides the chapter split's
+    budget (the CLI's ``--max-tokens``). Naming, figures and the summary stay
+    with the caller: that is where the front-ends really differ.
+    """
+    if style not in STYLES:
+        raise ValueError(f"style must be one of {', '.join(STYLES)}")
+    d = details or {}
+    common = dict(
+        source=source,
+        engine=d.get("engine", ""),
+        front_matter=front_matter,
+        summary=summary,
+        title=d.get("title", ""),
+        author=d.get("author", ""),
+        title_source=d.get("title_source", ""),
+        meta=d.get("meta") or {},
+    )
+    if style == "single":
+        return export_single(markdown, dest, **common)
+    if style == "ai":
+        return export_book(
+            markdown,
+            dest,
+            max_tokens=AI_TARGETS.get(ai_target, DEFAULT_MAX_TOKENS),
+            ai_sections=True,
+            notebook=ai_target in NOTEBOOK_TARGETS,
+            **common,
+        )
+    return export_book(markdown, dest, max_tokens=max_tokens or DEFAULT_MAX_TOKENS, **common)
+
+
+def figure_dirs(dest: Path, style: str) -> tuple[Path, str]:
+    """Where a save puts the source's figures, and the relative link prefix:
+    a book folder keeps ``images/`` beside its parts; a single file gets
+    ``images/<stem>/`` so several files can share one output folder."""
+    if style == "single":
+        return dest.parent / "images" / dest.stem, f"images/{dest.stem}"
+    return dest / "images", "images"
+
+
+def claim_name(stem: str, used: set[str]) -> str:
+    """``stem``, else ``stem-2``, ``stem-3``… — the first name not in
+    ``used``, which it joins. Same-named sources from different folders,
+    saved together, must never overwrite each other's output."""
+    name, n = stem, 2
+    while name in used:
+        name, n = f"{stem}-{n}", n + 1
+    used.add(name)
+    return name

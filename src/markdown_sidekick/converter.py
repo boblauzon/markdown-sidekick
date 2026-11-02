@@ -6,26 +6,33 @@ how conversion actually happens.
 
 from __future__ import annotations
 
-import codecs
 import os
 import re
 import time
+import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
+# Where pydub is installed (our requirements no longer pull it in), markitdown's
+# audio converter imports it and it warns when no ffmpeg is on PATH. Audio goes
+# through faster-whisper and PyAV's bundled FFmpeg, so the warning is noise.
+warnings.filterwarnings("ignore", message=r"Couldn't find ff(?:mpeg|probe)", category=RuntimeWarning)
+
 try:
     from markitdown import MarkItDown
+    from markitdown.converters import AudioConverter
 except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
     raise ImportError(
         "The 'markitdown' package is not installed. Activate the project "
-        "virtual environment or run: pip install \"markitdown[all]\""
+        "virtual environment or run: pip install -r requirements.txt -c constraints.txt"
     ) from exc
 
-from . import audio, debuglog, errors, mineru, ocr, pdflayout, quality
+from . import audio, debuglog, errors, metadata, mineru, ocr, pdflayout
 
 
-# File extensions markitdown can meaningfully handle. Used to build the file
+# File extensions some route (markitdown, OCR, Whisper) can meaningfully
+# handle — audio/video only ever goes to Whisper. Used to build the file
 # picker filter and to give friendly warnings; markitdown still sniffs content
 # at conversion time, so this list is a guide, not a hard gate.
 SUPPORTED_EXTENSIONS: tuple[str, ...] = (
@@ -70,38 +77,6 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
 # as empty output rather than being declared failures.
 _EMPTY_OUTPUT_MIN_BYTES = 16_384
 
-# How much of a file to read when deciding whether it is text at all.
-_SNIFF_BYTES = 1 << 20
-# Containers a markitdown converter really opens: PDF, zip (Office, EPUB), OLE
-# (legacy Office, Outlook).
-_CONTAINER_MAGIC = (b"%PDF", b"PK\x03\x04", b"\xd0\xcf\x11\xe0")
-
-
-def _is_raw_bytes(source: Path) -> bool:
-    """Is this file neither valid text nor a format a converter could open?
-
-    Noisy output is only a failed conversion if it came from decoding raw
-    bytes. A real PDF with a garbled text layer, or a UTF-8 file full of
-    symbols, converted faithfully, so those keep the quality warning. So does
-    HTML: its parser decodes anything, and a legacy-encoded page comes out
-    partly garbled rather than lost.
-    """
-    if source.suffix.lower() in (".html", ".htm"):
-        return False
-    try:
-        with open(source, "rb") as fh:
-            head = fh.read(_SNIFF_BYTES)
-    except OSError:
-        return False
-    if head.startswith(_CONTAINER_MAGIC):
-        return False
-    try:
-        # Incremental: the sniff window may end inside a multi-byte character.
-        codecs.getincrementaldecoder("utf-8")().decode(head)
-    except UnicodeDecodeError:
-        return True
-    return False
-
 
 @dataclass
 class ConversionResult:
@@ -116,6 +91,11 @@ class ConversionResult:
     # export prefers these over guessing from the text.
     doc_title: str = ""
     doc_author: str = ""
+    # Where doc_title came from (metadata.py's title_source vocabulary) and
+    # the rest of the source's own metadata: subtitle, authors (list),
+    # publisher, date, language, identifier — whichever are known.
+    title_source: str = ""
+    doc_meta: dict = field(default_factory=dict)
     # Failure diagnosis (errors.py): the code shown to the user and the
     # reference of its error-log entry. Blank while ok.
     error_code: str = ""
@@ -131,6 +111,48 @@ class ConversionResult:
     @property
     def title(self) -> str:
         return self.source.name
+
+    @property
+    def details(self) -> dict:
+        """The book's details as ``export.save`` takes them — plain data, so
+        a batch worker can return it and the MCP server can cache it."""
+        return {
+            "engine": self.engine,
+            "title": self.doc_title,
+            "author": self.doc_author,
+            "title_source": self.title_source,
+            "meta": dict(self.doc_meta),
+        }
+
+
+def _attach_metadata(result: ConversionResult) -> None:
+    """Fill the result's title/author/metadata from the source file's own
+    package metadata (an epub's OPF), and tidy whatever a route supplied.
+
+    The package metadata outranks a route's guess: it is what the publisher
+    wrote. Entities are decoded and "Title: Subtitle" is split everywhere,
+    so front matter reads the same whichever route converted the file.
+    """
+    meta = metadata.read_metadata(result.source)
+    if meta.get("title"):
+        result.doc_title = meta.pop("title")
+        result.title_source = "opf"
+        authors = meta.get("authors") or []
+        result.doc_author = ", ".join(authors)
+        result.doc_meta = meta
+        return
+    title = metadata.clean_value(result.doc_title)
+    if not title:
+        result.doc_title, result.title_source = "", ""
+        return
+    title, subtitle = metadata.split_subtitle(metadata.tidy_title(title))
+    result.doc_title = title
+    if subtitle:
+        result.doc_meta["subtitle"] = subtitle
+    names = metadata.split_authors([metadata.clean_value(result.doc_author)])
+    result.doc_author = ", ".join(names)
+    if len(names) > 1:
+        result.doc_meta["authors"] = names
 
 
 @dataclass
@@ -163,6 +185,13 @@ class ConversionEngine:
 
     def __post_init__(self) -> None:
         self._md = MarkItDown(enable_plugins=self.enable_plugins)
+        # markitdown's audio converter transcribes through Google's online
+        # speech API. Nothing here may leave the computer, so it never runs —
+        # not for a file Whisper failed on, with transcription turned off, for
+        # a file sniffed as audio, or for a WAV inside a ZIP (same instance).
+        self._md._converters[:] = [
+            r for r in self._md._converters if not isinstance(r.converter, AudioConverter)
+        ]
 
     def _ocr_engine(self) -> "ocr.OcrEngine":
         # Rebuilt when the device setting changes — the ONNX sessions inside
@@ -201,6 +230,8 @@ class ConversionEngine:
                 debuglog.event("convert.start", **self._describe(source))
             failures: list[tuple[str, BaseException]] = []
             result = self._convert(source, on_subprogress, failures)
+            if result.ok:
+                _attach_metadata(result)
             self._diagnose(result, failures)
             if debuglog.enabled():
                 debuglog.event(
@@ -214,6 +245,7 @@ class ConversionEngine:
                     chars=len(result.markdown),
                     lines=result.markdown.count("\n"),
                     title=result.doc_title,
+                    title_source=result.title_source,
                     author=result.doc_author,
                     ms=round((time.perf_counter() - started) * 1000),
                     **(debuglog.memory() or {}),
@@ -323,6 +355,7 @@ class ConversionEngine:
                                     engine="ocr+text",
                                     doc_title=res.title,
                                     doc_author=res.author,
+                                    title_source=res.title_source,
                                 )
                             else:
                                 md = engine.pdf_to_markdown(
@@ -363,6 +396,7 @@ class ConversionEngine:
                             engine="pdflayout",
                             doc_title=res.title,
                             doc_author=res.author,
+                            title_source=res.title_source,
                         )
                 except Exception as exc:
                     failures.append(("pdflayout", exc))
@@ -409,19 +443,22 @@ class ConversionEngine:
                 text = result.text_content or ""
                 sp["chars"] = len(text)
             # markitdown quirk: unrecognized binary content (a corrupt docx,
-            # an mp3 with broken magic bytes) can "convert" without error.
-            # Through 0.1.7 that gives the literal string "None" (str(None)
-            # leaking from a converter), a "| None |" table, or nothing at all;
-            # from 0.1.8 a lossy UTF-8 decode of the raw bytes, i.e. whichever
-            # stray byte pairs happen to be valid. A non-trivial source
+            # an mp3 with broken magic bytes) can "convert" without error to
+            # the literal string "None" (str(None) leaking from a converter),
+            # a "| None |" table, or nothing at all. A non-trivial source
             # yielding no real text is a failure, not a success.
             has_text = any(
                 m.group(0) != "None" for m in re.finditer(r"\w+", text)
             )
-            garbled = (
-                has_text and quality.looks_like_binary_noise(text) and _is_raw_bytes(source)
-            )
-            if not has_text or garbled:
+            if has_text and len(text) >= 400:
+                # markitdown 0.1.8+ decodes binary junk with some multi-byte
+                # codec instead of returning "None": a salad of scripts that
+                # passes the \w test. The quality gauge's binary-noise check
+                # catches it (incl. its mixed-script signal).
+                from .quality import assess_markdown
+
+                has_text = not assess_markdown(text).binary_noise
+            if not has_text:
                 try:
                     src_size = source.stat().st_size
                 except OSError:
@@ -436,11 +473,7 @@ class ConversionEngine:
                     )
                 # A scan or photo with OCR off "converts" to nothing at any
                 # size — and the fix is one click away, so say so.
-                if (
-                    not has_text
-                    and not self.enable_ocr
-                    and (ext == ".pdf" or ext in ocr.OCR_IMAGE_EXTENSIONS)
-                ):
+                if not self.enable_ocr and (ext == ".pdf" or ext in ocr.OCR_IMAGE_EXTENSIONS):
                     return ConversionResult(
                         source=source,
                         error="EmptyOutputError: no text layer, and OCR is turned off",

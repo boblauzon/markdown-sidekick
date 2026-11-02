@@ -336,10 +336,12 @@ class TestOutline:
     def test_title_from_metadata_when_sane(self, tmp_path):
         res = _extract(tmp_path, self._book(), title="A Real Book Title")
         assert res.title == "A Real Book Title"
+        assert res.title_source == "pdf_info"
         # A filename is rejected; the first text page, set like a title
         # page, names the book instead.
         res = _extract(tmp_path, self._book(), name="b.pdf", title="9781610581899.pdf")
         assert res.title == "A Cover Line"
+        assert res.title_source == "title_page"
 
 
 class TestFigureMarkers:

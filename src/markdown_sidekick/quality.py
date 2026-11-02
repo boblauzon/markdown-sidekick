@@ -12,7 +12,6 @@ from __future__ import annotations
 import re
 import unicodedata
 from dataclasses import dataclass, field
-from functools import lru_cache
 
 from . import debuglog
 from .cleanup import is_shadow_word
@@ -24,26 +23,15 @@ _CHARS_PER_TOKEN = 4
 # --- binary-noise detection -------------------------------------------------
 # markitdown "successfully" converts unrecognized binary garbage (a corrupt
 # .docx, an .mp3 with broken magic bytes) by decoding the raw bytes as text,
-# so a conversion can report ok while the output is unreadable salad. Three
-# signals, all computed over a bounded sample:
+# so a conversion can report ok while the output is unreadable salad. Two
+# signals, both computed over a bounded sample:
 #   noise_ratio — control chars (minus \t\n\r), U+FFFD, private-use/unassigned
 #   word_ratio  — fraction of whitespace tokens made only of word-like chars
-#   script_switch_ratio — fraction of neighbouring letters within a token that
-#       change script. A lossy UTF-8 decode keeps only the byte pairs that
-#       happen to be valid, and those land anywhere in Unicode, so this catches
-#       salad the other two rate as healthy text.
 # Guards keep this conservative: short outputs are never flagged, and each
 # rule needs either an extreme single signal or two weaker ones together.
 _NOISE_SAMPLE_CHARS = 65_536
 _NOISE_MIN_CHARS = 400
 _NOISE_MIN_TOKENS = 40
-_SALAD_MIN_LETTER_PAIRS = 100
-_SALAD_MIN_SWITCH_RATIO = 0.5
-# Math ("Δx") and homoglyph spam switch constantly too, but between two scripts;
-# byte salad roams across many.
-_SALAD_MIN_SCRIPTS = 6
-# Japanese and Korean mix these inside a single word as a matter of course.
-_CJK_SCRIPTS = frozenset({"CJK", "HIRAGANA", "KATAKANA", "HANGUL", "BOPOMOFO", "IDEOGRAPHIC"})
 
 
 def _is_noise_char(ch: str) -> bool:
@@ -57,6 +45,55 @@ def _is_noise_char(ch: str) -> bool:
     return unicodedata.category(ch) in ("Co", "Cn")
 
 
+# Third signal, for bytes decoded with the wrong multi-byte codec (markitdown
+# 0.1.8 turns binary junk into Hangul + CJK + Armenian + Arabic salad, all of
+# which are "word-like"): real text keeps to one script per word. On 483 real
+# converted books the share of mixed-script words peaked at 0.1% (at most 3
+# script groups per book); codec salad mixes ~90% of words over ~9 groups.
+_MIXED_SCRIPT_RATIO = 0.20
+_MIXED_SCRIPT_GROUPS = 3
+
+
+def _script_group(ch: str) -> str | None:
+    if not ch.isalpha():
+        return None
+    o = ord(ch)
+    if o < 0x250 or 0x1E00 <= o < 0x1F00:
+        return "latin"
+    if 0x370 <= o < 0x400 or 0x1F00 <= o < 0x2000:
+        return "greek"
+    if 0x400 <= o < 0x530:
+        return "cyrillic"
+    if 0x530 <= o < 0x590:
+        return "armenian"
+    if 0x590 <= o < 0x600:
+        return "hebrew"
+    if 0x600 <= o < 0x780 or 0x8A0 <= o < 0x900 or 0xFB50 <= o < 0xFF00:
+        return "arabic"
+    if 0x900 <= o < 0xE00:
+        return "indic"
+    if 0xE00 <= o < 0x1000:
+        return "southeast-asian"
+    if 0x1100 <= o < 0x1200 or 0x3130 <= o < 0x3190 or 0xAC00 <= o < 0xD7B0:
+        return "hangul"
+    # Kana and kanji are one group: Japanese mixes them inside every word.
+    if 0x2E80 <= o < 0xA000 or 0xF900 <= o < 0xFB00 or 0xFF00 <= o < 0xFFF0 or o >= 0x20000:
+        return "cjk"
+    return "other"
+
+
+def _script_mix(tokens: list[str]) -> tuple[float, int]:
+    """(share of words mixing two or more scripts, distinct script groups)."""
+    words = [t for t in tokens if sum(c.isalpha() for c in t) >= 2]
+    seen: set[str] = set()
+    mixed = 0
+    for word in words:
+        groups = {g for g in map(_script_group, word) if g}
+        seen |= groups
+        mixed += len(groups) >= 2
+    return (mixed / len(words) if words else 0.0), len(seen)
+
+
 def _is_wordlike_char(ch: str) -> bool:
     o = ord(ch)
     if o < 127:
@@ -66,76 +103,6 @@ def _is_wordlike_char(ch: str) -> bool:
     cat = unicodedata.category(ch)
     # Letters, marks, numbers, punctuation of any script, plus currency signs.
     return cat[0] in "LMNP" or cat == "Sc"
-
-
-@lru_cache(maxsize=4096)
-def _letter_script(ch: str) -> str:
-    """The script of a letter, or "" for anything that isn't one."""
-    if ch.isascii():
-        return "LATIN" if ch.isalpha() else ""
-    cat = unicodedata.category(ch)
-    if cat[0] != "L" or cat == "Lm":  # Lm: marks scripts share, like Japanese "ー"
-        return ""
-    # unicodedata has no script property, but a letter's name starts with it.
-    # NFKC first, so compatibility forms (ℝ, µ, ª, fullwidth Ａ) count as their
-    # base letter instead of inventing a "script" called DOUBLE-STRUCK.
-    script = unicodedata.name(unicodedata.normalize("NFKC", ch)[0], "").partition(" ")[0]
-    return "CJK" if script in _CJK_SCRIPTS else script
-
-
-def _script_switches(tokens: list[str]) -> tuple[float, int, int]:
-    """(switch ratio, letter pairs seen, scripts taking part in a switch)."""
-    pairs = switches = 0
-    scripts: set[str] = set()
-    for token in tokens:
-        prev = ""
-        for ch in token:
-            script = _letter_script(ch)
-            if not script:
-                continue
-            if prev:
-                pairs += 1
-                if script != prev:
-                    switches += 1
-                    scripts.update((prev, script))
-            prev = script
-    return (switches / pairs if pairs else 0.0), pairs, len(scripts)
-
-
-def _measure_noise(text: str) -> tuple[float, float, float, bool]:
-    """(noise_ratio, word_ratio, script_switch_ratio, binary_noise) of `text`."""
-    sample = text[:_NOISE_SAMPLE_CHARS]
-    if not sample:
-        return 0.0, 1.0, 0.0, False
-    noise_ratio = sum(1 for ch in sample if _is_noise_char(ch)) / len(sample)
-    tokens = sample.split()
-    word_ratio = 1.0
-    if tokens:
-        wordlike = sum(1 for t in tokens if all(_is_wordlike_char(c) for c in t))
-        word_ratio = wordlike / len(tokens)
-    switch_ratio, pairs, scripts = _script_switches(tokens)
-    binary_noise = len(sample) >= _NOISE_MIN_CHARS and (
-        (
-            pairs >= _SALAD_MIN_LETTER_PAIRS
-            and switch_ratio >= _SALAD_MIN_SWITCH_RATIO
-            and scripts >= _SALAD_MIN_SCRIPTS
-        )
-        or (
-            len(tokens) >= _NOISE_MIN_TOKENS
-            and (
-                noise_ratio >= 0.10
-                or (noise_ratio >= 0.02 and word_ratio <= 0.15)
-                or word_ratio <= 0.05
-            )
-        )
-    )
-    return noise_ratio, word_ratio, switch_ratio, binary_noise
-
-
-def looks_like_binary_noise(text: str) -> bool:
-    """Does this converted text read as decoded raw bytes rather than writing?"""
-    return _measure_noise(text)[3]
-
 
 _TOC_RESIDUE_RE = re.compile(r"^\S.{0,120}?\s+•\s+\d{1,4}\s*$|�{2,}|\.{6,}\s*\d{1,4}\s*$", re.M)
 _LONE_BULLET_RE = re.compile(r"^\s*•\s*$", re.M)
@@ -172,7 +139,7 @@ class QualityReport:
     doubled_words: int = 0
     noise_ratio: float = 0.0
     word_ratio: float = 1.0
-    script_switch_ratio: float = 0.0
+    script_mix: float = 0.0  # share of words mixing scripts (wrong-codec salad)
     binary_noise: bool = False
     issues: list[str] = field(default_factory=list)
     score: int = 100  # 0-100; 100 = no detected artifacts, good structure
@@ -205,7 +172,7 @@ class QualityReport:
             "doubled_words": self.doubled_words,
             "noise_ratio": round(self.noise_ratio, 3),
             "word_ratio": round(self.word_ratio, 3),
-            "script_switch_ratio": round(self.script_switch_ratio, 3),
+            "script_mix": round(self.script_mix, 3),
             "binary_noise": self.binary_noise,
             "issues": list(self.issues),
         }
@@ -245,7 +212,21 @@ def _assess(text: str) -> QualityReport:
         1 for m in _DOUBLED_WORD_RE.finditer(text) if is_shadow_word(m.group(0))
     )
 
-    r.noise_ratio, r.word_ratio, r.script_switch_ratio, r.binary_noise = _measure_noise(text)
+    sample = text[:_NOISE_SAMPLE_CHARS]
+    r.noise_ratio = sum(1 for ch in sample if _is_noise_char(ch)) / len(sample)
+    tokens = sample.split()
+    groups = 0
+    if tokens:
+        wordlike = sum(1 for t in tokens if all(_is_wordlike_char(c) for c in t))
+        r.word_ratio = wordlike / len(tokens)
+        r.script_mix, groups = _script_mix(tokens)
+    if len(sample) >= _NOISE_MIN_CHARS and len(tokens) >= _NOISE_MIN_TOKENS:
+        r.binary_noise = (
+            r.noise_ratio >= 0.10
+            or (r.noise_ratio >= 0.02 and r.word_ratio <= 0.15)
+            or r.word_ratio <= 0.05
+            or (r.script_mix >= _MIXED_SCRIPT_RATIO and groups >= _MIXED_SCRIPT_GROUPS)
+        )
 
     score = 100
     if r.binary_noise:
