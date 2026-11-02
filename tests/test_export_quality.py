@@ -559,6 +559,20 @@ class TestBinaryNoise:
         r = assess_markdown("ÅÙ¬ø∂¤¦¨ " * 100)
         assert r.binary_noise
 
+    def test_few_words_then_zeros_flagged(self):
+        # Too few words to judge by words, but no text is mostly NUL.
+        text = "Chapter one. A short start.\n" + "\x00" * 100_000
+        assert len(text.split()) < 40
+        r = assess_markdown(text)
+        assert r.binary_noise
+
+    def test_few_words_with_little_noise_not_flagged(self):
+        # Scripts without spaces have few "words" at any length, so a run of
+        # private-use glyphs in one must not read as corruption.
+        r = assess_markdown("這是一段中文內容。" * 100 + "" * 40)
+        assert 0 < r.noise_ratio < 0.10
+        assert not r.binary_noise
+
     def test_prose_and_code_not_flagged(self):
         doc = (
             "# Title\n\nNormal prose with punctuation, e.g. costs of $5-10!\n\n"

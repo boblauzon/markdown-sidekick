@@ -227,15 +227,16 @@ def _assess(text: str) -> QualityReport:
         r.script_switch, switch_pairs, switch_groups = _script_switches(tokens)
     if len(sample) >= _NOISE_MIN_CHARS:
         r.binary_noise = (
-            r.script_switch >= _SWITCH_MIN_RATIO
-            and switch_pairs >= _SWITCH_MIN_PAIRS
-            and switch_groups >= _SWITCH_MIN_GROUPS
-        ) or (
-            len(tokens) >= _NOISE_MIN_TOKENS
-            and (
-                r.noise_ratio >= 0.10
-                or (r.noise_ratio >= 0.02 and r.word_ratio <= 0.15)
-                or r.word_ratio <= 0.05
+            # No word count: a few words then zeros (a crash, a failed sync) have few.
+            r.noise_ratio >= 0.10
+            or (
+                r.script_switch >= _SWITCH_MIN_RATIO
+                and switch_pairs >= _SWITCH_MIN_PAIRS
+                and switch_groups >= _SWITCH_MIN_GROUPS
+            )
+            or (
+                len(tokens) >= _NOISE_MIN_TOKENS
+                and ((r.noise_ratio >= 0.02 and r.word_ratio <= 0.15) or r.word_ratio <= 0.05)
             )
         )
 

@@ -147,6 +147,23 @@ class TestEmptyOutputGuard:
         res = self._engine().convert_file(p)
         assert not res.ok
 
+    @pytest.mark.parametrize("ext", [".txt", ".csv", ".md", ".json", ".xml", ".html"])
+    def test_few_words_then_zeros_reports_error(self, tmp_path, ext):
+        # The same with too few words for the word-based noise signals.
+        p = tmp_path / f"partial{ext}"
+        p.write_bytes(b"Chapter one. A short start.\n" + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+        assert "produced no text" in (res.error or "")
+
+    def test_real_text_with_no_spaces_stays_ok(self, tmp_path):
+        # One long line has few words at any length, and that alone proves nothing.
+        p = tmp_path / "one-line.txt"
+        p.write_bytes(("これはテストの文章です。漢字とカタカナを混ぜて書きます。" * 1000).encode("shift_jis"))
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert not assess_markdown(res.markdown).binary_noise
+
     @pytest.mark.parametrize(
         "text, encoding",
         [
