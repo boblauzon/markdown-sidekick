@@ -551,6 +551,7 @@ your documents' text (file names and paths, yes).
 | MS-123 | Transcription failed, so only basic file information was extracted. *(warning)* | Choose a smaller Whisper model in Settings → Conversion, then retry. | Open Conversion settings |
 | MS-124 | The page-by-page PDF reader failed, so this PDF has no page anchors. *(warning)* | Retry. If it happens again, report it with this error's reference. | Retry |
 | MS-125 | This file couldn't be opened as a PDF (it may be damaged, or not a PDF at all), so only its raw text was converted. *(warning)* | Re-download or re-export the PDF, then retry. | Retry |
+| MS-127 | The end of this file is unreadable, so the document may be cut short. *(warning)* | This usually comes from an interrupted download, copy or sync. Get a fresh copy of the original, then retry. | Retry |
 | MS-130 | The address couldn't be downloaded. | Check the address and your internet connection, then retry. | Retry |
 | MS-131 | That link can't be converted: only http/https downloads up to 50 MB are supported. | Download the file yourself and convert the local copy. | — |
 | MS-132 | There is no section with that number. | Get the section list from convert_outline and use one of its indexes (with the same max_tokens). | — |

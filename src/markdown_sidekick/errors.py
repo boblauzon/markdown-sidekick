@@ -208,6 +208,14 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "warning",
     ),
     ErrorSpec(
+        "MS-127",
+        "The end of this file is unreadable, so the document may be cut short.",
+        "This usually comes from an interrupted download, copy or sync. "
+        "Get a fresh copy of the original, then retry.",
+        "retry",
+        "warning",
+    ),
+    ErrorSpec(
         "MS-130",
         "The address couldn't be downloaded.",
         "Check the address and your internet connection, then retry.",
