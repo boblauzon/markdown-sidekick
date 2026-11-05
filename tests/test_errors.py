@@ -156,6 +156,32 @@ class TestEmptyOutputGuard:
         assert not res.ok
         assert "produced no text" in (res.error or "")
 
+    @pytest.mark.parametrize("ext", [".txt", ".md", ".json", ".csv"])
+    def test_long_text_then_zeros_converts_with_warning(self, tmp_path, ext):
+        # Too much real text to refuse: keep it, and say the end is missing.
+        p = tmp_path / f"cut{ext}"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 4_500 + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert [w.code for w in res.warnings] == ["MS-127"]
+
+    def test_long_text_then_zeros_drops_the_zeros(self, tmp_path):
+        p = tmp_path / "cut.txt"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 4_500 + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert "\x00" not in res.markdown
+        assert res.markdown.endswith("lazy dog.\n")
+
+    @pytest.mark.parametrize(
+        "tail", [b"", b"\n" * 100_000, b" The end, at last. " * 9_000], ids=["none", "newlines", "prose"]
+    )
+    def test_long_real_text_has_no_warning(self, tmp_path, tail):
+        p = tmp_path / "whole.txt"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 4_500 + tail)
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert res.warnings == []
+
     def test_real_text_with_no_spaces_stays_ok(self, tmp_path):
         # One long line has few words at any length, and that alone proves nothing.
         p = tmp_path / "one-line.txt"

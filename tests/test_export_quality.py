@@ -15,7 +15,7 @@ from markdown_sidekick.export import (
     slugify,
     split_chapters,
 )
-from markdown_sidekick.quality import assess_markdown
+from markdown_sidekick.quality import assess_markdown, ends_in_noise
 
 _BOOK = (
     "Preamble before any chapter.\n\n"
@@ -566,10 +566,28 @@ class TestBinaryNoise:
         r = assess_markdown(text)
         assert r.binary_noise
 
+    def test_long_text_then_zeros_ends_in_noise(self):
+        # The start alone looks fine, so only the end gives this away.
+        text = "A real paragraph of readable text. " * 3_000 + "\x00" * 100_000
+        assert not assess_markdown(text).binary_noise
+        assert ends_in_noise(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "A real paragraph of readable text. " * 3_000,
+            "Short start.\n" + "\x00" * 50_000,  # all inside the start: binary_noise's job
+            "這是一段中文內容。" * 20_000,
+        ],
+        ids=["prose", "short", "chinese"],
+    )
+    def test_ends_in_noise_not_flagged(self, text):
+        assert not ends_in_noise(text)
+
     def test_few_words_with_little_noise_not_flagged(self):
         # Scripts without spaces have few "words" at any length, so a run of
         # private-use glyphs in one must not read as corruption.
-        r = assess_markdown("這是一段中文內容。" * 100 + "" * 40)
+        r = assess_markdown("這是一段中文內容。" * 100 + "\ue000" * 40)
         assert 0 < r.noise_ratio < 0.10
         assert not r.binary_noise
 

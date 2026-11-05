@@ -190,6 +190,15 @@ def assess_markdown(text: str) -> QualityReport:
     return report
 
 
+def ends_in_noise(text: str) -> bool:
+    """Whether a document whose start reads fine ends in binary noise: a real
+    file cut short and zero-filled, as an interrupted copy or sync leaves it.
+    The noise rules sample only the start, so they can't see this."""
+    if len(text) <= _NOISE_SAMPLE_CHARS:
+        return False  # the start's sample already covered all of it
+    return _assess(text[-_NOISE_SAMPLE_CHARS:]).binary_noise
+
+
 def _assess(text: str) -> QualityReport:
     r = QualityReport()
     if not text:

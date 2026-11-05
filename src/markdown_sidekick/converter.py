@@ -76,6 +76,8 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
 # empty documents (an untouched .docx is ~10 KB of zip scaffolding) pass through
 # as empty output rather than being declared failures.
 _EMPTY_OUTPUT_MIN_BYTES = 16_384
+# Whitespace and the C0 controls a zero-filled tail decodes to.
+_TRAILING_JUNK = "".join(map(chr, range(0x21)))
 
 
 @dataclass
@@ -455,9 +457,14 @@ class ConversionEngine:
                 # codec instead of returning "None": a salad of scripts that
                 # passes the \w test. The quality gauge's binary-noise check
                 # catches it (incl. its script-switch signal).
-                from .quality import assess_markdown
+                from .quality import assess_markdown, ends_in_noise
 
                 has_text = not assess_markdown(text).binary_noise
+                if has_text and ends_in_noise(text):
+                    # Too much real text to refuse: keep it, say the end is
+                    # missing, and drop the control characters zeros decode to.
+                    failures.append(("truncated", EOFError("the end of the file is unreadable")))
+                    text = text.rstrip(_TRAILING_JUNK) + "\n"
             if not has_text:
                 try:
                     src_size = source.stat().st_size
@@ -493,6 +500,7 @@ class ConversionEngine:
         "ocr_image": "MS-122",
         "whisper": "MS-123",
         "pdftext": "MS-124",
+        "truncated": "MS-127",  # not a failure, but the document is cut short
     }
 
     @staticmethod
