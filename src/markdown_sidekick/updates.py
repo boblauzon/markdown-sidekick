@@ -288,10 +288,13 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def start_install(installer: Path, release: Release) -> None:
+def start_install(installer: Path, release: Release, new_window: bool = False) -> None:
     """Run the installer silently; it closes any running copy (the caller is
-    exiting), installs, and reopens the app. The marker lets the next start
-    tell whether it worked. Raises UpdateError (MS-704) if it can't start."""
+    exiting), installs, and reopens the app — in the redesigned window when
+    ``new_window`` (the installer turns ``/RELAUNCHUI=new`` into ``--new-ui``;
+    it takes a fixed word, never arguments to pass on). The marker lets the
+    next start tell whether it worked. Raises UpdateError (MS-704) if it
+    can't start."""
     folder = updates_dir()
     folder.mkdir(parents=True, exist_ok=True)
     log = folder / "install.log"
@@ -304,7 +307,7 @@ def start_install(installer: Path, release: Release) -> None:
     try:
         subprocess.Popen(  # noqa: S603 - our own installer, verified against the signed manifest
             [str(installer), "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CLOSEAPPLICATIONS",
-             f"/LOG={log}", "/RELAUNCH=1"],
+             f"/LOG={log}", "/RELAUNCH=1", *(["/RELAUNCHUI=new"] if new_window else [])],
             close_fds=True,
             creationflags=getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         )
@@ -346,13 +349,16 @@ class UpdateFlow:
     ``on_change`` is called (from whichever thread) after every change, so a
     window redraws from :meth:`snapshot`. ``on_message`` gets the one-line
     results of a check the user asked for. ``save`` persists the settings.
+    ``new_window`` is set by the redesigned window, so an update reopens it
+    rather than the classic one.
     """
 
     def __init__(self, settings, save: Callable[[], None], on_change: Callable[[], None],
-                 on_message: Callable[[str], None]) -> None:
+                 on_message: Callable[[str], None], new_window: bool = False) -> None:
         import threading
 
         self._settings, self._save = settings, save
+        self._new_window = new_window
         self._on_change, self._on_message = on_change, on_message
         self._lock = threading.Lock()
         self.state = "idle"  # idle | checking | available | downloading | ready
@@ -463,7 +469,7 @@ class UpdateFlow:
         if not ready or path is None or release is None:
             return False
         try:
-            start_install(path, release)
+            start_install(path, release, new_window=self._new_window)
         except UpdateError as exc:
             incident = errors.report(exc.code, where="update install", detail=str(exc))
             self._set(state="available", pct=0)

@@ -250,7 +250,8 @@ class Api:
         threading.Thread(target=self._engine, daemon=True, name="engine-warmup").start()
         self._updates = updates.UpdateFlow(self._settings, self._save_quietly,
                                            on_change=lambda: self._push(force=True),
-                                           on_message=lambda text: self._flash(text, 8))
+                                           on_message=lambda text: self._flash(text, 8),
+                                           new_window=True)
         threading.Thread(target=self._start_updates, daemon=True, name="updates-start").start()
 
     def _engine(self):

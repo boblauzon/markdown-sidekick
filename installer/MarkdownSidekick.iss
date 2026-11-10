@@ -76,8 +76,9 @@ Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: de
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
-; An in-app update runs Setup silently; this reopens the app afterwards.
-Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: RelaunchRequested
+; An in-app update runs Setup silently; this reopens the app afterwards, in
+; the window the update was started from (/RELAUNCHUI=new: the redesigned one).
+Filename: "{app}\{#MyAppExeName}"; Parameters: "{code:RelaunchArgs}"; Flags: nowait skipifnotsilent; Check: RelaunchRequested
 
 [UninstallDelete]
 ; Nothing beyond {app}: settings, logs and models in %LOCALAPPDATA% are the
@@ -87,6 +88,13 @@ Filename: "{app}\{#MyAppExeName}"; Flags: nowait skipifnotsilent; Check: Relaunc
 function RelaunchRequested: Boolean;
 begin
   Result := ExpandConstant('{param:RELAUNCH|0}') = '1';
+end;
+
+{ Only a fixed word is accepted, so nothing on Setup's command line is ever
+  passed on to the app. }
+function RelaunchArgs(Param: String): String;
+begin
+  if ExpandConstant('{param:RELAUNCHUI|}') = 'new' then Result := '--new-ui' else Result := '';
 end;
 
 function AllUsersCopy(var Version, Uninstaller, Location: String): Boolean;

@@ -648,6 +648,29 @@ def test_closing_with_nothing_downloaded_installs_nothing(api, monkeypatch):
     assert started == []
 
 
+def test_an_update_reopens_this_window_not_the_classic_one(api, monkeypatch):
+    from markdown_sidekick import errors, updates
+
+    made = []
+
+    class Flow:
+        def __init__(self, *args, **kwargs):
+            made.append(kwargs)
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(updates, "UpdateFlow", Flow)
+    monkeypatch.setattr(bridge.threading, "Thread", NoThread)
+    monkeypatch.setattr(errors, "add_listener", lambda listener: None)
+    api._attach(object())
+    assert made[0]["new_window"] is True
+
+
 def test_help_has_the_guide_sections(api):
     titles = [s["title"] for s in api.help()]
     assert any("Error codes" in t for t in titles)

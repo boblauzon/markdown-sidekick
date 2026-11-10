@@ -295,11 +295,32 @@ def test_a_corrupt_marker_is_dropped(tmp_path, monkeypatch):
     assert updates.finish_pending() is None and not (folder / "pending.json").exists()
 
 
+@pytest.mark.parametrize("new_window", [False, True])
+def test_the_installer_is_told_which_window_to_reopen(tmp_path, monkeypatch, new_window):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    commands = []
+    monkeypatch.setattr(updates.subprocess, "Popen", lambda cmd, **kw: commands.append(cmd))
+    rel = updates.Release("9.0.0", "", False, "x.exe", "https://example.invalid/x.exe", 1, "0" * 64)
+    updates.start_install(tmp_path / "x.exe", rel, new_window=new_window)
+    assert "/RELAUNCH=1" in commands[0]
+    assert ("/RELAUNCHUI=new" in commands[0]) is new_window
+
+
+def test_setup_reopens_the_new_window_only_on_its_own_word():
+    """Setup maps one fixed word to ``--new-ui``; it never forwards arguments."""
+    script = (Path(__file__).parent.parent / "installer" / "MarkdownSidekick.iss").read_text(encoding="utf-8")
+    assert "{param:RELAUNCHUI|}') = 'new' then Result := '--new-ui' else Result := ''" in script
+    run = next(line for line in script.splitlines() if "Check: RelaunchRequested" in line)
+    assert 'Parameters: "{code:RelaunchArgs}"' in run and "skipifnotsilent" in run
+
+
 class TestFlow:
-    def _flow(self, tmp_path, monkeypatch, started):
+    def _flow(self, tmp_path, monkeypatch, started, **kwargs):
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-        monkeypatch.setattr(updates, "start_install", lambda path, rel: started.append(rel.version))
-        flow = updates.UpdateFlow(Settings(), lambda: None, on_change=lambda: None, on_message=lambda t: None)
+        monkeypatch.setattr(updates, "start_install",
+                            lambda path, rel, new_window=False: started.append((rel.version, new_window)))
+        flow = updates.UpdateFlow(Settings(), lambda: None, on_change=lambda: None, on_message=lambda t: None,
+                                  **kwargs)
         flow.release = updates.Release("9.0.0", "", False, "u.exe", "https://example.invalid/u.exe", 1, "0" * 64)
         flow.state, flow._installer = "ready", tmp_path / "u.exe"
         return flow
@@ -308,7 +329,12 @@ class TestFlow:
         started = []
         flow = self._flow(tmp_path, monkeypatch, started)
         assert flow.install() is True and flow.install() is False  # Restart now, then the closing window
-        assert started == ["9.0.0"]
+        assert started == [("9.0.0", False)]
+
+    def test_the_new_window_asks_to_be_reopened(self, tmp_path, monkeypatch):
+        started = []
+        assert self._flow(tmp_path, monkeypatch, started, new_window=True).install() is True
+        assert started == [("9.0.0", True)]
 
     def test_a_check_keeps_a_downloaded_update(self, tmp_path, monkeypatch):
         flow = self._flow(tmp_path, monkeypatch, [])

@@ -1,6 +1,6 @@
 # Roadmap
 
-**Updated:** 2026-10-30 · **Branch:** `claude/ui-webview`, plus the 1.3.0 release on `claude/v1.4-library-batch` (PR #5).
+**Updated:** 2026-11-10 · **Branch:** `claude/ui-webview` (PR #6), stacked on the 1.3.0 release on `claude/v1.4-library-batch` (PR #5).
 
 This is the working list: what's being built, in order, and what waits on something outside the code (a decision, an account, real users). Each item lands with a `/verify` run against the real app and a `/code-review`.
 
@@ -16,6 +16,10 @@ This is the working list: what's being built, in order, and what waits on someth
 
 ## Done
 
+- 2026-11-10 · An update started from the new window reopens the new window (`/RELAUNCHUI=new`; Setup accepts that one word and passes nothing else on). Checked with a probe installer built from the real script's lines; not rerun end to end on a full build.
+- 2026-10-31 · Build: OpenCV's unused FFmpeg DLL dropped, 27 MB (`aa744e4`).
+- 2026-10-31 · MCP: `convert_url` only connects to public addresses (MS-133), every tool is annotated, downloads trust Mozilla's roots as well as Windows' (MS-134) (`4ebe5e7`).
+- 2026-10-31 · Export: a table cut across parts repeats its header in each part (`747b27c`).
 - 2026-10-30 · New window: a marker inside a paragraph no longer repeats its text; confirmation boxes are owned by the window, one at a time (found by `/verify`).
 - 2026-10-30 · New window shows page anchors and figure markers as muted placeholders, not escaped HTML (found by the frozen check).
 - 2026-10-30 · Dependencies: Pillow 13, fastmcp 4.1.4, only markitdown's local extras (`a66b988`).
@@ -36,6 +40,7 @@ This is the working list: what's being built, in order, and what waits on someth
 | Item | Why it can't be done here | What to do |
 |---|---|---|
 | Merge PR #5, close #4, publish the v1.3.0 draft | Publishing ships to users; merging was refused to Claude as "merge without review" | Review PR #5 → merge → close #4 → Releases → v1.3.0 → Publish. Publishing tags `cb173d4`. |
+| Review the work stacked behind PR #5 | Six branches wait on a review, and none can land before PR #5 | In order: PR #6 (this branch) → PR #7 (corrupt-file guard, MS-127) → `claude/xenodochial-carson-838135` (legacy text encodings, MS-126; stacked on PR #7). Beside those, forked from this branch: `claude/fervent-robinson-c21e46` (`strip_toc_tables` deleting real tables), `claude/frosty-bell-c42f67` (MCP Bundle), `claude/trusting-kare-e1c7e0` (PDF benchmark report). The last four are on this PC only: not pushed, no PR. |
 | PyPI publishing | Needs Rob's PyPI account | PyPI → Publishing → add a pending publisher (project `markdown-sidekick`, owner `boblauzon`, repo `markdown-sidekick`, workflow `publish.yml`, environment `pypi`), then re-run the publish workflow. |
 | Code signing (exes, installer, uninstaller, bundled DLLs) | An organization certificate needs VibeProSoft registered as a business | Register the business → order the certificate (cloud signing, so CI can use it) → spec P2. |
 | Back up the update-signing key | It's a secret that must live offline | Copy the key folder named in `docs/release-signing.md` to offline storage; without it no update can ever be signed again. |
@@ -46,7 +51,6 @@ This is the working list: what's being built, in order, and what waits on someth
 
 ### Later (ideas, not commitments)
 
-- Updating from the new window reopens the classic one: the installer's relaunch passes no flag. It goes away when the new window becomes the default; until then only `--new-ui` users see it.
 - Design: the Archivo font (OFL, would need bundling), and the red accent doubling as the error colour.
 - Release automation on GitHub Actions with cloud signing; a beta channel; smaller updates when dependencies haven't changed.
 - A library (batch) mode in the window; a watch folder; MOBI/AZW3 discovery.
