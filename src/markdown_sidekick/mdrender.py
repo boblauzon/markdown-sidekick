@@ -20,10 +20,11 @@ import webbrowser
 _INLINE = re.compile(
     r"(?<!\w)\*\*(?=\S).+?(?<=\S)\*\*(?!\w)"          # bold
     r"|`[^`]+`"                                        # inline code
-    r"|\[[^\]]+\]\([^)]+\)"                            # link
+    r"|\[[^\]]+\]\((?:[^()]|\([^()]*\))+\)"            # link
     r"|(?<![\w*])\*(?=\S)[^*\n]+?(?<=\S)\*(?![\w*])"   # italic
 )
-_LINK = re.compile(r"\[([^\]]+)\]\(([^)]+)\)")
+# The address may hold one level of brackets: ".../wiki/Mercury_(planet)".
+_LINK = re.compile(r"\[([^\]]+)\]\(((?:[^()]|\([^()]*\))+)\)")
 _HEADING = re.compile(r"^(#{1,6})\s+(.*)$")
 _BULLET = re.compile(r"^(\s*)[-*•]\s+(.*)$")
 _NUMBERED = re.compile(r"^(\s*)(\d+[.)])\s+(.*)$")

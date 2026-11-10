@@ -16,6 +16,7 @@ This is the working list: what's being built, in order, and what waits on someth
 
 ## Done
 
+- 2026-11-10 · Tests for the classic preview, the error dialog and notice bar, and the guide and AI-setup prompt (65 tests on real Tk widgets). They found one defect, fixed: a link whose address has brackets (`…/Mercury_(planet)`) was cut at the first `)`.
 - 2026-11-10 · An update started from the new window reopens the new window (`/RELAUNCHUI=new`; Setup accepts that one word and passes nothing else on). Checked with a probe installer built from the real script's lines; not rerun end to end on a full build.
 - 2026-10-31 · Build: OpenCV's unused FFmpeg DLL dropped, 27 MB (`aa744e4`).
 - 2026-10-31 · MCP: `convert_url` only connects to public addresses (MS-133), every tool is annotated, downloads trust Mozilla's roots as well as Windows' (MS-134) (`4ebe5e7`).
@@ -55,5 +56,5 @@ This is the working list: what's being built, in order, and what waits on someth
 - Release automation on GitHub Actions with cloud signing; a beta channel; smaller updates when dependencies haven't changed.
 - A library (batch) mode in the window; a watch folder; MOBI/AZW3 discovery.
 - PDF tail: a Docling benchmark, text tables, logo OCR noise.
-- Test coverage for `ui.py`, `mdrender.py`, `errorview.py`, `guide.py` (0% today).
+- Test coverage for `ui.py` (the classic window itself; only its save path is exercised, by `test_save_parity.py`).
 - A VibeProSoft website.
