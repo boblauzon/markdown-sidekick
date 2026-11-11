@@ -153,11 +153,39 @@ function drawMain() {
   $('#count').textContent = S.files.length;
   $('#ocrSw').setAttribute('aria-checked', String(S.ocr));
   $('#removeBtn').disabled = !S.selId;
-  const list = $('#filelist');
-  const scroll = list.scrollTop;
-  list.innerHTML = S.files.map(rowHtml).join('') +
-    `<div class="dropmore">${icon('upload', 18)}Drop more files here — they convert automatically</div>`;
-  list.scrollTop = scroll;
+  drawRows($('#filelist'));
+}
+
+// Rows are updated in place, keyed by id: rebuilding every row on every
+// snapshot took ~45 ms with 300 files, many times a second while they convert.
+function drawRows(list) {
+  let more = list.querySelector('.dropmore');
+  if (!more) {
+    list.insertAdjacentHTML('beforeend', `<div class="dropmore">${icon('upload', 18)}Drop more files here — they convert automatically</div>`);
+    more = list.querySelector('.dropmore');
+  }
+  const old = new Map([...list.querySelectorAll('.row')].map((r) => [r.dataset.id, r]));
+  let at = list.firstElementChild;
+  for (const f of S.files) {
+    const html = rowHtml(f);
+    let row = old.get(f.id);
+    old.delete(f.id);
+    if (!row || row.msHtml !== html) {
+      const t = document.createElement('template');
+      t.innerHTML = html;
+      const fresh = t.content.firstElementChild;
+      fresh.msHtml = html;
+      if (row) {
+        if (row === at) at = fresh;
+        row.replaceWith(fresh);
+      }
+      row = fresh;
+    }
+    if (row !== at) list.insertBefore(row, at);
+    at = row.nextElementSibling;
+  }
+  for (const r of old.values()) r.remove();
+  if (more.nextElementSibling) list.appendChild(more);
 }
 
 function rowHtml(f) {
@@ -553,7 +581,30 @@ document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth
 document.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; document.body.classList.remove('drag'); });
 sysDark.addEventListener('change', applyTheme);
 
+// pywebview hands a DOM event to its Python handler by serialising every
+// property, and a drop's currentTarget is the whole document: the preview
+// and every row, over a second of frozen page per drop, growing with the
+// document shown. Python needs only the type and the files' names (it pairs
+// them with the full paths the native drop recorded). If pywebview changes,
+// this doesn't install and drops still work, just slower.
+function slimDropEvents() {
+  const pv = window.pywebview;
+  if (!pv || typeof pv.stringify !== 'function' || pv.stringify.slim) return;
+  const full = pv.stringify;
+  const slim = function (params, ...rest) {
+    const e = params && params.event;
+    if (e instanceof DragEvent && e.type === 'drop') {
+      const files = [...((e.dataTransfer && e.dataTransfer.files) || [])].map((f) => ({ name: f.name, size: f.size, type: f.type }));
+      return full.call(this, { ...params, event: { type: 'drop', dataTransfer: { files } } }, ...rest);
+    }
+    return full.call(this, params, ...rest);
+  };
+  slim.slim = true;
+  pv.stringify = slim;
+}
+
 window.addEventListener('pywebviewready', async () => {
+  slimDropEvents();
   const boot = await api().ready();
   Object.assign(S, { boot, clean: boot.clean, view: boot.rendered ? 'rendered' : 'raw', exportStyle: boot.exportStyle, aiTarget: boot.aiTarget, theme: boot.theme, probe: boot.probe });
   $('#helpBtn').innerHTML = `${icon('help')}Help`;

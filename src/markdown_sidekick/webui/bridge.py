@@ -260,7 +260,11 @@ class Api:
         self._html_cache: OrderedDict[tuple[str, bool], tuple[object, str, str]] = OrderedDict()
         self._md = None
         self._last_push = 0.0
-        self._push_timer: threading.Timer | None = None
+        # Snapshots go out from one sender thread (see _push).
+        self._push_wanted = False
+        self._push_now = False  # a forced push is waiting: skip the interval
+        self._push_wake = threading.Event()
+        self._sender: threading.Thread | None = None
         self._seq = 0  # snapshot number: the page drops one older than it has
         self._saving = False  # a save is under way (from its dialog on)
         self._save_note = ""  # what the save is doing now, for the status line
@@ -391,25 +395,40 @@ class Api:
             }
 
     def _push(self, force: bool = False) -> None:
-        """Send the page a fresh snapshot, coalescing bursts."""
+        """Have the page sent a fresh snapshot, and return at once.
+
+        pywebview's run_js waits until the page has run the script, so the
+        sending happens on one sender thread: the conversion worker never
+        waits on the page drawing (it did, twice per file). Bursts coalesce,
+        and what goes out is always the newest state; ``force`` skips the
+        interval between pushes."""
         if self._window is None:
             return
-        now = time.monotonic()
         with self._lock:
-            if not force and now - self._last_push < _PUSH_INTERVAL_S:
-                if self._push_timer is None:
-                    self._push_timer = threading.Timer(_PUSH_INTERVAL_S, self._push, kwargs={"force": True})
-                    self._push_timer.daemon = True
-                    self._push_timer.start()
-                return
-            if self._push_timer is not None:
-                self._push_timer.cancel()
-                self._push_timer = None
-            self._last_push = now
-        try:
-            self._window.run_js(f"window.app && app.receive({json.dumps(self._snapshot())})")
-        except Exception:  # window closing
-            pass
+            self._push_wanted = True
+            self._push_now = self._push_now or force
+            if self._sender is None:
+                self._sender = threading.Thread(target=self._send_loop, daemon=True, name="snapshot-sender")
+                self._sender.start()
+        self._push_wake.set()
+
+    def _send_loop(self) -> None:
+        while True:
+            self._push_wake.wait()
+            self._push_wake.clear()
+            with self._lock:
+                if not self._push_wanted:
+                    continue
+                wait = 0.0 if self._push_now else self._last_push + _PUSH_INTERVAL_S - time.monotonic()
+            if wait > 0:
+                time.sleep(wait)  # more changes gather; the snapshot below has them all
+            with self._lock:
+                self._push_wanted = self._push_now = False
+                self._last_push = time.monotonic()
+            try:
+                self._window.run_js(f"window.app && app.receive({json.dumps(self._snapshot())})")
+            except Exception:  # window closing
+                pass
 
     def _flash(self, message: str, seconds: float = 2.8) -> None:
         with self._lock:

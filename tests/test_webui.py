@@ -260,10 +260,34 @@ def test_a_fix_that_turns_ocr_on_redraws_the_switch(api):
     assert api._snapshot()["ocr"] is False
     api.fix("enable_ocr")
     assert api._snapshot()["ocr"] is True and Settings.load().enable_ocr is True
-    assert '"ocr": true' in api._window.scripts[-1]  # the page was told
+    _wait(lambda: '"ocr": true' in api._window.scripts[-1])  # the page was told
     api._window.scripts.clear()
     api.set_option("ocr", False)
-    assert '"ocr": false' in api._window.scripts[-1]
+    _wait(lambda: api._window.scripts and '"ocr": false' in api._window.scripts[-1])
+
+
+def test_pushing_a_snapshot_never_waits_on_the_page(api):
+    """run_js returns only once the page has run the script; the conversion
+    worker must not wait on that (it did, twice per file)."""
+    import threading
+
+    gate = threading.Event()
+    sent = []
+
+    def slow_run_js(script):
+        gate.wait(5)  # the page is busy drawing
+        sent.append(script)
+
+    api._window.run_js = slow_run_js
+    started = time.monotonic()
+    for _ in range(50):
+        api._push(force=True)
+    assert time.monotonic() - started < 0.5
+    gate.set()
+    _wait(lambda: sent)
+    time.sleep(0.3)
+    assert len(sent) <= 3  # the burst coalesced
+    assert f'"seq": {api._seq}' in sent[-1]  # and the newest state went out last
 
 
 def test_the_probe_hook_is_not_part_of_the_page_api(api):
