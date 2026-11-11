@@ -255,6 +255,38 @@ def test_without_webview2_the_new_window_says_so(monkeypatch):
     assert "MS-605" in shown[0] and "WebView2" in shown[0]
 
 
+def test_the_new_window_knows_what_this_pc_lacks(monkeypatch):
+    import types
+
+    import webview.platforms
+
+    from markdown_sidekick import webui
+
+    for renderer, lacks in (("edgechromium", False), ("mshtml", True)):
+        fake = types.SimpleNamespace(renderer=renderer)
+        monkeypatch.setitem(sys.modules, "webview.platforms.winforms", fake)
+        monkeypatch.setattr(webview.platforms, "winforms", fake, raising=False)
+        lack = webui.missing()
+        assert (lack is not None) is lacks
+        if lack:
+            assert "WebView2" in lack[0] and "mshtml" in lack[0]
+
+
+def test_the_window_choice_is_saved_without_a_reconvert(api, tmp_path):
+    from markdown_sidekick.settings import preferred_window
+
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(api, [src])
+    api._window.confirm = False
+    assert api.settings_get()["values"]["window"] == "new"
+    assert api.settings_save({"window": "classic"})["ok"] is True
+    assert api._window.prompts == []  # it changes the next start, not a conversion
+    assert Settings.load().window == "classic" and preferred_window() == "classic"
+    api.settings_save({"window": "old"})
+    assert Settings.load().window == "new"
+
+
 @pytest.fixture
 def saving(api, monkeypatch):
     """The api with Open-the-folder declined and startfile stubbed: a test

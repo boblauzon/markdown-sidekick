@@ -314,6 +314,25 @@ def test_setup_reopens_the_new_window_only_on_its_own_word():
     assert 'Parameters: "{code:RelaunchArgs}"' in run and "skipifnotsilent" in run
 
 
+def test_setup_opens_the_window_chosen_in_settings_and_points_at_webview2():
+    """Setup's Launch box passes no arguments (the app opens Settings →
+    window, the new one by default); without the WebView2 runtime its last
+    page offers Microsoft's page, the same one the app's MS-606 opens."""
+    from markdown_sidekick import errors
+
+    script = (Path(__file__).parent.parent / "installer" / "MarkdownSidekick.iss").read_text(encoding="utf-8")
+    lines = script.splitlines()
+    launch = next(ln for ln in lines if "{cm:LaunchProgram" in ln)
+    assert "Parameters" not in launch and "postinstall" in launch
+    get = next(ln for ln in lines if "Check: WebView2Missing" in ln)
+    for flag in ("shellexec", "postinstall", "skipifsilent"):
+        assert flag in get
+    assert lines.index(get) < lines.index(launch)  # read before the app opens
+    assert f'#define WebView2Url "{errors.WEBVIEW2_URL}"' in script
+    assert "{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}" in script  # the runtime's EdgeUpdate client
+    assert "WebView2Installed(HKLM32) or WebView2Installed(HKCU)" in script
+
+
 class TestFlow:
     def _flow(self, tmp_path, monkeypatch, started, **kwargs):
         monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))

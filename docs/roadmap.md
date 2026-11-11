@@ -16,6 +16,7 @@ This is the working list: what's being built, in order, and what waits on someth
 
 ## Done
 
+- 2026-11-11 · The new window is the default (Rob's call). A `window` setting (new/classic) picks the window at every start, in both Settings dialogs; `--new-ui` / `--classic` override it for one run. Every install and upgrade from 1.3 opens the new window, and a user who picks classic keeps it across updates. Without the WebView2 runtime the classic window opens with MS-606 ("Get WebView2…"), and Setup's last page offers Microsoft's download page. pip's `markdown-sidekick` and `python -m markdown_sidekick` follow the setting too. Found by `/verify`: a `settings.json` saved with a byte-order mark (Notepad, PowerShell 5) read as unreadable and reset every setting (MS-501); it now loads.
 - 2026-11-10 · Tests for the classic window itself (33, on one real hidden window with a stand-in engine): adding and dropping files, what is locked while converting, failures and retry, a crashed batch, clearing, preview and copy, every save path, the export bar. Seven deliberate breakages of `ui.py` were each caught. No defect found.
 - 2026-11-10 · Tests for the classic preview, the error dialog and notice bar, and the guide and AI-setup prompt (65 tests on real Tk widgets). They found one defect, fixed: a link whose address has brackets (`…/Mercury_(planet)`) was cut at the first `)`.
 - 2026-11-10 · An update started from the new window reopens the new window (`/RELAUNCHUI=new`; Setup accepts that one word and passes nothing else on). Checked with a probe installer built from the real script's lines; not rerun end to end on a full build.
@@ -48,7 +49,7 @@ This is the working list: what's being built, in order, and what waits on someth
 | Back up the update-signing key | It's a secret that must live offline | Copy the key folder named in `docs/release-signing.md` to offline storage; without it no update can ever be signed again. |
 | Spec Q1, Q2, Q3, Q5 | Product decisions | Defaults were chosen and are listed in the spec; confirm or change them. |
 | Explorer drag-and-drop and a clean Windows 10 PC for the new window | Needs a person at the desktop / another PC | Drop a file from Explorer onto `app.py --new-ui`; run the installer on a PC without Python. |
-| Usability sessions (X7) → Guided steps, Revise with AI, making the new window the default (ADR-003 go/no-go) | ADR-003: nothing is rebuilt on these until real users have tried the prototype | Run 3–5 sessions on the Designer prototype; decide per feature. |
+| Usability sessions (X7) → Guided steps, Revise with AI (ADR-003 go/no-go) | ADR-003: nothing is rebuilt on these until real users have tried the prototype. (Making the new window the default was decided without them, 2026-11-11.) | Run 3–5 sessions on the Designer prototype; decide per feature. |
 | winget listing | The submission is a PR from Rob's GitHub account to `microsoft/winget-pkgs` | After 1.4.0 ships: `wingetcreate new <installer URL>`. |
 
 ### Later (ideas, not commitments)

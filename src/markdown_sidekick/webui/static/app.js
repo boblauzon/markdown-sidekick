@@ -302,6 +302,8 @@ function settingSections() {
     ],
     appearance: [
       ['Appearance', [{ type: 'seg', label: 'Theme', key: 'theme', opts: [['light', 'Light'], ['dark', 'Dark'], ['system', 'Follow Windows']] }]],
+      ['Window', [{ type: 'seg', label: 'Start in', key: 'window', opts: [['new', 'New window'], ['classic', 'Classic window']],
+        desc: 'Takes effect the next time Markdown Sidekick starts.' }]],
     ],
     updates: [
       ['Updates', [

@@ -403,6 +403,13 @@ class TestLauncher:
         assert "Unknown option" not in proc.stderr
         assert self._run("--new-ui", "--help").returncode == 0
 
+    def test_classic_with_other_arguments_says_so(self):
+        proc = self._run("--classic", "--new-ui")
+        assert proc.returncode == 2
+        assert "--classic takes no other arguments (got: --new-ui)" in proc.stderr
+        assert "Unknown option" not in proc.stderr
+        assert self._run("--classic", "--help").returncode == 0
+
     def test_usage_columns_line_up(self):
         lines = [ln for ln in self._run("--help").stdout.splitlines() if re.match(r"  \S", ln)]
         assert {re.match(r"  \S.*?\s{2,}(?=\S)", ln).end() for ln in lines} == {42}

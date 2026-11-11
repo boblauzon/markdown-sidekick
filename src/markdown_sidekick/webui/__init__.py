@@ -49,23 +49,34 @@ def _cant_start(missing: str, exc: BaseException | None = None) -> None:
     raise SystemExit(1)
 
 
-def run() -> None:
-    errors.install_crash_hooks()
+def missing() -> tuple[str, BaseException | None] | None:
+    """What this PC lacks to show the new window (and the exception that
+    said so), or None when it can show it."""
     try:
         import markdown_it  # noqa: F401 - the preview renderer
-        import webview
-        from webview.dom import DOMEventHandler
+        import webview  # noqa: F401
+        from webview.dom import DOMEventHandler  # noqa: F401
     except ImportError as exc:
-        _cant_start('the pywebview / markdown-it-py packages (pip install "markdown-sidekick[webui]")', exc)
+        return "the pywebview / markdown-it-py packages (pip install pywebview markdown-it-py)", exc
     try:
         # Importing the Windows backend is what picks the engine: without the
         # WebView2 runtime pywebview silently falls back to MSHTML (IE11),
         # which can't run this page — a blank window and no error.
         from webview.platforms import winforms
     except Exception as exc:
-        _cant_start("the .NET Framework 4.6.2+ that pywebview runs on", exc)
+        return "the .NET Framework 4.6.2+ that pywebview runs on", exc
     if winforms.renderer != "edgechromium":
-        _cant_start(f"Microsoft Edge WebView2 Runtime (pywebview would use {winforms.renderer})")
+        return f"Microsoft Edge WebView2 Runtime (pywebview would use {winforms.renderer})", None
+    return None
+
+
+def run() -> None:
+    errors.install_crash_hooks()
+    lack = missing()
+    if lack is not None:
+        _cant_start(*lack)
+    import webview
+    from webview.dom import DOMEventHandler
 
     from .bridge import Api, window_title
 

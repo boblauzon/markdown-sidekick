@@ -61,7 +61,10 @@ ACTIONS: dict[str, str] = {
     "copy_again": "Copy again",
     "raw_preview": "Show raw Markdown",
     "open_logs": "Open log folder",
+    "webview2": "Get WebView2…",
 }
+# Where "webview2" sends the user (Setup's finish page links here too).
+WEBVIEW2_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
 _SPECS: tuple[ErrorSpec, ...] = (
     # -- 1xx conversion -------------------------------------------------------
@@ -386,8 +389,16 @@ _SPECS: tuple[ErrorSpec, ...] = (
     ErrorSpec(
         "MS-605",
         "The new window can't start — a part it needs isn't on this PC.",
-        "Start Markdown Sidekick without --new-ui to use the classic window. To use the new one, "
+        "Start Markdown Sidekick with --classic to use the classic window. To use the new one, "
         "install Microsoft's Edge WebView2 Runtime; the details say what was missing.",
+    ),
+    ErrorSpec(
+        "MS-606",
+        "The new window can't run on this PC yet, so the classic window opened.",
+        "Install Microsoft's free Edge WebView2 Runtime, then start Markdown Sidekick again; the "
+        "details say what was missing. To keep the classic window, choose it in Settings → Output.",
+        "webview2",
+        "warning",
     ),
     # -- 7xx install and updates --------------------------------------------------
     ErrorSpec(

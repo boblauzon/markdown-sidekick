@@ -28,6 +28,15 @@ can read when you need it.
 
 ## The Main Window
 
+**Two windows.** Markdown Sidekick opens its new window. The classic window is
+still there if you prefer it: choose it in Settings (new window: *Appearance* →
+**Start in**; classic window: *Output* → *Open the new window when Markdown
+Sidekick starts*), or open it once with `MarkdownSidekick.exe --classic`. Your
+choice is kept when you update. The new window needs Microsoft's free Edge
+WebView2 Runtime: Windows 11 includes it and most Windows 10 PCs already have it.
+Without it, the classic window opens and says so (MS-606), and Setup's last page
+offers Microsoft's download page.
+
 **Files panel (left)**
 
 - *Add files…* / *Remove* / *Clear* manage the conversion list — added files
@@ -235,6 +244,7 @@ Settings are grouped into four tabs — **Conversion**, **Output**,
 | Output | Front matter / source header | Saved files start with the book's own title, subtitle, authors, publisher, date, language and ISBN (from an epub's package or a PDF's metadata/title page — `title_source` says which) plus source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | On by default: images of at least 120 px land in an `images/` folder, linked right where they appear in the text |
+| Output | Open the new window when Markdown Sidekick starts | On by default; off opens this classic window instead, from the next start (the new window's Settings → *Appearance* → **Start in**) |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
 | Local AI | Polish / caption / summary model | Optional local-LLM passes: artifact repair, figure alt-text, and a 2–3 sentence document summary written into the saved file's front matter (blank = that pass is off) |
 | Diagnostics | Record a detailed trace | Debug mode: logs everything each conversion did (see *Debug mode and diagnostic reports*) |
@@ -602,7 +612,8 @@ your documents' text (file names and paths, yes).
 | MS-602 | Windows couldn't open that folder. *(warning)* | Open it yourself — its path is in the details. | — |
 | MS-603 | The diagnostic report couldn't be created. | Choose another folder for the report, or open the log folder and send the files from there. | Open log folder |
 | MS-604 | The built-in user guide couldn't be loaded — a file is missing from this installation. | Reinstall Markdown Sidekick to restore it. | — |
-| MS-605 | The new window can't start — a part it needs isn't on this PC. | Start Markdown Sidekick without --new-ui to use the classic window. To use the new one, install Microsoft's Edge WebView2 Runtime; the details say what was missing. | — |
+| MS-605 | The new window can't start — a part it needs isn't on this PC. | Start Markdown Sidekick with --classic to use the classic window. To use the new one, install Microsoft's Edge WebView2 Runtime; the details say what was missing. | — |
+| MS-606 | The new window can't run on this PC yet, so the classic window opened. *(warning)* | Install Microsoft's free Edge WebView2 Runtime, then start Markdown Sidekick again; the details say what was missing. To keep the classic window, choose it in Settings → Output. | Get WebView2… |
 
 **Installing and updating**
 

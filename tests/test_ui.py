@@ -373,6 +373,61 @@ class TestFailures:
         used = {spec.action for spec in errors.CATALOG.values() if spec.action}
         assert used <= set(handlers)
 
+    def test_the_webview2_notice_opens_microsofts_page(self, app, monkeypatch):
+        opened = []
+        monkeypatch.setattr(ui.webbrowser, "open", opened.append)
+        app._show_notice(errors.report("MS-606", detail="Microsoft Edge WebView2 Runtime", where="test"))
+        bar = app.notice
+        assert bar.incident.code == "MS-606" and bar._action.cget("text") == "Get WebView2…"
+        bar._action.invoke()
+        assert opened == [errors.WEBVIEW2_URL]
+
+    def test_the_fallback_notice_leaves_an_unreadable_settings_notice_in_place(self, app, monkeypatch):
+        fallback = errors.report("MS-606", detail="Microsoft Edge WebView2 Runtime", where="test")
+        app._show_startup_notice(fallback)
+        assert app.notice.incident.code == "MS-606"  # the usual case: the bar
+        app.notice.hide()
+        unreadable = errors.report("MS-501", detail="JSONDecodeError", where="test")
+        monkeypatch.setattr(settings_store, "LOAD_INCIDENT", unreadable)
+        app._show_notice(unreadable)
+        app._show_startup_notice(fallback)
+        assert app.notice.incident.code == "MS-501"  # their settings were reset: that stays
+        assert "MS-606" in app.status_var.get()
+
+
+class TestSettingsDialog:
+    def _dialog(self, app, monkeypatch):
+        from markdown_sidekick import polish
+
+        monkeypatch.setattr(polish, "detect_local_ai", lambda ep: ("unreachable", [], "", ""))
+        before = set(app.winfo_children())
+        app.open_settings("Output")
+        app.update()
+        [dlg] = [w for w in app.winfo_children() if w not in before]
+        return dlg
+
+    @staticmethod
+    def _widgets(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from TestSettingsDialog._widgets(child)
+
+    def _find(self, dlg, text):
+        return next(w for w in self._widgets(dlg) if "text" in w.keys() and w.cget("text") == text)
+
+    def test_the_window_choice_is_saved_for_the_next_start(self, app, monkeypatch):
+        from markdown_sidekick.settings import preferred_window
+
+        dlg = self._dialog(app, monkeypatch)
+        box = self._find(dlg, "Open the new window when Markdown Sidekick starts")
+        assert app.tk.getvar(box.cget("variable")) in (1, True, "1")  # new by default
+        box.invoke()
+        self._find(dlg, "Save").invoke()
+        app.update()
+        assert not dlg.winfo_exists()
+        assert app.settings.window == "classic" and Settings.load().window == "classic"
+        assert preferred_window() == "classic"
+
 
 class TestRemovingAndClearing:
     def test_remove_takes_the_file_and_its_preview(self, app, tmp_path):

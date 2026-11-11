@@ -18,6 +18,7 @@ from .export import AI_TARGETS, STYLES
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
 THEMES = ("system", "light", "dark")
 UPDATE_CHECKS = ("ask", "weekly", "off")
+WINDOWS = ("new", "classic")  # which window the app opens; the first is the default
 
 # The incident from the last load of an unreadable settings file (MS-501),
 # for the GUI to surface once at startup; None when the file was fine.
@@ -35,6 +36,18 @@ def app_data_dir(*parts: str) -> Path:
 
 def _config_path() -> Path:
     return app_data_dir("settings.json")
+
+
+def preferred_window() -> str:
+    """The window the app opens with no flag: the saved ``window`` choice,
+    else the new one. Read before either window loads its settings, so it
+    never reports or backs up an unreadable file (that window's own load
+    does, once)."""
+    try:
+        value = json.loads(_config_path().read_text(encoding="utf-8-sig")).get("window")
+    except (OSError, ValueError, AttributeError):
+        return WINDOWS[0]
+    return value if value in WINDOWS else WINDOWS[0]
 
 
 @dataclass
@@ -76,6 +89,10 @@ class Settings:
     debug_mode: bool = False  # detailed session trace under logs/sessions
     # In debug mode, also keep each conversion's raw + cleaned Markdown.
     debug_snapshots: bool = True
+    # Which window opens (WINDOWS): the new one unless the user picked the
+    # classic one. A missing key (settings from 1.3 and earlier) reads as
+    # "new", so every install and upgrade opens the new window.
+    window: str = "new"
     # The new window's theme (THEMES); the classic window has one look.
     theme: str = "system"
     # -- updates (updates.py) --------------------------------------------------
@@ -103,7 +120,9 @@ class Settings:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig: a file edited in Notepad or PowerShell 5 may start
+            # with a byte-order mark, which plain utf-8 hands to json as junk.
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
             # Migrate the pre-export-bar key: split_chapters=true meant
             # "write book folders", now expressed as export_style="chapters".
             if data.get("split_chapters") and "export_style" not in data:
@@ -156,6 +175,8 @@ class Settings:
         self.summary_model = str(self.summary_model or "").strip()
         self.debug_mode = bool(self.debug_mode)
         self.debug_snapshots = bool(self.debug_snapshots)
+        if self.window not in WINDOWS:
+            self.window = WINDOWS[0]
         if self.theme not in THEMES:
             self.theme = "system"
         if self.update_check not in UPDATE_CHECKS:

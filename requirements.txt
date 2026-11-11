@@ -28,7 +28,8 @@ fastmcp>=3.0.0
 # well as Windows' store, which holds only some until Windows is asked (netguard.py).
 certifi>=2025.1.31
 
-# Redesigned window (preview: `app.py --new-ui`). pywebview (BSD) drives the
+# The new window, which opens by default (Settings → window; `--classic` for
+# the Tk one). pywebview (BSD) drives the
 # Windows WebView2 runtime through pythonnet (MIT); markdown-it-py (MIT)
 # renders the preview.
 pywebview>=6.2; sys_platform == 'win32'

@@ -582,6 +582,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         debug_v = tk.BooleanVar(dlg, value=self.settings.debug_mode)
         weekly_v = tk.BooleanVar(dlg, value=self.settings.update_check == "weekly")
         snapshots_v = tk.BooleanVar(dlg, value=self.settings.debug_snapshots)
+        new_window_v = tk.BooleanVar(dlg, value=self.settings.window == "new")
         detect_v = tk.StringVar(dlg, value="")
 
         ttk.Label(
@@ -680,6 +681,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         check(out_tab, "Front matter / source header on saved files", front_v, 6)
         check(out_tab, "Page anchors (<!-- page N -->) in PDF conversions", anchors_v, 7)
         check(out_tab, "Extract PDF figures to images/ on save", images_v, 8)
+        section(out_tab, "Window", 9)
+        check(out_tab, "Open the new window when Markdown Sidekick starts", new_window_v, 10)
+        ttk.Label(
+            out_tab,
+            text="Takes effect the next time the app starts. Off = this classic window.",
+            style="PanelMuted.TLabel",
+        ).grid(row=11, column=0, columnspan=3, sticky="w")
 
         # -- Local AI tab -----------------------------------------------------
         ai = tab("Local AI")
@@ -872,6 +880,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             self.settings.debug_mode = debug_v.get()
             self.settings.debug_snapshots = snapshots_v.get()
             self.settings.update_check = "weekly" if weekly_v.get() else "off"
+            self.settings.window = "new" if new_window_v.get() else "classic"
             if not self._save_settings(parent=dlg):
                 return  # the dialog stays open so nothing typed is lost
             changed = {
@@ -1844,6 +1853,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             "copy_again": self.copy_preview,
             "raw_preview": self._fix_raw_preview,
             "open_logs": self.open_log_folder,
+            "webview2": lambda: webbrowser.open(errors.WEBVIEW2_URL),
         }
 
     def _show_error(self, incident: errors.Incident, extra: str = "") -> None:
@@ -1867,6 +1877,15 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         """The non-blocking bar for a problem that didn't stop the user."""
         debuglog.event("ui.notice_shown", code=incident.code, ref=incident.ref)
         self.notice.show(incident, owner=owner, extra=extra)
+
+    def _show_startup_notice(self, incident: errors.Incident) -> None:
+        """A notice from before the window existed (MS-606). The bar holds one
+        notice, and an unreadable settings file (MS-501) keeps it."""
+        if settings_store.LOAD_INCIDENT is not None:
+            debuglog.event("ui.notice_shown", code=incident.code, ref=incident.ref, place="status")
+            self.status_var.set(f"⚠ {incident.title} ({incident.code}, ref {incident.ref})")
+        else:
+            self._show_notice(incident)
 
     def _show_fix_buttons(self, incident: errors.Incident, *, retry: bool) -> None:
         """Preview-row buttons for the selected file's problem."""
@@ -2019,6 +2038,11 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self._refresh_preview()
 
 
-def run() -> None:
+def run(notice: errors.Incident | None = None) -> None:
+    """Open the classic window; ``notice`` (MS-606: why the new window
+    didn't open) goes in its notice bar, or in the status line when the bar
+    already says the settings couldn't be read (that one matters more)."""
     app = MarkdownSidekickApp()
+    if notice is not None:
+        app.after(300, lambda: app._show_startup_notice(notice))
     app.mainloop()

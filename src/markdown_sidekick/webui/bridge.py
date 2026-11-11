@@ -51,7 +51,7 @@ _SETTING_KEYS = (
     "enable_ocr", "ocr_device", "pdf_layout", "enable_audio", "whisper_model", "mineru_endpoint",
     "default_output_dir", "clean_output", "rendered_preview", "export_front_matter", "page_anchors",
     "extract_images", "ollama_endpoint", "polish_model", "caption_model", "summary_model",
-    "debug_mode", "debug_snapshots", "theme", "update_check",
+    "debug_mode", "debug_snapshots", "theme", "window", "update_check",
 )
 _RECONVERT_KEYS = frozenset({
     "enable_ocr", "ocr_device", "pdf_layout", "enable_audio", "whisper_model", "mineru_endpoint",
