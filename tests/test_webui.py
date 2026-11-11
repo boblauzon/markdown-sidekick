@@ -42,6 +42,7 @@ def api(tmp_path, monkeypatch):
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))  # settings.save lands here
     a = bridge.Api(Settings(enable_ocr=False, enable_audio=False))
     a._window = FakeWindow()  # _attach without the engine warm-up thread
+    a._warming = True  # ...and ready() without it too
     return a
 
 
@@ -150,6 +151,62 @@ def test_preview_is_capped_but_says_so(api, tmp_path):
     page = api.preview(item.id, "raw")
     assert page["truncated"] is True
     assert len(page["raw"]) <= bridge.PREVIEW_MAX_CHARS
+
+
+def test_front_matter_previews_as_yaml_not_a_heading(api, tmp_path):
+    src = tmp_path / "exported.md"
+    src.write_text("---\r\ntitle: A Book\r\nest_tokens: 12\r\n---\r\n\r\n# Chapter 1\r\n\r\nText.\r\n", encoding="utf-8")
+    html = api.preview(_convert(api, src).id)["html"]
+    assert "<h2" not in html and "<hr" not in html
+    assert '<code class="language-yaml">title: A Book' in html and "<h1>Chapter 1</h1>" in html
+    assert api.preview(_convert(api, src).id, "raw")["raw"].startswith("---")  # Raw is untouched
+
+
+@pytest.mark.parametrize("text", [
+    "---\n\nA rule, then text.\n\n---\n",  # a thematic break, not front matter
+    "Intro\n---\nkey: value\n---\n",  # not at the very top
+    "---\ntitle: never closed\n\n# Heading\n",
+])
+def test_only_real_front_matter_becomes_yaml(text):
+    assert bridge._front_matter_as_code(text) == text
+
+
+def test_front_matter_with_backticks_keeps_its_fence():
+    out = bridge._front_matter_as_code("---\nnote: uses ``` inside\n---\nBody\n")
+    assert out.startswith("````yaml\nnote: uses ``` inside\n````\n")
+
+
+def test_going_back_to_a_file_reuses_its_rendered_preview(api, tmp_path, monkeypatch):
+    files = []
+    for n in range(6):
+        f = tmp_path / f"f{n}.md"
+        f.write_text(f"# File {n}\n\nSome **text** {n}.\n", encoding="utf-8")
+        files.append(f)
+    _convert_all(api, files)
+    ids = list(api._items)
+    md = api._renderer()
+    rendered = []
+    real = md.render
+    monkeypatch.setattr(md, "render", lambda text, *a: rendered.append(text) or real(text, *a))
+
+    first = api.preview(ids[0])["html"]
+    assert api.preview(ids[0])["html"] == first and len(rendered) == 1  # cached
+    assert api.preview(ids[0], "raw")["raw"] and len(rendered) == 1  # raw needs no render
+    api.set_option("clean", False)
+    api.preview(ids[0])
+    assert len(rendered) == 2  # the other Clean state is its own entry
+    api.set_option("clean", True)
+    for i in ids[1:5]:  # four more files push the first one out
+        api.preview(i)
+    api.preview(ids[0])
+    assert len(rendered) == 7 and len(api._html_cache) == bridge._HTML_CACHE_SIZE
+
+    api.retry(ids[0])  # a new result is rendered afresh, never the old HTML
+    _convert_all(api, [])
+    item = api._items[ids[0]]
+    item.result.markdown = "# Changed\n"
+    item.evict()
+    assert "Changed" in api.preview(ids[0])["html"] and len(rendered) == 8
 
 
 def test_failed_file_gets_its_code_and_next_step(api, tmp_path):
@@ -270,6 +327,55 @@ def test_the_new_window_knows_what_this_pc_lacks(monkeypatch):
         assert (lack is not None) is lacks
         if lack:
             assert "WebView2" in lack[0] and "mshtml" in lack[0]
+
+
+def test_a_missing_preview_renderer_is_named(monkeypatch):
+    import importlib.util
+
+    from markdown_sidekick import webui
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "markdown_it" else real(name, *a))
+    lack = webui.missing()
+    assert lack is not None and "markdown-it-py" in lack[0] and isinstance(lack[1], ImportError)
+
+
+def test_the_window_opens_before_the_heavy_libraries_load():
+    """Everything imported before the first paint stays light. numpy alone
+    took 1.3 s on a cold start; markitdown loads once the page is up."""
+    import subprocess
+
+    code = (
+        "import sys\n"
+        "from markdown_sidekick import start, webui\n"
+        "from markdown_sidekick.webui import bridge\n"
+        "assert webui.missing() is None, webui.missing()\n"
+        "heavy = ('numpy', 'pypdfium2', 'markitdown', 'markdown_it', 'onnxruntime', 'rapidocr', 'faster_whisper')\n"
+        "print(sorted(m for m in heavy if m in sys.modules))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "[]"
+
+
+def test_the_engine_warms_up_once_the_page_is_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    started = []
+
+    class Thread:
+        def __init__(self, target=None, name="", **kwargs):
+            self.name = name
+
+        def start(self):
+            started.append(self.name)
+
+    monkeypatch.setattr(bridge.threading, "Thread", Thread)
+    api = bridge.Api(Settings(enable_ocr=False, enable_audio=False))
+    api._window = FakeWindow()
+    assert "engine-warmup" not in started
+    api.ready()
+    api.ready()  # the page reloaded
+    assert started.count("engine-warmup") == 1
 
 
 def test_the_window_choice_is_saved_without_a_reconvert(api, tmp_path):

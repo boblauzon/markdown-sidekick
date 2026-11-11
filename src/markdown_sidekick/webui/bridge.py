@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import webbrowser
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -23,12 +24,14 @@ from .. import __app_name__, __version__, debuglog, errors, export, updates
 from ..audio import MEDIA_EXTENSIONS
 from ..export import AI_TARGETS
 from ..guide import KOFI_URL, load_user_guide
-from ..ocr import OCR_IMAGE_EXTENSIONS
 from ..settings import THEMES, WHISPER_MODELS, Settings
 
 # Same cap as the Tk preview: the page renders at most this much of a
 # document; Copy and Save always use all of it.
 PREVIEW_MAX_CHARS = 400_000
+# Rendered previews kept for the last few files: going back to a big book
+# skips a 0.2 s render. A few, because each can be a megabyte of HTML.
+_HTML_CACHE_SIZE = 4
 # Progress pushes faster than this are coalesced (OCR reports every page,
 # Whisper every segment).
 _PUSH_INTERVAL_S = 0.12
@@ -38,6 +41,21 @@ _PUSH_INTERVAL_S = 0.12
 _WEB_LINK = re.compile(r"(?i)^https?://")
 # A whole-line HTML comment (page anchor, figure marker), as mdrender._COMMENT.
 _COMMENT_LINE = re.compile(r"^\s*<!--\s*(.*?)\s*-->\s*$")
+# YAML front matter at the very top (Sidekick's own exports, Obsidian notes,
+# static-site posts), opening with a "key:" line. CommonMark reads it as a
+# rule and one huge heading; the preview shows it as a YAML block instead.
+_FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n([\w-]+:.{0,8000}?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.S)
+
+
+def _front_matter_as_code(text: str) -> str:
+    m = _FRONT_MATTER.match(text)
+    if m is None:
+        return text
+    body = m.group(1)
+    fence = "```"
+    while fence in body:
+        fence += "`"
+    return f"{fence}yaml\n{body}{fence}\n\n" + text[m.end():]
 
 _STYLES = (
     ("single", "One file", "One .md per source file."),
@@ -139,6 +157,10 @@ def window_title() -> str:
 
 
 def _kind(path: Path) -> str:
+    # ocr imports numpy and pdfium (1.5 s on a cold start): not at module
+    # level, which is on the path to the window's first paint.
+    from ..ocr import OCR_IMAGE_EXTENSIONS
+
     ext = path.suffix.lower()
     if ext == ".pdf":
         return "pdf"
@@ -233,6 +255,9 @@ class Api:
         self._prompt = threading.Lock()  # held while a confirmation box is up
         self._engine_obj = None
         self._engine_lock = threading.Lock()
+        self._warming = False  # the engine warm-up has started (from ready())
+        # (item id, Clean) -> (the result, the text, its HTML); see _render.
+        self._html_cache: OrderedDict[tuple[str, bool], tuple[object, str, str]] = OrderedDict()
         self._md = None
         self._last_push = 0.0
         self._push_timer: threading.Timer | None = None
@@ -246,8 +271,6 @@ class Api:
     def _attach(self, window) -> None:
         self._window = window
         errors.add_listener(lambda incident: self._flash(f"⚠ {incident.title} ({incident.code}, ref {incident.ref})"))
-        # markitdown takes seconds to import; do it while the window paints.
-        threading.Thread(target=self._engine, daemon=True, name="engine-warmup").start()
         self._updates = updates.UpdateFlow(self._settings, self._save_quietly,
                                            on_change=lambda: self._push(force=True),
                                            on_message=lambda text: self._flash(text, 8),
@@ -535,6 +558,24 @@ class Api:
                 pass
 
     # -- preview -------------------------------------------------------------
+    def _render(self, item_id: str, clean: bool, result, text: str) -> str:
+        """``text`` as preview HTML, from the cache when this file's same
+        result was last rendered from the same text (a Retry's new result,
+        or a change to the cleanup, misses)."""
+        key = (item_id, clean)
+        with self._lock:
+            hit = self._html_cache.get(key)
+            if hit is not None and hit[0] is result and hit[1] == text:
+                self._html_cache.move_to_end(key)
+                return hit[2]
+        html = self._renderer().render(_front_matter_as_code(text))
+        with self._lock:
+            self._html_cache[key] = (result, text, html)
+            self._html_cache.move_to_end(key)
+            while len(self._html_cache) > _HTML_CACHE_SIZE:
+                self._html_cache.popitem(last=False)
+        return html
+
     def _text_and_report(self, item: _Item, result, clean: bool):
         """(text, quality report, cleanup stats) for ``result``, the item's
         result as the caller saw it under the lock — a Retry may replace
@@ -592,6 +633,12 @@ class Api:
         s = self._settings
         if self.probe_path:
             self._probe_note("ready", {"t": time.time()})
+        if not self._warming:
+            # markitdown takes seconds to import. Started earlier, the import
+            # holds the interpreter while the page loads (the page server and
+            # this call wait on it); nobody can drop a file before now anyway.
+            self._warming = True
+            threading.Thread(target=self._engine, daemon=True, name="engine-warmup").start()
         return {
             "app": __app_name__,
             "version": __version__,
@@ -676,7 +723,7 @@ class Api:
             payload["raw"] = display
         else:
             try:
-                payload["html"] = self._renderer().render(display)
+                payload["html"] = self._render(item.id, clean, result, display)
             except Exception as exc:  # show the raw text rather than nothing
                 errors.report("MS-903", exc=exc, where="preview render", file=str(item.path))
                 payload["raw"] = display

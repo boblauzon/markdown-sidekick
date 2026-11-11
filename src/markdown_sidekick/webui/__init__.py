@@ -52,8 +52,13 @@ def _cant_start(missing: str, exc: BaseException | None = None) -> None:
 def missing() -> tuple[str, BaseException | None] | None:
     """What this PC lacks to show the new window (and the exception that
     said so), or None when it can show it."""
+    import importlib.util
+
     try:
-        import markdown_it  # noqa: F401 - the preview renderer
+        # The preview renderer is imported at the first preview, not before
+        # the window opens: here it's enough that it is installed.
+        if importlib.util.find_spec("markdown_it") is None:
+            raise ImportError("No module named 'markdown_it'", name="markdown_it")
         import webview  # noqa: F401
         from webview.dom import DOMEventHandler  # noqa: F401
     except ImportError as exc:
