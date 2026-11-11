@@ -30,6 +30,7 @@ ISCC.exe installer\MarkdownSidekick.iss                               # build th
 - Don't feed Python source containing backslash escapes (`\n`, `\d`) through a Bash heredoc — it gets mangled; use the Edit tool (or Write a patch script to a file and run that).
 - `app.py` never falls through to the GUI on a flag: `--help`/`--version` print and exit, an unknown `-option` exits 2; `--new-ui`/`--classic` take no other arguments. The spec builds the same launcher twice; under the `-cli` exe name every argument goes to the CLI (a windowed exe can't make a terminal wait or receive its output).
 - `--debug` on any entry point (`app.py --debug`, `cli convert … --debug`) turns on debug mode for that run.
+- A rebuild can fail at the very end with `PermissionError: [WinError 5] Access is denied: …\_internal\<pkg>.dist-info\licenses` while PyInstaller deletes the previous output (something — antivirus, the indexer — still holds just-written files). The log then ends `exit=1` but the OLD build is still there and still runs, so check the build's exit before testing it; delete the old output folder yourself (retrying) and build again.
 - After building, run the exe from `dist\MarkdownSidekick\`, never `build\` (the build\ copy has no runtime and fails with "Failed to load Python DLL"). Validate frozen builds with `dist\MarkdownSidekick\MarkdownSidekick.exe --selftest`.
 
 ## Architecture
