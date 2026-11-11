@@ -124,6 +124,54 @@ def _yaml_scalar(value: str) -> str:
     return value
 
 
+# YAML front matter at the very top of a document (an earlier export,
+# Obsidian notes, static-site posts): "---", a "key:" line and more, "---".
+FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\r?\n([\w-]+:.{0,8000}?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.S)
+_TOP_KEY_RE = re.compile(r"^([\w-]+):(.*)$")
+
+
+def split_front_matter(markdown: str) -> tuple[dict[str, str], str]:
+    """The document's own front matter as ``{key: its raw YAML lines}`` and
+    the text after it; ``({}, markdown)`` when it has none."""
+    m = FRONT_MATTER_RE.match(markdown)
+    if m is None:
+        return {}, markdown
+    fields: dict[str, str] = {}
+    key = None
+    for line in m.group(1).splitlines():
+        top = _TOP_KEY_RE.match(line)
+        if top:
+            key = top.group(1)
+            fields[key] = line
+        elif key is not None:  # a list item or continuation of the key above
+            fields[key] += "\n" + line
+    return fields, markdown[m.end():].lstrip("\r\n")
+
+
+def _own_scalar(raw: str) -> str:
+    """A one-line field's value, unquoted; "" for a list or a block."""
+    value = raw.split(":", 1)[1].strip() if raw else ""
+    if "\n" in raw or value in ("", "|", ">"):
+        return ""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+def _keep_own(front: str, own: dict[str, str] | None) -> str:
+    """``front`` (from :func:`build_front_matter`) plus the document's own
+    fields it doesn't write itself — tags, aliases… — so a document that
+    already had front matter keeps one block, and nothing of it is lost."""
+    if not own:
+        return front
+    ours = {m.group(1) for m in (_TOP_KEY_RE.match(line) for line in front.splitlines()) if m}
+    extra = [raw for key, raw in own.items() if key not in ours]
+    if not extra:
+        return front
+    head, tail = front.rsplit("---", 1)
+    return head + "\n".join(extra) + "\n---" + tail
+
+
 def build_front_matter(fields: dict[str, object]) -> str:
     """Minimal YAML front matter. Values are scalars or lists of strings;
     strings are quoted only when YAML would otherwise misread them."""
@@ -790,8 +838,12 @@ def export_single(
     notebook: bool = False,
     title_source: str = "",
     meta: dict | None = None,
+    own_front_matter: dict[str, str] | None = None,
 ) -> ExportResult:
     """Write one decorated Markdown file.
+
+    ``own_front_matter``: the document's own fields (see :func:`save`), added
+    to ours where we don't write that key.
 
     ``summary`` (optional, from the local-AI pass) becomes a ``summary:``
     front-matter field; blank means the field is simply absent. ``title`` /
@@ -811,7 +863,7 @@ def export_single(
         if front_matter:
             content = _notebook_header(title, author or ", ".join(meta.get("authors") or []), summary=summary) + content
     elif front_matter:
-        content = build_front_matter(
+        content = _keep_own(build_front_matter(
             {
                 "title": title,
                 "subtitle": meta.get("subtitle", ""),
@@ -824,7 +876,7 @@ def export_single(
                 "est_tokens": estimate_tokens(markdown),
                 "image_count": count_images(markdown) or None,
             }
-        ) + markdown
+        ), own_front_matter) + markdown
     write_text_verified(out_path, content)
     debuglog.event(
         "export.single",
@@ -852,6 +904,7 @@ def export_book(
     notebook: bool = False,
     title_source: str = "",
     meta: dict | None = None,
+    own_front_matter: dict[str, str] | None = None,
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -901,6 +954,7 @@ def export_book(
             notebook=notebook,
             title_source=title_source,
             meta=meta,
+            own_front_matter=own_front_matter,
         )
 
     result = ExportResult()
@@ -931,7 +985,7 @@ def export_book(
                     contents=[s.title or _LEAD_TITLE for s in sections] if n == 1 else None,
                 ) + sec.markdown
         elif front_matter:
-            content = build_front_matter(
+            content = _keep_own(build_front_matter(
                 {
                     "title": sec.title or title,
                     "book": title,
@@ -946,7 +1000,7 @@ def export_book(
                     "est_tokens": sec.est_tokens,
                     "image_count": images or None,
                 }
-            ) + sec.markdown
+            ), own_front_matter) + sec.markdown
         write_text_verified(path, content)
         result.paths.append(path)
         manifest_files.append(
@@ -1030,15 +1084,26 @@ def save(
     if style not in STYLES:
         raise ValueError(f"style must be one of {', '.join(STYLES)}")
     d = details or {}
+    title, title_source = d.get("title", ""), d.get("title_source", "")
+    # A document that has front matter of its own (an earlier export, an
+    # Obsidian note) gets one block, not two: its fields join ours, and its
+    # title is used when the converter found none. Without our front matter
+    # the document is saved as it is.
+    own: dict[str, str] = {}
+    if front_matter:
+        own, markdown = split_front_matter(markdown)
+        if not title and _own_scalar(own.get("title", "")):
+            title, title_source = _own_scalar(own["title"]), "front_matter"
     common = dict(
         source=source,
         engine=d.get("engine", ""),
         front_matter=front_matter,
         summary=summary,
-        title=d.get("title", ""),
+        title=title,
         author=d.get("author", ""),
-        title_source=d.get("title_source", ""),
+        title_source=title_source,
         meta=d.get("meta") or {},
+        own_front_matter=own,
     )
     if style == "single":
         return export_single(markdown, dest, **common)

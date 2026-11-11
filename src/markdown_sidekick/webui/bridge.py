@@ -42,14 +42,11 @@ _PUSH_INTERVAL_S = 0.12
 _WEB_LINK = re.compile(r"(?i)^https?://")
 # A whole-line HTML comment (page anchor, figure marker), as mdrender._COMMENT.
 _COMMENT_LINE = re.compile(r"^\s*<!--\s*(.*?)\s*-->\s*$")
-# YAML front matter at the very top (Sidekick's own exports, Obsidian notes,
-# static-site posts), opening with a "key:" line. CommonMark reads it as a
-# rule and one huge heading; the preview shows it as a YAML block instead.
-_FRONT_MATTER = re.compile(r"\A---[ \t]*\r?\n([\w-]+:.{0,8000}?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.S)
-
-
 def _front_matter_as_code(text: str) -> str:
-    m = _FRONT_MATTER.match(text)
+    """YAML front matter at the very top (export.FRONT_MATTER_RE: earlier
+    exports, Obsidian notes, static-site posts) as a YAML block: CommonMark
+    reads it as a rule and one huge heading."""
+    m = export.FRONT_MATTER_RE.match(text)
     if m is None:
         return text
     body = m.group(1)

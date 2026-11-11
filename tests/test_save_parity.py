@@ -170,3 +170,52 @@ class TestSaveDispatch:
         # Windows names ignore case: Report.md and report.md are one file.
         used = set()
         assert [export.claim_name(s, used) for s in ("Report", "report", "REPORT-2")] == ["Report", "report-2", "REPORT-2-2"]
+
+
+class TestOwnFrontMatter:
+    """A document that already has front matter (an earlier export, an
+    Obsidian note) is saved with ONE block: its fields join ours."""
+
+    NOTE = (
+        "---\n"
+        'title: "Trip: Day 1"\n'
+        "tags:\n"
+        "  - travel\n"
+        "  - notes\n"
+        "status: draft\n"
+        "est_tokens: 3\n"
+        "---\n"
+        "\n"
+        "# Morning\n\nWe left early.\n\n# Evening\n\nWe came back late.\n"
+    )
+
+    def test_one_block_with_its_title_and_fields(self, tmp_path):
+        dest = tmp_path / "note.md"
+        export.save(self.NOTE, dest, source="note.md")
+        text = dest.read_text(encoding="utf-8")
+        assert text.count("\n---\n") == 1 and text.startswith("---\n")  # one block, closed once
+        front, body = text.split("\n---\n", 1)
+        assert '"Trip: Day 1"' in front and "title_source: front_matter" in front
+        assert "tags:\n  - travel\n  - notes" in front and "status: draft" in front
+        assert front.count("est_tokens:") == 1 and "est_tokens: 3" not in front  # ours, recounted
+        assert body.lstrip().startswith("# Morning")
+
+    def test_without_our_front_matter_the_document_is_saved_as_it_is(self, tmp_path):
+        dest = tmp_path / "note.md"
+        export.save(self.NOTE, dest, source="note.md", front_matter=False)
+        assert dest.read_text(encoding="utf-8") == self.NOTE
+
+    def test_book_parts_carry_its_fields(self, tmp_path):
+        note = self.NOTE + "".join(f"\n# Day {n}\n\nDay {n} had its own story.\n" for n in range(2, 5))
+        res = export.save(note, tmp_path / "trip", source="trip.md", style="chapters")
+        parts = [p for p in res.paths if p.name[:2].isdigit()]
+        assert parts
+        for part in parts:
+            text = part.read_text(encoding="utf-8")
+            assert text.count("\n---\n") == 1 and "status: draft" in text and "  - travel" in text
+            assert "title_source" not in text.split("\n---\n", 1)[1]  # no YAML left in a body
+
+    def test_a_rule_at_the_top_is_not_front_matter(self, tmp_path):
+        doc = "---\n\nNot a key line.\n\n---\n\n# Title\n"
+        own, rest = export.split_front_matter(doc)
+        assert own == {} and rest == doc
