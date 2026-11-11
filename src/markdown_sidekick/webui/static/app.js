@@ -29,7 +29,7 @@ const api = () => window.pywebview.api;
 const S = {
   boot: null, seq: 0, files: [], busy: false, status: '', overall: 0, canSave: false,
   selId: null, view: 'rendered', clean: true, ocr: true, exportStyle: 'single', aiTarget: 'Claude',
-  theme: 'system', preview: null, previewKey: '', hiddenWarn: new Set(), showTech: false,
+  theme: 'system', preview: null, previewKey: '', loadingKey: null, hiddenWarn: new Set(), showTech: false,
   dialog: null, help: null, helpTab: 0, probe: false,
   // Settings dialog: the values being edited, what Python sent with them,
   // the open tab, the Detect line, detected models and a save error.
@@ -71,8 +71,10 @@ window.app = {
     status.title = S.status;
     const sel = S.files.find((f) => f.id === S.selId);
     const changed = sel && before.get(sel.id) !== sel.status;
-    if (!sel) drawPreview(null);
-    else if (changed || !S.preview || S.preview.id !== sel.id) loadPreview();
+    if (!sel) { S.previewKey = null; drawPreview(null); }
+    // Not again while the same request is out: a big book's preview takes
+    // a moment, and snapshots keep arriving while another file converts.
+    else if (changed || ((!S.preview || S.preview.id !== sel.id) && S.loadingKey !== previewKeyOf(sel.id))) loadPreview();
     else if (sel.status === 'converting') drawConverting(sel);
   },
   previewReady(id) {
@@ -85,7 +87,7 @@ window.app = {
 function drawUpdateBar() {
   const bar = $('#updatebar');
   const u = S.update;
-  if (!u) { bar.className = ''; bar.innerHTML = ''; return; }
+  if (!u) { bar.className = ''; bar.innerHTML = ''; bar.msHtml = ''; return; }
   bar.className = 'updatebar' + (u.important ? ' important' : '');
   const what = u.important ? `Markdown Sidekick ${esc(u.version)} includes a privacy or security fix.` : `Markdown Sidekick ${esc(u.version)} is available.`;
   let acts = '';
@@ -99,8 +101,9 @@ function drawUpdateBar() {
   } else if (u.state === 'ready') {
     acts = '<span class="muted">Installs when you close Markdown Sidekick.</span><button class="btn btn-primary" data-act="updRestart">Restart now</button>';
   }
-  bar.innerHTML = `<span style="color:var(--color-accent)">${icon('upload', 18, 2)}</span><div class="txt"><strong>${what}</strong></div>${acts}` +
+  const html = `<span style="color:var(--color-accent)">${icon('upload', 18, 2)}</span><div class="txt"><strong>${what}</strong></div>${acts}` +
     (S.showNotes && u.notes ? `<div class="notes">${esc(u.notes)}</div>` : '');
+  if (bar.msHtml !== html) { bar.innerHTML = html; bar.msHtml = html; }
 }
 
 function drawMain() {
@@ -208,13 +211,20 @@ function drawFooter() {
   bar.hidden = !S.files.length;
   if (bar.hidden) return;
   const ai = S.exportStyle === 'ai';
-  bar.innerHTML = `
-    ${S.busy ? `<div class="overall" style="width:${S.overall}%"></div>` : ''}
+  // Rebuilt only when something in it changes: every snapshot (several a
+  // second while a file converts) used to replace Save and the target list,
+  // eating clicks and closing the list as it opened.
+  const html = `
+    <div class="overall"></div>
     <span class="label">Output</span>
     <div class="seg">${S.boot.styles.map((o) => `<button data-style="${o.id}" title="${esc(o.desc)}" aria-pressed="${S.exportStyle === o.id}">${esc(o.label)}</button>`).join('')}</div>
     <span class="label" style="margin-left:8px;opacity:${ai ? 1 : 0.45}">Optimize for</span>
     <select class="input" id="target" ${ai ? '' : 'disabled'}>${S.boot.targets.map((t) => `<option ${t === S.aiTarget ? 'selected' : ''}>${esc(t)}</option>`).join('')}</select>
     <button class="btn btn-primary save" data-act="save" title="Ctrl+S" ${S.canSave ? '' : 'disabled'}>${icon('save')}Save Markdown…</button>`;
+  if (bar.msHtml !== html) { bar.innerHTML = html; bar.msHtml = html; }
+  const overall = bar.querySelector('.overall');
+  overall.style.display = S.busy ? '' : 'none';
+  overall.style.width = `${S.overall}%`;
 }
 
 function drawPreview(p) {
@@ -277,13 +287,20 @@ function errorHtml(p) {
     ${S.showTech ? `<pre>${esc(p.detail || '(none)')}</pre>` : ''}</div></div>`;
 }
 
+const previewKeyOf = (id) => `${id}|${S.view}|${S.clean}`;
+
 async function loadPreview() {
   const id = S.selId;
-  if (!id) return drawPreview(null);
-  const key = `${id}|${S.view}|${S.clean}`;
-  S.previewKey = key;
+  if (!id) { S.previewKey = null; return drawPreview(null); }
+  const key = previewKeyOf(id);
+  S.previewKey = S.loadingKey = key;
   const t0 = performance.now();
-  const p = await api().preview(id, S.view);
+  let p;
+  try {
+    p = await api().preview(id, S.view);
+  } finally {
+    if (S.loadingKey === key) S.loadingKey = null;
+  }
   if (S.previewKey !== key) return; // a newer request superseded this one
   const t1 = performance.now();
   S.preview = { ...p, id };
@@ -502,6 +519,8 @@ async function act(name, el) {
   }
 }
 
+let pressedOn = null; // where the mouse button went down (see the backdrop)
+document.addEventListener('mousedown', (e) => { pressedOn = e.target; }, true);
 document.addEventListener('click', (e) => {
   const t = e.target;
   const link = t.closest('a[href]');
@@ -525,13 +544,18 @@ document.addEventListener('click', (e) => {
   }
   const a = t.closest('[data-act]');
   if (a) {
-    // The backdrop closes only when the click lands on it, not the dialog.
-    if (a.classList.contains('backdrop') && t !== a) return;
+    // The backdrop closes only when the click lands on it, not the dialog —
+    // pressed there too: a text selection dragged out of a field ends with a
+    // click on the backdrop, and must not throw the draft away.
+    if (a.classList.contains('backdrop') && (t !== a || pressedOn !== a)) return;
     return act(a.dataset.act, a);
   }
   const fix = t.closest('[data-fix]');
   if (fix) {
     if (fix.dataset.fix === 'raw_preview') { S.view = 'raw'; return loadPreview(); }
+    // "Open Conversion settings" and friends: this window's own Settings tab.
+    const tab = { settings_conversion: 'conversion', settings_output: 'output', settings_ai: 'ai' }[fix.dataset.fix];
+    if (tab) { S.setTab = tab; return openSettings(); }
     return api().fix(fix.dataset.fix, S.selId || '');
   }
   const view = t.closest('[data-view]');
@@ -579,7 +603,9 @@ document.addEventListener('dragenter', (e) => { e.preventDefault(); dragDepth++;
 document.addEventListener('dragover', (e) => { e.preventDefault(); });
 document.addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; document.body.classList.remove('drag'); } });
 document.addEventListener('drop', (e) => { e.preventDefault(); dragDepth = 0; document.body.classList.remove('drag'); });
-sysDark.addEventListener('change', applyTheme);
+// Not applyTheme itself: it would get the change event as its preference
+// and turn the window light whatever the setting.
+sysDark.addEventListener('change', () => applyTheme(S.dialog === 'settings' && S.draft ? S.draft.theme : S.theme));
 
 // pywebview hands a DOM event to its Python handler by serialising every
 // property, and a drop's currentTarget is the whole document: the preview

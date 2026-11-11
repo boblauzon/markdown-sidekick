@@ -35,7 +35,8 @@ Sidekick starts*), or open it once with `MarkdownSidekick.exe --classic`. Your
 choice is kept when you update. The new window needs Microsoft's free Edge
 WebView2 Runtime: Windows 11 includes it and most Windows 10 PCs already have it.
 Without it, the classic window opens and says so (MS-606), and Setup's last page
-offers Microsoft's download page.
+offers Microsoft's download page. If the runtime is there but doesn't start, the
+classic window opens instead of a blank one and says why (MS-607).
 
 **Files panel (left)**
 
@@ -614,6 +615,7 @@ your documents' text (file names and paths, yes).
 | MS-604 | The built-in user guide couldn't be loaded — a file is missing from this installation. | Reinstall Markdown Sidekick to restore it. | — |
 | MS-605 | The new window can't start — a part it needs isn't on this PC. | Start Markdown Sidekick with --classic to use the classic window. To use the new one, install Microsoft's Edge WebView2 Runtime; the details say what was missing. | — |
 | MS-606 | The new window can't run on this PC yet, so the classic window opened. *(warning)* | Install Microsoft's free Edge WebView2 Runtime, then start Markdown Sidekick again; the details say what was missing. To keep the classic window, choose it in Settings → Output. | Get WebView2… |
+| MS-607 | The new window didn't start, so the classic window opened. *(warning)* | Microsoft's Edge WebView2 Runtime is installed but didn't start; the details say why. Repair or reinstall it from Microsoft's page, then start Markdown Sidekick again. To keep the classic window, choose it in Settings → Output. | Get WebView2… |
 
 **Installing and updating**
 

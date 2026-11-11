@@ -400,6 +400,15 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "webview2",
         "warning",
     ),
+    ErrorSpec(
+        "MS-607",
+        "The new window didn't start, so the classic window opened.",
+        "Microsoft's Edge WebView2 Runtime is installed but didn't start; the details say why. Repair "
+        "or reinstall it from Microsoft's page, then start Markdown Sidekick again. To keep the "
+        "classic window, choose it in Settings → Output.",
+        "webview2",
+        "warning",
+    ),
     # -- 7xx install and updates --------------------------------------------------
     ErrorSpec(
         "MS-701",

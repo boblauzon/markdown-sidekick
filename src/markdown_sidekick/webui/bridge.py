@@ -9,6 +9,7 @@ pywebview exposes every public attribute of this object to the page.
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import json
 import os
@@ -249,13 +250,16 @@ class Api:
         self._next_id = 1
         self._busy = False
         self._current: str | None = None  # id of the file converting now
+        self._current_name = ""  # ...and its name, which outlives a Remove
         self._toast = ""
         self._toast_until = 0.0
         self._window = None
         self._prompt = threading.Lock()  # held while a confirmation box is up
+        self._dialog = threading.Lock()  # held while a file dialog is up (_one_dialog)
         self._engine_obj = None
         self._engine_lock = threading.Lock()
         self._warming = False  # the engine warm-up has started (from ready())
+        self._page_ready = threading.Event()  # the page called ready(): the window started
         # (item id, Clean) -> (the result, the text, its HTML); see _render.
         self._html_cache: OrderedDict[tuple[str, bool], tuple[object, str, str]] = OrderedDict()
         self._md = None
@@ -362,11 +366,18 @@ class Api:
             # The file converting now, if it is still in the list (Remove or
             # Clear all doesn't stop the file already under way).
             cur = self._items.get(self._current) if self._current else None
-            active = bool(pending) or cur is not None
+            # Removed (or cleared) while converting: it can't be stopped part
+            # way, and anything dropped now waits for it, so say so.
+            removed = self._busy and self._current is not None and cur is None
+            active = bool(pending) or cur is not None or removed
             if self._toast and time.monotonic() < self._toast_until:
                 status = self._toast
             elif self._save_note:
                 status = self._save_note
+            elif removed:
+                status = f"Finishing {self._current_name}, which you removed — a file can't be stopped part way."
+                if pending:
+                    status += f" {len(pending)} file(s) wait for it."
             elif active:
                 status = f"Converting… {len(items) - len(pending) + (1 if cur else 0)}/{len(items)}"
                 if cur is not None:
@@ -475,7 +486,7 @@ class Api:
             if not targets:
                 return
             self._busy = True
-            self._current = targets[0].id
+            self._current, self._current_name = targets[0].id, targets[0].path.name
             clean_flag = self._settings.clean_output
         threading.Thread(
             target=self._worker, args=(targets, clean_flag), daemon=True, name="convert-worker"
@@ -545,7 +556,7 @@ class Api:
                 with self._lock:
                     if self._items.get(item.id) is not item:
                         continue
-                    self._current = item.id
+                    self._current, self._current_name = item.id, item.path.name
                 self._push(force=True)
                 on_progress(index, len(targets), engine.convert_file(item.path, on_subprogress=on_subprogress))
         except BaseException as exc:  # noqa: BLE001 - the batch must always end
@@ -568,6 +579,19 @@ class Api:
                 self._current = None
             self._push(force=True)
             self._convert_pending()  # files dropped meanwhile
+
+    @contextlib.contextmanager
+    def _one_dialog(self, what: str):
+        """Yields whether a file dialog may open: pywebview runs each call
+        on its own thread, so a double-click on "Add files…" would open two."""
+        if not self._dialog.acquire(blocking=False):
+            yield False
+            return
+        try:
+            with debuglog.ui_blocking(what):
+                yield True
+        finally:
+            self._dialog.release()
 
     def _run_js(self, script: str) -> None:
         if self._window is not None:
@@ -652,6 +676,7 @@ class Api:
         s = self._settings
         if self.probe_path:
             self._probe_note("ready", {"t": time.time()})
+        self._page_ready.set()
         if not self._warming:
             # markitdown takes seconds to import. Started earlier, the import
             # holds the interpreter while the page loads (the page server and
@@ -680,8 +705,8 @@ class Api:
         from ..converter import SUPPORTED_EXTENSIONS
 
         patterns = ";".join(f"*{ext}" for ext in SUPPORTED_EXTENSIONS + MEDIA_EXTENSIONS)
-        with debuglog.ui_blocking("open dialog"):
-            paths = self._window.create_file_dialog(
+        with self._one_dialog("open dialog") as free:
+            paths = free and self._window.create_file_dialog(
                 webview.FileDialog.OPEN,
                 directory=_start_dir(),
                 allow_multiple=True,
@@ -874,7 +899,12 @@ class Api:
             result = item.result if item is not None else None
         if result is None or not result.ok:
             return False
-        text, _, _ = self._text_and_report(item, result, self._settings.clean_output)
+        try:
+            text, _, _ = self._text_and_report(item, result, self._settings.clean_output)
+        except Exception as exc:  # never a silent no-op: the page has no other answer
+            incident = errors.report("MS-903", exc=exc, where="copy", file=str(item.path))
+            self._flash(f"⚠ {incident.title} ({incident.code}, ref {incident.ref})", 6)
+            return False
         if not _set_clipboard(strip_figure_markers(text)):
             self._flash(f"⚠ {errors.report('MS-601', where='clipboard').title}", 5)
             return False
@@ -927,14 +957,18 @@ class Api:
             self._push(force=True)
 
     def _save_to(self, picked: Path, done: list, style: str, target: str, single: bool) -> None:
-        saved, used, notes = 0, set(), []
+        saved, notes = 0, []
         failed: list[tuple[str, errors.Incident]] = []
-        for n, (item, result) in enumerate(done, start=1):
-            if single:
-                dest = picked
-            else:  # same-named sources from different folders never collide
-                name = export.claim_name(item.path.stem, used)
-                dest = picked / name if style != "single" else picked / f"{name}.md"
+        if single:
+            dests = [picked]  # the Save dialog already asked about replacing it
+        else:  # same-named sources from different folders never collide
+            sources = [item.path for item, _ in done]
+            dests = export.folder_targets(sources, picked, style)
+            question = export.replace_question(sources, dests)
+            if question and not self._confirm(question):
+                self._flash("Nothing saved.", 3)
+                return
+        for n, ((item, result), dest) in enumerate(zip(done, dests), start=1):
             with self._lock:
                 self._save_note = f"Saving {n}/{len(done)}  —  {item.path.name}"
             self._push(force=True)
@@ -1168,8 +1202,8 @@ class Api:
         """A folder for Settings → Default output folder ("" = cancelled)."""
         import webview
 
-        with debuglog.ui_blocking("folder dialog"):
-            picked = self._window.create_file_dialog(
+        with self._one_dialog("folder dialog") as free:
+            picked = free and self._window.create_file_dialog(
                 webview.FileDialog.FOLDER, directory=_start_dir(self._settings.default_output_dir)
             )
         return picked[0] if picked else ""
@@ -1190,8 +1224,8 @@ class Api:
 
         from .. import diagnostics
 
-        with debuglog.ui_blocking("report dialog"):
-            picked = self._window.create_file_dialog(
+        with self._one_dialog("report dialog") as free:
+            picked = free and self._window.create_file_dialog(
                 webview.FileDialog.SAVE,
                 directory=_start_dir(),
                 save_filename=f"MarkdownSidekick-diagnostics-{time.strftime('%Y%m%d-%H%M')}.zip",

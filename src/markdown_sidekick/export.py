@@ -1066,9 +1066,50 @@ def figure_dirs(dest: Path, style: str) -> tuple[Path, str]:
 def claim_name(stem: str, used: set[str]) -> str:
     """``stem``, else ``stem-2``, ``stem-3``… — the first name not in
     ``used``, which it joins. Same-named sources from different folders,
-    saved together, must never overwrite each other's output."""
+    saved together, must never overwrite each other's output — and Windows
+    names ignore case: "Report" and "report" are one file."""
     name, n = stem, 2
-    while name in used:
+    while name.casefold() in used:
         name, n = f"{stem}-{n}", n + 1
-    used.add(name)
+    used.add(name.casefold())
     return name
+
+
+def folder_targets(sources: list[Path], folder: Path, style: str) -> list[Path]:
+    """Where saving ``sources`` to ``folder`` writes each one: ``<stem>.md``
+    in the One-file style, else a ``<stem>`` book folder, same stems made
+    unique by :func:`claim_name`. A window plans with this, asks
+    :func:`replace_question`, then writes to exactly these paths."""
+    used: set[str] = set()
+    targets = []
+    for src in sources:
+        name = claim_name(Path(src).stem, used)
+        targets.append(folder / name if style != "single" else folder / f"{name}.md")
+    return targets
+
+
+def replace_question(sources: list[Path], targets: list[Path]) -> str:
+    """"" when none of ``targets`` exists yet; else the question to ask
+    before a save replaces them, naming any that IS one of the sources (a
+    .md converted and saved beside itself would replace the original)."""
+    existing = [t for t in targets if t.exists()]
+    if not existing:
+        return ""
+
+    def is_source(t: Path) -> bool:
+        for s in sources:
+            try:
+                if t.is_file() and os.path.samefile(t, s):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    names = [t.name + ("\\" if t.is_dir() else "") for t in existing]
+    shown = "\n".join(f"    {n}" for n in names[:8]) + (f"\n    … and {len(names) - 8} more" if len(names) > 8 else "")
+    question = f"{len(existing)} of these already exist in {existing[0].parent}:\n{shown}\n\nReplace them?"
+    originals = [t.name for t in existing if is_source(t)]
+    if originals:
+        which = ", ".join(originals[:3]) + (" …" if len(originals) > 3 else "")
+        question += f"\n\n{which} {'is a file' if len(originals) == 1 else 'are files'} you converted: replacing loses the original."
+    return question

@@ -576,6 +576,24 @@ class TestSaving:
         assert "Saved" not in app.status_var.get()
         assert app._dialog is not None and "MS-2" in app._dialog.title()
 
+    def test_a_folder_save_asks_before_replacing(self, app, tmp_path):
+        a, b = sources(tmp_path, "a.docx", "b.pdf")
+        add(app, a, b)
+        settle(app)
+        out = tmp_path / "out"
+        out.mkdir()
+        (out / "b.md").write_text("mine", encoding="utf-8")
+        app.dialogs.folder = str(out)
+        app.save_markdown()  # unanswered: No
+        kind, question = app.boxes.shown[-1]
+        assert kind == "askyesno" and "1 of these already exist" in question and "b.md" in question
+        assert sorted(p.name for p in out.iterdir()) == ["b.md"] and (out / "b.md").read_text(encoding="utf-8") == "mine"
+        assert app.status_var.get() == "Nothing saved."
+        app.boxes.answers["askyesno"] = True
+        app.save_markdown()
+        assert sorted(p.name for p in out.iterdir()) == ["a.md", "b.md"]
+        assert (out / "b.md").read_text(encoding="utf-8") != "mine"
+
     def test_one_bad_file_does_not_lose_the_rest_of_a_folder_save(self, app, tmp_path, monkeypatch):
         a, b = sources(tmp_path, "a.docx", "b.pdf")
         add(app, a, b)

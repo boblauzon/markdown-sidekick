@@ -79,7 +79,7 @@ def _classic_window(book: Path, out: Path) -> Path:
         _with_figures=lambda path, text, images_dir, rel_dir: text,
         _summarize_for_export=lambda *args: "",
     )
-    assert ui.MarkdownSidekickApp._save_one(window, book, out, "single", "Claude", set()) == 1
+    assert ui.MarkdownSidekickApp._save_one(window, book, out / f"{book.stem}.md", "single", "Claude") == 1
     return out / f"{book.stem}.md"
 
 
@@ -158,3 +158,15 @@ class TestSaveDispatch:
         assert export.figure_dirs(tmp_path / "a", "ai") == (tmp_path / "a" / "images", "images")
         used: set[str] = set()
         assert [export.claim_name("notes", used) for _ in range(3)] == ["notes", "notes-2", "notes-3"]
+        # A folder save plans every name first; only what exists is asked about.
+        (tmp_path / "out").mkdir()
+        srcs = [tmp_path / "x" / "notes.txt", tmp_path / "y" / "notes.pdf", tmp_path / "x" / "Book.epub"]
+        plan = export.folder_targets(srcs, tmp_path / "out", "single")
+        assert [p.name for p in plan] == ["notes.md", "notes-2.md", "Book.md"]
+        assert export.replace_question(srcs, plan) == ""
+        (tmp_path / "out" / "notes-2.md").write_text("old", encoding="utf-8")
+        assert "1 of these already exist" in export.replace_question(srcs, plan)
+        assert export.folder_targets(srcs, tmp_path / "out", "chapters")[2] == tmp_path / "out" / "Book"
+        # Windows names ignore case: Report.md and report.md are one file.
+        used = set()
+        assert [export.claim_name(s, used) for s in ("Report", "report", "REPORT-2")] == ["Report", "report-2", "REPORT-2-2"]

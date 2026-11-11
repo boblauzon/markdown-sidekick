@@ -266,6 +266,28 @@ def test_a_fix_that_turns_ocr_on_redraws_the_switch(api):
     _wait(lambda: api._window.scripts and '"ocr": false' in api._window.scripts[-1])
 
 
+def test_a_copy_that_fails_says_so_with_a_code(api, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    item = _convert(api, src)
+
+    def boom(*args):
+        raise RuntimeError("cleanup broke")
+
+    monkeypatch.setattr(api, "_text_and_report", boom)
+    assert api.copy(item.id) is False
+    assert "MS-903" in api._snapshot()["status"]
+
+
+def test_a_double_click_opens_one_file_dialog(api):
+    seconds = []
+    # The second click's call arrives while the first dialog is up.
+    api._window.on_dialog = lambda: seconds.append((api.pick_files(), api.browse_folder()))
+    api.pick_files()
+    assert len(api._window.dialogs) == 1 and seconds == [(None, "")]
+    assert api.browse_folder() == "" and len(api._window.dialogs) == 2  # free again afterwards
+
+
 def test_pushing_a_snapshot_never_waits_on_the_page(api):
     """run_js returns only once the page has run the script; the conversion
     worker must not wait on that (it did, twice per file)."""
@@ -300,10 +322,20 @@ def test_snapshots_are_numbered_so_the_page_can_drop_stale_ones(api):
     assert second > first
 
 
-def test_clear_all_mid_conversion_does_not_say_converting(api):
-    api._busy, api._current = True, "f99"  # the batch's file was cleared from the list
+def test_clear_all_mid_conversion_says_what_is_still_running(api, tmp_path):
+    # The batch's file was cleared from the list; it can't be stopped part way.
+    api._busy, api._current, api._current_name = True, "f99", "talk.mp3"
     snap = api._snapshot()
-    assert snap["status"].startswith("Ready") and snap["busy"] is False
+    assert snap["status"].startswith("Finishing talk.mp3, which you removed") and snap["busy"] is True
+    assert "Converting" not in snap["status"]
+    # A file dropped meanwhile waits for it, and the status says why.
+    with api._lock:
+        api._items["f1"] = bridge._Item(id="f1", path=tmp_path / "next.md", size=1)
+    assert api._snapshot()["status"].endswith("1 file(s) wait for it.")
+    with api._lock:
+        api._items.clear()
+    api._busy, api._current = False, None  # it finished
+    assert api._snapshot()["status"].startswith("Ready") and api._snapshot()["busy"] is False
 
 
 def test_copy_survives_a_retry_mid_copy(api, tmp_path, monkeypatch):
@@ -475,6 +507,38 @@ def test_saving_several_files_to_a_folder_never_collides(saving, tmp_path):
     assert "title: Notes b" in (out / "notes-2.md").read_text(encoding="utf-8")
     assert "Saved 2 file(s)" in saving._snapshot()["status"]
     assert saving._window.prompts and not saving.opened  # asked, declined, nothing opened
+
+
+def test_a_folder_save_asks_before_replacing_and_names_an_original(saving, tmp_path):
+    src = tmp_path / "meeting.md"  # saved beside itself, its output IS the source
+    src.write_text("# Meeting\n\nThe original notes.\n", encoding="utf-8")
+    other = tmp_path / "agenda.md"
+    other.write_text("# Agenda\n\nItems.\n", encoding="utf-8")
+    _convert_all(saving, [src, other])
+    saving._window.picked = (str(tmp_path),)
+    saving.save()  # confirm is False: Cancel
+    question = saving._window.prompts[0]
+    assert "2 of these already exist" in question and "meeting.md" in question and "agenda.md" in question
+    assert "replacing loses the original" in question
+    assert src.read_text(encoding="utf-8") == "# Meeting\n\nThe original notes.\n"  # untouched
+    assert saving._snapshot()["status"] == "Nothing saved."
+    saving._window.confirm = True
+    saving._window.prompts.clear()
+    saving.save()
+    assert src.read_text(encoding="utf-8").startswith("---\ntitle: Meeting")
+    assert "Saved 2 file(s)" in saving._snapshot()["status"] or saving.opened
+
+
+def test_a_folder_save_into_an_empty_folder_asks_nothing_first(saving, tmp_path):
+    src = tmp_path / "in" / "a.md"
+    src.parent.mkdir()
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    other = tmp_path / "in" / "b.md"
+    other.write_text("# B\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src, other])
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    assert len(saving._window.prompts) == 1 and "Open the folder?" in saving._window.prompts[0]
 
 
 def test_chapter_style_saves_a_book_folder(saving, tmp_path):

@@ -11,6 +11,7 @@ closes the window.
 from __future__ import annotations
 
 import ctypes
+import logging
 import os
 import sys
 import threading
@@ -75,7 +76,51 @@ def missing() -> tuple[str, BaseException | None] | None:
     return None
 
 
-def run() -> None:
+# How long a page may take to come up before the window counts as not
+# started (a WebView2 that failed without saying so). Generous: a slow PC's
+# first start, antivirus scanning the runtime, must not be mistaken for it.
+START_TIMEOUT_S = 60.0
+
+
+class _StartWatch(logging.Handler):
+    """WebView2 failing to start (a damaged runtime, a policy, a data folder
+    it can't create) is only logged by pywebview, which then shows a blank
+    window forever. This notices that, and a page that never comes up, and
+    closes the window so the caller can say so and fall back."""
+
+    def __init__(self, window, ready: threading.Event) -> None:
+        super().__init__(logging.ERROR)
+        self.window, self.ready = window, ready
+        self.failure = ""
+        self.closed = False  # by the user, before anything went wrong
+
+    def emit(self, record: logging.LogRecord) -> None:
+        message = record.getMessage()
+        if "WebView2 initialization failed" in message:
+            self.fail(message.split("exception:", 1)[-1].strip() or message)
+
+    def fail(self, reason: str) -> None:
+        if self.failure or self.closed:
+            return
+        self.failure = reason
+        threading.Thread(target=self.window.destroy, daemon=True, name="start-watch").start()
+
+    def on_shown(self) -> None:
+        def wait() -> None:
+            if not self.ready.wait(START_TIMEOUT_S):
+                self.fail(f"the page didn't load within {START_TIMEOUT_S:.0f} s")
+
+        threading.Thread(target=wait, daemon=True, name="start-watch").start()
+
+    def on_closing(self) -> None:
+        if not self.failure:
+            self.closed = True
+
+
+def run(fallback: bool = False) -> errors.Incident | None:
+    """Show the new window until it closes. If WebView2 doesn't start, the
+    window closes: with ``fallback`` (the saved choice) the MS-607 incident
+    is returned for the classic window to show; asked for by name, MS-605."""
     errors.install_crash_hooks()
     lack = missing()
     if lack is not None:
@@ -112,9 +157,23 @@ def run() -> None:
             threading.Timer(0.3, api._probe_add, args=(files,)).start()
 
     window.events.loaded += on_loaded
+    watch = _StartWatch(window, api._page_ready)
+    window.events.shown += watch.on_shown
+    window.events.closing += watch.on_closing
     window.events.closing += api._on_closing  # a downloaded update installs as the window closes
     # The frozen build copies the icon beside the page; a source checkout
     # has it in assets/.
     icons = [_STATIC / "MarkdownSidekick.ico", Path(__file__).resolve().parents[3] / "assets" / "MarkdownSidekick.ico"]
     icon = next((str(p) for p in icons if p.exists()), None)
-    webview.start(private_mode=True, icon=icon, debug=bool(os.environ.get("MARKDOWN_SIDEKICK_WEBUI_DEVTOOLS")))
+    pywebview_log = logging.getLogger("pywebview")
+    pywebview_log.addHandler(watch)
+    try:
+        webview.start(private_mode=True, icon=icon, debug=bool(os.environ.get("MARKDOWN_SIDEKICK_WEBUI_DEVTOOLS")))
+    finally:
+        pywebview_log.removeHandler(watch)
+    if not watch.failure:
+        return None
+    debuglog.event("webui.start_failed", reason=watch.failure, fallback=fallback)
+    if not fallback:
+        _cant_start(f"a Microsoft Edge WebView2 Runtime that starts ({watch.failure})")
+    return errors.report("MS-607", detail=watch.failure, where="new window")

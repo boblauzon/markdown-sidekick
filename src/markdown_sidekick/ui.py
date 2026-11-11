@@ -1784,14 +1784,21 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         style = self._export_style_key()
         target = self.target_var.get()
         saved = 0
-        used_names: set[str] = set()
+        # Same-stem sources from different folders get "-2", "-3"… so one
+        # can never silently overwrite another's file or book folder; what
+        # is already there is replaced only when the user says so.
+        dests = md_export.folder_targets(converted, out, style)
+        question = md_export.replace_question(converted, dests)
+        if question and not messagebox.askyesno(__app_name__, question, icon="warning"):
+            self.status_var.set("Nothing saved.")
+            return
         failed: list[tuple[Path, errors.Incident]] = []
-        for path in converted:
+        for path, dest in zip(converted, dests):
             try:
                 with debuglog.file_context(path):
-                    saved += self._save_one(path, out, style, target, used_names)
+                    saved += self._save_one(path, dest, style, target)
             except Exception as exc:  # one bad file must not lose the rest
-                failed.append((path, self._save_incident(exc, out / path.stem)))
+                failed.append((path, self._save_incident(exc, dest)))
         if failed:
             names = ", ".join(p.name for p, _ in failed[:5]) + (" …" if len(failed) > 5 else "")
             self._show_error(
@@ -1805,16 +1812,13 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         ):
             self._open_path(out)
 
-    def _save_one(self, path: Path, out: Path, style: str, target: str, used_names: set[str]) -> int:
-        """Write one source's output in a batch save; returns files written."""
+    def _save_one(self, path: Path, dest: Path, style: str, target: str) -> int:
+        """Write one source's output in a batch save to ``dest`` (its .md, or
+        its book folder: see export.folder_targets); returns files written."""
         text = self._export_text_for(path)
         if text is None:
             return 0
         result = self.files.get(path)
-        # Same-stem sources from different folders get "-2", "-3"… so one
-        # can never silently overwrite another's file or book folder.
-        name = md_export.claim_name(path.stem, used_names)
-        dest = out / name if style != "single" else out / f"{name}.md"
         text = self._with_figures(path, text, *md_export.figure_dirs(dest, style))
         # A book folder always has somewhere to put the summary (index +
         # manifest), whether or not parts carry front matter.
@@ -1879,7 +1883,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         self.notice.show(incident, owner=owner, extra=extra)
 
     def _show_startup_notice(self, incident: errors.Incident) -> None:
-        """A notice from before the window existed (MS-606). The bar holds one
+        """A notice from before the window existed (MS-606/607). The bar holds one
         notice, and an unreadable settings file (MS-501) keeps it."""
         if settings_store.LOAD_INCIDENT is not None:
             debuglog.event("ui.notice_shown", code=incident.code, ref=incident.ref, place="status")
@@ -2039,7 +2043,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
 
 
 def run(notice: errors.Incident | None = None) -> None:
-    """Open the classic window; ``notice`` (MS-606: why the new window
+    """Open the classic window; ``notice`` (MS-606/607: why the new window
     didn't open) goes in its notice bar, or in the status line when the bar
     already says the settings couldn't be read (that one matters more)."""
     app = MarkdownSidekickApp()
