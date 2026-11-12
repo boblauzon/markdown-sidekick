@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import random
+
+import pytest
 
 from markdown_sidekick.export import (
     build_front_matter,
@@ -12,7 +15,7 @@ from markdown_sidekick.export import (
     slugify,
     split_chapters,
 )
-from markdown_sidekick.quality import assess_markdown
+from markdown_sidekick.quality import assess_markdown, ends_in_noise
 
 _BOOK = (
     "Preamble before any chapter.\n\n"
@@ -556,6 +559,38 @@ class TestBinaryNoise:
         r = assess_markdown("ÅÙ¬ø∂¤¦¨ " * 100)
         assert r.binary_noise
 
+    def test_few_words_then_zeros_flagged(self):
+        # Too few words to judge by words, but no text is mostly NUL.
+        text = "Chapter one. A short start.\n" + "\x00" * 100_000
+        assert len(text.split()) < 40
+        r = assess_markdown(text)
+        assert r.binary_noise
+
+    def test_long_text_then_zeros_ends_in_noise(self):
+        # The start alone looks fine, so only the end gives this away.
+        text = "A real paragraph of readable text. " * 3_000 + "\x00" * 100_000
+        assert not assess_markdown(text).binary_noise
+        assert ends_in_noise(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "A real paragraph of readable text. " * 3_000,
+            "Short start.\n" + "\x00" * 50_000,  # all inside the start: binary_noise's job
+            "這是一段中文內容。" * 20_000,
+        ],
+        ids=["prose", "short", "chinese"],
+    )
+    def test_ends_in_noise_not_flagged(self, text):
+        assert not ends_in_noise(text)
+
+    def test_few_words_with_little_noise_not_flagged(self):
+        # Scripts without spaces have few "words" at any length, so a run of
+        # private-use glyphs in one must not read as corruption.
+        r = assess_markdown("這是一段中文內容。" * 100 + "\ue000" * 40)
+        assert 0 < r.noise_ratio < 0.10
+        assert not r.binary_noise
+
     def test_prose_and_code_not_flagged(self):
         doc = (
             "# Title\n\nNormal prose with punctuation, e.g. costs of $5-10!\n\n"
@@ -580,6 +615,57 @@ class TestBinaryNoise:
         # artifact cleanup targets) must not read as binary garbage.
         doc = ("A real paragraph of readable text. " * 50) + "wor�d s�pots\n"
         r = assess_markdown(doc)
+        assert not r.binary_noise
+
+    def test_salad_with_no_spaces_flagged(self):
+        # markitdown's lossy decode of bytes that are all 0x80 or above: too few
+        # words for the other signals, so changing script is the only tell.
+        rng = random.Random(42)
+        raw = bytes(rng.randrange(0x80, 0x100) for _ in range(16_384))
+        text = raw.decode("utf-8", errors="ignore")
+        assert len(text.split()) < 40
+        r = assess_markdown(text)
+        assert r.binary_noise
+        assert r.script_switch >= 0.5
+        assert r.as_dict()["script_switch"] == round(r.script_switch, 3)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Python语言是一种广泛使用的API接口编程语言，它的HTTP库非常好用。使用JSON格式传输数据。",
+            "これはテストの文章です。カタカナとひらがな、そして漢字を混ぜて書きます。データベースをPythonで操作する。",
+            # Latin terms and a Greek letter glued to the words around them. A
+            # rule counting words that mix scripts refused all of these as corrupt.
+            "Pythonでデータベースを操作する。HTTPリクエストはJSON形式で送信されます。\n応答時間は100μs以下です。\n",
+            "使用Python语言编写API接口。\n通过HTTP协议传输JSON数据。\n响应时间小于100μs。\n",
+            "대한민국(大韓民國)에서 Python을 배운다. HTTP와 JSON을 쓴다. α값은 작다. ",
+            "Δx ℝn 𝑓x ωt λ𝑥 μF ",
+            "프로그래밍 언어 Python을 사용하여 데이터를 처리한다. HTTP 요청은 JSON 형식으로 전송된다. ",
+            "यह हिंदी भाषा में एक नमूना पाठ है जो डिटेक्टर की जाँच करता है। ",
+            "نص تجريبي باللغة العربية. يستخدم البرنامج ملف PDF لتحويل النص. ",
+            "ðə kwɪk braʊn fɒks dʒʌmps ˈoʊvər ðə ˈleɪzi dɔɡ ",
+            # A multi-language manual: many scripts, but each word stays in one.
+            "Press the button. Нажмите кнопку. Πατήστε το κουμπί. اضغط على الزر. 電源を押してください。 שלום\n",
+            # The same with no spaces at all: one long "word", still few switches.
+            "PressthebuttonНажмитекнопкуΠατήστετοκουμπίاضغطعلىالزر電源を押してくださいשלום한국어",
+            # Kanji and kana alternate constantly with no spaces, so they must
+            # count as one script, or a few foreign terms would look like salad.
+            "日本語の文章を読む。データとαとЖとאを書く。私の本を見る。",
+            # In-word switching at its most extreme, but between only two scripts.
+            "Δx Δy Δt ωt kΩ μF μm nΩ dθ dφ sinθ cosθ tanφ eλ eπ λx ",
+            "Pаypаl ассount vеrify сliсk hеrе now frее оffеr ",
+            "ℝn ℓp 𝑓x 𝐀b ﬁx ",
+        ],
+    )
+    def test_real_multiscript_writing_not_flagged(self, text):
+        r = assess_markdown(text * 200)
+        assert not r.binary_noise
+
+    def test_too_few_letters_to_judge_by_switches(self):
+        # A page of numbers with one odd word: half its letter pairs change
+        # script, but five changes prove nothing.
+        r = assess_markdown("1 2 3 4 " * 60 + "an " * 5 + "aБγאدあ")
+        assert r.script_switch == 0.5
         assert not r.binary_noise
 
 
