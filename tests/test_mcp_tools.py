@@ -5,13 +5,15 @@ from __future__ import annotations
 import asyncio
 import http.server
 import json
+import ssl
 import threading
+import urllib.error
 
 import pytest
 
 fastmcp = pytest.importorskip("fastmcp")
 
-from markdown_sidekick import mcp_server  # noqa: E402
+from markdown_sidekick import mcp_server, netguard  # noqa: E402
 
 
 def _call(tool: str, **kwargs):
@@ -116,7 +118,7 @@ class TestOutlineAndSections:
 
 
 class TestConvertUrl:
-    def test_fetches_and_converts(self, tmp_path):
+    def _serve(self, tmp_path):
         (tmp_path / "page.html").write_text(
             "<h1>Remote Title</h1><p>Remote body.</p>", encoding="utf-8"
         )
@@ -124,8 +126,12 @@ class TestConvertUrl:
             *a, directory=str(tmp_path), **kw
         )
         server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        return server
+
+    def test_fetches_and_converts(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(netguard, "_is_public", lambda ip: True)  # the test server is local
+        server = self._serve(tmp_path)
         try:
             port = server.server_address[1]
             out = _text(_call("convert_url", url=f"http://127.0.0.1:{port}/page.html"))
@@ -133,15 +139,81 @@ class TestConvertUrl:
         finally:
             server.shutdown()
 
+    def test_refuses_this_computer(self, tmp_path):
+        server = self._serve(tmp_path)
+        try:
+            out = _text(_call("convert_url", url=f"http://127.0.0.1:{server.server_address[1]}/page.html"))
+            assert out.startswith("Error MS-133") and "Remote Title" not in out
+        finally:
+            server.shutdown()
+
     def test_rejects_non_http(self):
         out = _text(_call("convert_url", url="file:///etc/passwd"))
         assert out.startswith("Error")
+
+    @pytest.mark.parametrize(
+        "reason, code",
+        [
+            (ssl.SSLCertVerificationError("unable to get local issuer certificate"), "MS-134"),
+            (OSError("no route to host"), "MS-130"),
+        ],
+    )
+    def test_a_certificate_failure_doesnt_blame_the_connection(self, monkeypatch, reason, code):
+        class Failing:
+            def open(self, *args, **kwargs):
+                raise urllib.error.URLError(reason)
+
+        monkeypatch.setattr(netguard, "opener", Failing)
+        assert _text(_call("convert_url", url="https://example.invalid/page")).startswith(f"Error {code}")
+
+    def test_identifies_itself_with_a_link(self, monkeypatch):
+        # A bare product name gets a 403 from Wikipedia.
+        agents = []
+
+        class Recording:
+            def open(self, req, **kwargs):
+                agents.append(req.get_header("User-agent"))
+                raise urllib.error.URLError("stop here")
+
+        monkeypatch.setattr(netguard, "opener", Recording)
+        _call("convert_url", url="https://example.invalid/page")
+        assert agents[0].startswith(f"MarkdownSidekick/{mcp_server.__version__} (https://")
 
 
 class TestCapabilities:
     def test_capabilities(self):
         data = json.loads(_text(_call("list_capabilities")))
         assert "image_ocr" in data
+
+
+class TestAnnotations:
+    """What each tool declares it does: clients decide from this whether to ask."""
+
+    def _tools(self) -> dict:
+        async def run():
+            async with fastmcp.Client(mcp_server.mcp) as client:
+                return await client.list_tools()
+
+        return {tool.name: tool.annotations for tool in asyncio.run(run())}
+
+    def test_every_tool_states_its_effects(self):
+        tools = self._tools()
+        assert len(tools) >= 8
+        for name, hints in tools.items():
+            assert hints is not None, f"{name} has no annotations"
+            assert hints.read_only_hint is not None, name
+            assert hints.idempotent_hint is not None, name
+            assert hints.open_world_hint is not None, name
+            if not hints.read_only_hint:
+                assert hints.destructive_hint is not None, name
+
+    def test_the_hints_match_what_the_tools_do(self):
+        tools = self._tools()
+        assert {n for n, h in tools.items() if not h.read_only_hint} == {
+            "convert_local_file", "convert_batch", "cancel_batch"  # save_to, the outputs, the job
+        }
+        assert {n for n, h in tools.items() if h.open_world_hint} == {"convert_url"}
+        assert {n for n, h in tools.items() if h.destructive_hint} == {"convert_local_file", "convert_batch"}
 
 
 class TestBatch:

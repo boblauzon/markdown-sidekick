@@ -13,9 +13,12 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 from . import errors
-from .export import AI_TARGETS
+from .export import AI_TARGETS, STYLES
 
 WHISPER_MODELS = ("tiny", "base", "small", "medium")
+THEMES = ("system", "light", "dark")
+UPDATE_CHECKS = ("ask", "weekly", "off")
+WINDOWS = ("new", "classic")  # which window the app opens; the first is the default
 
 # The incident from the last load of an unreadable settings file (MS-501),
 # for the GUI to surface once at startup; None when the file was fine.
@@ -33,6 +36,18 @@ def app_data_dir(*parts: str) -> Path:
 
 def _config_path() -> Path:
     return app_data_dir("settings.json")
+
+
+def preferred_window() -> str:
+    """The window the app opens with no flag: the saved ``window`` choice,
+    else the new one. Read before either window loads its settings, so it
+    never reports or backs up an unreadable file (that window's own load
+    does, once)."""
+    try:
+        value = json.loads(_config_path().read_text(encoding="utf-8-sig")).get("window")
+    except (OSError, ValueError, AttributeError):
+        return WINDOWS[0]
+    return value if value in WINDOWS else WINDOWS[0]
 
 
 @dataclass
@@ -74,6 +89,18 @@ class Settings:
     debug_mode: bool = False  # detailed session trace under logs/sessions
     # In debug mode, also keep each conversion's raw + cleaned Markdown.
     debug_snapshots: bool = True
+    # Which window opens (WINDOWS): the new one unless the user picked the
+    # classic one. A missing key (settings from 1.3 and earlier) reads as
+    # "new", so every install and upgrade opens the new window.
+    window: str = "new"
+    # The new window's theme (THEMES); the classic window has one look.
+    theme: str = "system"
+    # -- updates (updates.py) --------------------------------------------------
+    # "ask" until the first-run question is answered, then "weekly" or "off".
+    # Nothing is fetched unless the user chose "weekly" or clicks Check.
+    update_check: str = "ask"
+    update_last_check: str = ""  # ISO date of the last weekly check
+    update_skip_version: str = ""  # a release the user chose to skip
 
     # -- persistence ---------------------------------------------------------
     @classmethod
@@ -93,7 +120,9 @@ class Settings:
         if not path.exists():
             return cls()
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            # utf-8-sig: a file edited in Notepad or PowerShell 5 may start
+            # with a byte-order mark, which plain utf-8 hands to json as junk.
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
             # Migrate the pre-export-bar key: split_chapters=true meant
             # "write book folders", now expressed as export_style="chapters".
             if data.get("split_chapters") and "export_style" not in data:
@@ -134,7 +163,7 @@ class Settings:
         self.mineru_endpoint = str(self.mineru_endpoint or "").strip()
         self.default_output_dir = str(self.default_output_dir or "").strip()
         self.export_front_matter = bool(self.export_front_matter)
-        if self.export_style not in ("single", "chapters", "ai"):
+        if self.export_style not in STYLES:
             self.export_style = "single"
         if self.ai_target not in AI_TARGETS:
             self.ai_target = "Claude"
@@ -146,3 +175,11 @@ class Settings:
         self.summary_model = str(self.summary_model or "").strip()
         self.debug_mode = bool(self.debug_mode)
         self.debug_snapshots = bool(self.debug_snapshots)
+        if self.window not in WINDOWS:
+            self.window = WINDOWS[0]
+        if self.theme not in THEMES:
+            self.theme = "system"
+        if self.update_check not in UPDATE_CHECKS:
+            self.update_check = "ask"
+        self.update_last_check = str(self.update_last_check or "").strip()
+        self.update_skip_version = str(self.update_skip_version or "").strip()

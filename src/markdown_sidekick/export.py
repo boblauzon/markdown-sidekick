@@ -70,11 +70,17 @@ AI_TARGETS: dict[str, int] = {
 }
 # Targets exported as notebook sources (export_book(notebook=True)).
 NOTEBOOK_TARGETS = frozenset({"Gemini Notebook"})
+# Output shapes (Settings.export_style, batch --style): one .md file, a
+# chapter folder, or AI-sized parts for an AI_TARGETS budget. See save().
+STYLES = ("single", "chapters", "ai")
 
 _H1_RE = re.compile(r"^#\s+(.+?)\s*$")
 _H2_RE = re.compile(r"^##\s+(.+?)\s*$")
 _FENCE_RE = re.compile(r"^\s*```")
 _HEADING_LINE_RE = re.compile(r"^#{1,6}\s+\S")
+# A table's rule row, with or without outer pipes (the caller checks for a pipe:
+# "---" alone is a thematic break).
+_TABLE_RULE_RE = re.compile(r"^\s*\|?\s*:?-+:?\s*(?:\|\s*:?-+:?\s*)*\|?\s*$")
 _IMAGE_LINK_RE = re.compile(r"!\[[^\]]*\]\([^)]+\)")
 _YAML_HOSTILE_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f\ud800-\udfff]")
 _LEAD_TITLE = "Front matter"
@@ -116,6 +122,54 @@ def _yaml_scalar(value: str) -> str:
     if _YAML_INNER_RE.search(value) or _YAML_LEADING_RE.match(value) or _YAML_NON_STRING_RE.match(value):
         return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return value
+
+
+# YAML front matter at the very top of a document (an earlier export,
+# Obsidian notes, static-site posts): "---", a "key:" line and more, "---".
+FRONT_MATTER_RE = re.compile(r"\A---[ \t]*\r?\n([\w-]+:.{0,8000}?\r?\n)---[ \t]*(?:\r?\n|\Z)", re.S)
+_TOP_KEY_RE = re.compile(r"^([\w-]+):(.*)$")
+
+
+def split_front_matter(markdown: str) -> tuple[dict[str, str], str]:
+    """The document's own front matter as ``{key: its raw YAML lines}`` and
+    the text after it; ``({}, markdown)`` when it has none."""
+    m = FRONT_MATTER_RE.match(markdown)
+    if m is None:
+        return {}, markdown
+    fields: dict[str, str] = {}
+    key = None
+    for line in m.group(1).splitlines():
+        top = _TOP_KEY_RE.match(line)
+        if top:
+            key = top.group(1)
+            fields[key] = line
+        elif key is not None:  # a list item or continuation of the key above
+            fields[key] += "\n" + line
+    return fields, markdown[m.end():].lstrip("\r\n")
+
+
+def _own_scalar(raw: str) -> str:
+    """A one-line field's value, unquoted; "" for a list or a block."""
+    value = raw.split(":", 1)[1].strip() if raw else ""
+    if "\n" in raw or value in ("", "|", ">"):
+        return ""
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+        value = value[1:-1]
+    return value
+
+
+def _keep_own(front: str, own: dict[str, str] | None) -> str:
+    """``front`` (from :func:`build_front_matter`) plus the document's own
+    fields it doesn't write itself — tags, aliases… — so a document that
+    already had front matter keeps one block, and nothing of it is lost."""
+    if not own:
+        return front
+    ours = {m.group(1) for m in (_TOP_KEY_RE.match(line) for line in front.splitlines()) if m}
+    extra = [raw for key, raw in own.items() if key not in ours]
+    if not extra:
+        return front
+    head, tail = front.rsplit("---", 1)
+    return head + "\n".join(extra) + "\n---" + tail
 
 
 def build_front_matter(fields: dict[str, object]) -> str:
@@ -312,10 +366,13 @@ class ExportResult:
     manifest_path: Path | None = None
 
     @property
+    def files(self) -> list[Path]:
+        """Every file written: the parts, then index.md and manifest.json."""
+        return self.paths + [p for p in (self.index_path, self.manifest_path) if p]
+
+    @property
     def files_written(self) -> int:
-        return len(self.paths) + (1 if self.index_path else 0) + (
-            1 if self.manifest_path else 0
-        )
+        return len(self.files)
 
 
 def _fence_map(lines: list[str]) -> tuple[list[bool], list[bool]]:
@@ -432,7 +489,8 @@ def split_for_ai(markdown: str, max_tokens: int, *, pack: bool = True) -> list[S
     "(part N)" pieces at blank lines outside code fences, falling back to any
     line outside a fence so blank-line-free text still splits. Every part fits
     the budget unless a single indivisible fenced block alone exceeds it —
-    fences are never split.
+    fences are never split. A table too long for one part repeats its header
+    in each part it continues into, so every part can be read on its own.
 
     With ``pack`` (export), small consecutive sections are then packed into
     parts up to the budget (see :func:`_pack`): a book of 130 one-page
@@ -530,6 +588,26 @@ def _is_lead(title: str) -> bool:
     return title == _LEAD_TITLE or title.startswith(f"{_LEAD_TITLE} (part ")
 
 
+def _table_heads(lines: list[str], is_fence: list[bool], in_fence: list[bool]) -> list[int]:
+    """Per line: the index of the header row of the table this line is the rule
+    or a body row of, else -1. A table ends at the first line without a pipe."""
+    heads = [-1] * len(lines)
+    head = -1
+    for i, line in enumerate(lines):
+        if in_fence[i] or is_fence[i] or "|" not in line or _HEADING_LINE_RE.match(line):
+            head = -1
+        elif head >= 0:
+            heads[i] = head
+        elif (
+            i
+            and _TABLE_RULE_RE.match(line)
+            and "|" in lines[i - 1]
+            and not (in_fence[i - 1] or is_fence[i - 1])
+        ):
+            head = heads[i] = i - 1
+    return heads
+
+
 def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     """Split lines into chunks of at most ``max_chars`` joined characters.
 
@@ -542,10 +620,16 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     marker disable splitting entirely. A cut never leaves a heading as a
     chunk's last line — it belongs with what it introduces (a heading over
     an indivisible listing travels with the listing).
+
+    A chunk that starts inside a table opens with that table's header and
+    rule, counted against the budget, unless they and the first row can't
+    share a chunk. A table's header, rule and first row stay together unless
+    nothing else fits the budget.
     """
     is_fence, in_fence = _fence_map(lines)
     if sum(is_fence) % 2:
         in_fence = [False] * len(lines)
+    heads = _table_heads(lines, is_fence, in_fence)
     cum = [0]
     for line in lines:
         cum.append(cum[-1] + len(line) + 1)
@@ -560,23 +644,33 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     chunks: list[str] = []
     start = 0
     while start < n:
-        if cum[n] - cum[start] <= max_chars:
+        head = heads[start]
+        repeat = ""
+        if head >= 0 and start >= head + 2:  # a body row: this chunk continues the table
+            repeat = "\n".join(lines[head : head + 2]) + "\n"
+            if len(repeat) + cum[start + 1] - cum[start] > max_chars:
+                repeat = ""
+        room = max_chars - len(repeat)
+        if cum[n] - cum[start] <= room:
             end = n
         else:
-            best_blank = best_soft = None
+            best_blank = best_soft = table_cut = None
             c = start + 1
-            while c < n and cum[c] - cum[start] <= max_chars:
+            while c < n and cum[c] - cum[start] <= room:
                 if not in_fence[c] and not after_heading[c]:
-                    best_soft = c
-                    if not lines[c - 1].strip():
-                        best_blank = c
+                    if heads[c] >= 0 and c <= heads[c] + 2:  # would part a table's opening
+                        table_cut = c
+                    else:
+                        best_soft = c
+                        if not lines[c - 1].strip():
+                            best_blank = c
                 c += 1
-            end = best_blank or best_soft
+            end = best_blank or best_soft or table_cut
             if end is None:  # indivisible fenced block: minimal overflow
                 while c < n and in_fence[c]:
                     c += 1
                 end = c if c < n else n
-        chunks.append("\n".join(lines[start:end]).strip())
+        chunks.append(repeat + "\n".join(lines[start:end]).strip())
         start = end
     return [chunk for chunk in chunks if chunk]
 
@@ -744,8 +838,12 @@ def export_single(
     notebook: bool = False,
     title_source: str = "",
     meta: dict | None = None,
+    own_front_matter: dict[str, str] | None = None,
 ) -> ExportResult:
     """Write one decorated Markdown file.
+
+    ``own_front_matter``: the document's own fields (see :func:`save`), added
+    to ours where we don't write that key.
 
     ``summary`` (optional, from the local-AI pass) becomes a ``summary:``
     front-matter field; blank means the field is simply absent. ``title`` /
@@ -765,7 +863,7 @@ def export_single(
         if front_matter:
             content = _notebook_header(title, author or ", ".join(meta.get("authors") or []), summary=summary) + content
     elif front_matter:
-        content = build_front_matter(
+        content = _keep_own(build_front_matter(
             {
                 "title": title,
                 "subtitle": meta.get("subtitle", ""),
@@ -778,7 +876,7 @@ def export_single(
                 "est_tokens": estimate_tokens(markdown),
                 "image_count": count_images(markdown) or None,
             }
-        ) + markdown
+        ), own_front_matter) + markdown
     write_text_verified(out_path, content)
     debuglog.event(
         "export.single",
@@ -806,6 +904,7 @@ def export_book(
     notebook: bool = False,
     title_source: str = "",
     meta: dict | None = None,
+    own_front_matter: dict[str, str] | None = None,
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -855,6 +954,7 @@ def export_book(
             notebook=notebook,
             title_source=title_source,
             meta=meta,
+            own_front_matter=own_front_matter,
         )
 
     result = ExportResult()
@@ -885,7 +985,7 @@ def export_book(
                     contents=[s.title or _LEAD_TITLE for s in sections] if n == 1 else None,
                 ) + sec.markdown
         elif front_matter:
-            content = build_front_matter(
+            content = _keep_own(build_front_matter(
                 {
                     "title": sec.title or title,
                     "book": title,
@@ -900,7 +1000,7 @@ def export_book(
                     "est_tokens": sec.est_tokens,
                     "image_count": images or None,
                 }
-            ) + sec.markdown
+            ), own_front_matter) + sec.markdown
         write_text_verified(path, content)
         result.paths.append(path)
         manifest_files.append(
@@ -955,3 +1055,126 @@ def export_book(
     result.manifest_path = out_dir / "manifest.json"
     write_text_verified(result.manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
     return result
+
+
+def save(
+    markdown: str,
+    dest: Path,
+    *,
+    source: str,
+    style: str = "single",
+    ai_target: str = "",
+    details: dict | None = None,
+    front_matter: bool = True,
+    summary: str = "",
+    max_tokens: int = 0,
+) -> ExportResult:
+    """The one save step every front-end calls (ADR-002).
+
+    ``dest`` is the ``.md`` file for ``style="single"`` and the book folder
+    for ``"chapters"`` / ``"ai"``; ``"ai"`` sizes parts to the
+    ``ai_target``'s budget and writes notebook sources for a notebook
+    target. ``details`` is the book's own details as plain data —
+    ``ConversionResult.details``: engine, title, author, title_source, meta —
+    so no front-end can forget one (MCP ``save_to`` once titled 504 books
+    after their filenames). ``max_tokens`` overrides the chapter split's
+    budget (the CLI's ``--max-tokens``). Naming, figures and the summary stay
+    with the caller: that is where the front-ends really differ.
+    """
+    if style not in STYLES:
+        raise ValueError(f"style must be one of {', '.join(STYLES)}")
+    d = details or {}
+    title, title_source = d.get("title", ""), d.get("title_source", "")
+    # A document that has front matter of its own (an earlier export, an
+    # Obsidian note) gets one block, not two: its fields join ours, and its
+    # title is used when the converter found none. Without our front matter
+    # the document is saved as it is.
+    own: dict[str, str] = {}
+    if front_matter:
+        own, markdown = split_front_matter(markdown)
+        if not title and _own_scalar(own.get("title", "")):
+            title, title_source = _own_scalar(own["title"]), "front_matter"
+    common = dict(
+        source=source,
+        engine=d.get("engine", ""),
+        front_matter=front_matter,
+        summary=summary,
+        title=title,
+        author=d.get("author", ""),
+        title_source=title_source,
+        meta=d.get("meta") or {},
+        own_front_matter=own,
+    )
+    if style == "single":
+        return export_single(markdown, dest, **common)
+    if style == "ai":
+        return export_book(
+            markdown,
+            dest,
+            max_tokens=AI_TARGETS.get(ai_target, DEFAULT_MAX_TOKENS),
+            ai_sections=True,
+            notebook=ai_target in NOTEBOOK_TARGETS,
+            **common,
+        )
+    return export_book(markdown, dest, max_tokens=max_tokens or DEFAULT_MAX_TOKENS, **common)
+
+
+def figure_dirs(dest: Path, style: str) -> tuple[Path, str]:
+    """Where a save puts the source's figures, and the relative link prefix:
+    a book folder keeps ``images/`` beside its parts; a single file gets
+    ``images/<stem>/`` so several files can share one output folder."""
+    if style == "single":
+        return dest.parent / "images" / dest.stem, f"images/{dest.stem}"
+    return dest / "images", "images"
+
+
+def claim_name(stem: str, used: set[str]) -> str:
+    """``stem``, else ``stem-2``, ``stem-3``… — the first name not in
+    ``used``, which it joins. Same-named sources from different folders,
+    saved together, must never overwrite each other's output — and Windows
+    names ignore case: "Report" and "report" are one file."""
+    name, n = stem, 2
+    while name.casefold() in used:
+        name, n = f"{stem}-{n}", n + 1
+    used.add(name.casefold())
+    return name
+
+
+def folder_targets(sources: list[Path], folder: Path, style: str) -> list[Path]:
+    """Where saving ``sources`` to ``folder`` writes each one: ``<stem>.md``
+    in the One-file style, else a ``<stem>`` book folder, same stems made
+    unique by :func:`claim_name`. A window plans with this, asks
+    :func:`replace_question`, then writes to exactly these paths."""
+    used: set[str] = set()
+    targets = []
+    for src in sources:
+        name = claim_name(Path(src).stem, used)
+        targets.append(folder / name if style != "single" else folder / f"{name}.md")
+    return targets
+
+
+def replace_question(sources: list[Path], targets: list[Path]) -> str:
+    """"" when none of ``targets`` exists yet; else the question to ask
+    before a save replaces them, naming any that IS one of the sources (a
+    .md converted and saved beside itself would replace the original)."""
+    existing = [t for t in targets if t.exists()]
+    if not existing:
+        return ""
+
+    def is_source(t: Path) -> bool:
+        for s in sources:
+            try:
+                if t.is_file() and os.path.samefile(t, s):
+                    return True
+            except OSError:
+                continue
+        return False
+
+    names = [t.name + ("\\" if t.is_dir() else "") for t in existing]
+    shown = "\n".join(f"    {n}" for n in names[:8]) + (f"\n    … and {len(names) - 8} more" if len(names) > 8 else "")
+    question = f"{len(existing)} of these already exist in {existing[0].parent}:\n{shown}\n\nReplace them?"
+    originals = [t.name for t in existing if is_source(t)]
+    if originals:
+        which = ", ".join(originals[:3]) + (" …" if len(originals) > 3 else "")
+        question += f"\n\n{which} {'is a file' if len(originals) == 1 else 'are files'} you converted: replacing loses the original."
+    return question

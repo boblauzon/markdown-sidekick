@@ -125,7 +125,7 @@ available inside the app via the **❓ Help** button.
   button — one file gets a save dialog, a batch gets a folder (Copy/Save respect
   the Clean-output setting)
 - **Per-file status** (done / error) with the error message shown inline in the preview
-- Powered by `markitdown[all]`, so it understands a wide range of formats:
+- Powered by `markitdown` (only its local converters — nothing that uploads), so it understands a wide range of formats:
 
   | Category   | Formats |
   |------------|---------|
@@ -330,8 +330,8 @@ just plain markitdown. Tools:
   title, quality report, and per-section token estimates — no content
 - `convert_section(file_path, section_index)` — returns one chapter/section from
   the cached conversion
-- `convert_url(url)` — downloads (http/https, 50 MB cap) and converts a web page,
-  PDF, or image with the same local pipeline
+- `convert_url(url)` — downloads (http/https, 50 MB cap, public addresses only)
+  and converts a web page, PDF, or image with the same local pipeline
 - `list_capabilities()` — reports which local engines are available
 - `convert_batch(inputs, output_root, naming, style, …)` → `batch_status(batch_id)`
   / `cancel_batch(batch_id)` — library-scale conversion: starts at once, then poll;

@@ -1,7 +1,9 @@
 # Markdown Sidekick — User Guide
 
 Convert documents, images, scanned PDFs and audio into clean Markdown — entirely
-on your own computer. Nothing is uploaded anywhere; every engine runs locally.
+on your own computer. Your files never leave it; every engine runs locally. The
+only thing the app ever fetches is the latest version number, and only if you turn
+update checks on (see *Updates*).
 
 Markdown Sidekick is **freeware** by VibeProSoft. If it saves you time, you can
 support development at [ko-fi.com/roblauzon](https://ko-fi.com/roblauzon) ☕
@@ -25,6 +27,16 @@ can read when you need it.
 ---
 
 ## The Main Window
+
+**Two windows.** Markdown Sidekick opens its new window. The classic window is
+still there if you prefer it: choose it in Settings (new window: *Appearance* →
+**Start in**; classic window: *Output* → *Open the new window when Markdown
+Sidekick starts*), or open it once with `MarkdownSidekick.exe --classic`. Your
+choice is kept when you update. The new window needs Microsoft's free Edge
+WebView2 Runtime: Windows 11 includes it and most Windows 10 PCs already have it.
+Without it, the classic window opens and says so (MS-606), and Setup's last page
+offers Microsoft's download page. If the runtime is there but doesn't start, the
+classic window opens instead of a blank one and says why (MS-607).
 
 **Files panel (left)**
 
@@ -233,6 +245,7 @@ Settings are grouped into four tabs — **Conversion**, **Output**,
 | Output | Front matter / source header | Saved files start with the book's own title, subtitle, authors, publisher, date, language and ISBN (from an epub's package or a PDF's metadata/title page — `title_source` says which) plus source/date/token metadata (YAML), or a one-line book/part header for Gemini Notebook |
 | Output | Page anchors | PDF conversions keep `<!-- page N -->` markers for citations |
 | Output | Extract PDF figures | On by default: images of at least 120 px land in an `images/` folder, linked right where they appear in the text |
+| Output | Open the new window when Markdown Sidekick starts | On by default; off opens this classic window instead, from the next start (the new window's Settings → *Appearance* → **Start in**) |
 | Local AI | Endpoint + Detect | **Detect** probes your machine for a running local AI — Ollama, LM Studio, Jan, or any OpenAI-compatible server — fills the model pickers with what's installed, and tells you if it's running but has no models loaded yet |
 | Local AI | Polish / caption / summary model | Optional local-LLM passes: artifact repair, figure alt-text, and a 2–3 sentence document summary written into the saved file's front matter (blank = that pass is off) |
 | Diagnostics | Record a detailed trace | Debug mode: logs everything each conversion did (see *Debug mode and diagnostic reports*) |
@@ -322,7 +335,9 @@ Tools exposed:
 - `convert_outline(file_path)` — document structure + per-section token counts,
   without the content (the conversion is cached for follow-up reads)
 - `convert_section(file_path, section_index)` — one chapter at a time
-- `convert_url(url)` — download and convert a web page or remote PDF
+- `convert_url(url)` — download and convert a web page or remote PDF. Addresses
+  on your computer or private network are refused (MS-133), so a document an AI
+  is reading can't talk it into fetching your router's pages
 - `list_capabilities()` — reports which engines are available
 - `convert_batch(inputs, output_root, naming, style, …)` — starts converting
   a whole library and returns a batch id straight away; `batch_status(id)`
@@ -401,11 +416,40 @@ MarkdownSidekick-cli.exe batch "D:\eBooks" --out "D:\eBooks-md" --naming title
 
 ---
 
+## Updates
+
+The first time it starts, Markdown Sidekick asks whether to check for a new version
+once a week. Change your answer any time: Settings → *Diagnostics* (classic window)
+or Settings → *Updates* (new window), which also has **Check now**. The command line
+has `markdown-sidekick-cli update --check`.
+
+**What a check sends.** One request to github.com for a small file holding the latest
+version number. GitHub sees your IP address and that request, and counts downloads in
+total. Nothing about you, your files or your settings is sent. With checks off,
+nothing is fetched unless you click **Check now**.
+
+**Updating.** When a new version is out, a bar says so (and says plainly when it
+includes a privacy or security fix). **Update** downloads it in the background; it
+installs **when you close the app**, which then reopens on the new version — no
+installer screens and no administrator prompt. **Restart now** does it at once. Every
+download is checked against update information signed with Markdown Sidekick's own
+key before anything runs; one that doesn't match is deleted (MS-702). **Skip this
+version** stops reminders for that release.
+
+The portable zip, a pip install and a source checkout can't install updates
+themselves: their bar has a **Download** button that opens the release page instead.
+
+If Claude Desktop or another AI tool is using Markdown Sidekick when it updates, the
+installer closes that connection too; restart the AI tool afterwards.
+
+---
+
 ## Where files live
 
 | What | Where |
 | ---- | ----- |
 | Settings | `%LOCALAPPDATA%\MarkdownSidekick\settings.json` |
+| Downloaded updates (deleted once installed) | `%LOCALAPPDATA%\MarkdownSidekick\updates\` |
 | Whisper models | `%LOCALAPPDATA%\MarkdownSidekick\models\` |
 | Error log (always on) | `%LOCALAPPDATA%\MarkdownSidekick\logs\errors.jsonl` |
 | Debug traces (debug mode only) | `%LOCALAPPDATA%\MarkdownSidekick\logs\sessions\` |
@@ -521,6 +565,8 @@ your documents' text (file names and paths, yes).
 | MS-130 | The address couldn't be downloaded. | Check the address and your internet connection, then retry. | Retry |
 | MS-131 | That link can't be converted: only http/https downloads up to 50 MB are supported. | Download the file yourself and convert the local copy. | — |
 | MS-132 | There is no section with that number. | Get the section list from convert_outline and use one of its indexes (with the same max_tokens). | — |
+| MS-133 | That address is on this computer or a private network, so it wasn't downloaded. | If you meant that address, download the file yourself and convert the local copy. | — |
+| MS-134 | That site's security certificate couldn't be verified, so it wasn't downloaded. | The site's certificate may be faulty, or something on your network may be intercepting the connection. If you trust the site, download the file in your browser and convert the local copy. | — |
 | MS-199 | The conversion engine reported an unexpected error. | Retry. If it keeps failing, report it — the technical details say why. | Retry |
 
 **Saving**
@@ -567,6 +613,18 @@ your documents' text (file names and paths, yes).
 | MS-602 | Windows couldn't open that folder. *(warning)* | Open it yourself — its path is in the details. | — |
 | MS-603 | The diagnostic report couldn't be created. | Choose another folder for the report, or open the log folder and send the files from there. | Open log folder |
 | MS-604 | The built-in user guide couldn't be loaded — a file is missing from this installation. | Reinstall Markdown Sidekick to restore it. | — |
+| MS-605 | The new window can't start — a part it needs isn't on this PC. | Start Markdown Sidekick with --classic to use the classic window. To use the new one, install Microsoft's Edge WebView2 Runtime; the details say what was missing. | — |
+| MS-606 | The new window can't run on this PC yet, so the classic window opened. *(warning)* | Install Microsoft's free Edge WebView2 Runtime, then start Markdown Sidekick again; the details say what was missing. To keep the classic window, choose it in Settings → Output. | Get WebView2… |
+| MS-607 | The new window didn't start, so the classic window opened. *(warning)* | Microsoft's Edge WebView2 Runtime is installed but didn't start; the details say why. Repair or reinstall it from Microsoft's page, then start Markdown Sidekick again. To keep the classic window, choose it in Settings → Output. | Get WebView2… |
+
+**Installing and updating**
+
+| Code | What happened | What to do | One-click fix |
+| ---- | ------------- | ---------- | ------------- |
+| MS-701 | Couldn't check for updates — GitHub didn't answer. *(warning)* | Check your internet connection and try again later, or see the latest release at github.com/boblauzon/markdown-sidekick/releases. | — |
+| MS-702 | The update didn't pass its safety check, so it wasn't used. | Nothing was installed. Try again later, or download the latest release from github.com/boblauzon/markdown-sidekick/releases. If it keeps happening, report it with this reference. | — |
+| MS-703 | The update couldn't be downloaded. *(warning)* | Check your internet connection and free disk space, then choose Update again; the download resumes where it stopped. | — |
+| MS-704 | The update didn't install, so you're still on the previous version. | Choose Update to try again, or run the installer from the latest release yourself. The installer's log is in the details. | Open log folder |
 
 **Unexpected errors**
 

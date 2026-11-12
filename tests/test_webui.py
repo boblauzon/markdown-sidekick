@@ -1,0 +1,903 @@
+"""The web UI's Python bridge (webui/bridge.py), driven without a window."""
+
+from __future__ import annotations
+
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+from markdown_sidekick.settings import Settings
+from markdown_sidekick.webui import bridge
+
+
+class FakeWindow:
+    def __init__(self):
+        self.scripts: list[str] = []
+        self.picked = None  # what the next file dialog returns (a tuple of paths, or None)
+        self.dialogs: list[tuple] = []
+        self.confirm = True
+        self.prompts: list[str] = []
+        self.on_dialog = lambda: None
+
+    def run_js(self, script: str) -> None:
+        self.scripts.append(script)
+
+    def create_confirmation_dialog(self, title: str, message: str) -> bool:
+        self.prompts.append(message)
+        return self.confirm
+
+    def set_title(self, title: str) -> None:
+        self.title = title
+
+    def create_file_dialog(self, dialog_type, **kwargs):
+        self.dialogs.append((dialog_type, kwargs))
+        self.on_dialog()
+        return self.picked
+
+
+@pytest.fixture
+def api(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))  # settings.save lands here
+    a = bridge.Api(Settings(enable_ocr=False, enable_audio=False))
+    a._window = FakeWindow()  # _attach without the engine warm-up thread
+    a._warming = True  # ...and ready() without it too
+    return a
+
+
+def _convert(api, path, timeout=60.0):
+    api._add([str(path)])
+    item = next(i for i in api._items.values() if i.path == path)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with api._lock:
+            if item.result is not None and not item.preparing and not api._busy:
+                return item
+        time.sleep(0.05)
+    raise AssertionError("conversion did not finish")
+
+
+def test_preview_renders_and_never_runs_document_html(api, tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text(
+        "# Notes\n\nSome **bold** text.\n\n<script>alert(1)</script>\n\n"
+        '<img src="x" onerror="alert(2)">\n\n[bad](javascript:alert(3))\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n'
+        "[web](https://example.com) [settings](ms-settings:about)\n",
+        encoding="utf-8",
+    )
+    item = _convert(api, src)
+    page = api.preview(item.id, "rendered")
+    assert page["state"] == "done"
+    html = page["html"]
+    assert "<h1>Notes</h1>" in html and "<strong>bold</strong>" in html and "<table>" in html
+    # Raw HTML in a converted document is shown as text, never as markup.
+    assert "<script" not in html and "&lt;script&gt;" in html
+    assert "<img" not in html and 'href="javascript' not in html
+    # Only web links stay links: another scheme could start a program.
+    assert 'href="https://example.com"' in html and "ms-settings" not in html and ">settings</a>" in html
+    raw = api.preview(item.id, "raw")
+    assert "html" not in raw and raw["raw"].startswith("# Notes")
+    assert [s["label"] for s in page["stats"]] == ["Quality", "Tokens", "Headings", "Cleanup"]
+
+
+def test_page_anchors_and_figure_markers_are_placeholders(api):
+    # As in the classic window: a muted ⟨…⟩ line, not escaped "<!-- … -->" text.
+    html = api._renderer().render(
+        "<!-- figure 1.1 -->\n\nDesign Elements\n\n<!-- page 2 -->\nText that follows **at once**.\n\n"
+        "Mid <!-- not alone --> line\n\n<!-- <b>x</b> -->\n\n```\n<!-- page 9 -->\n```\n"
+    )
+    assert '<p class="mdc">⟨figure 1.1⟩</p>' in html and '<p class="mdc">⟨page 2⟩</p>' in html
+    assert "<p>Text that follows <strong>at once</strong>.</p>" in html
+    assert "<p>Mid &lt;!-- not alone --&gt; line</p>" in html  # only whole lines
+    assert "⟨&lt;b&gt;x&lt;/b&gt;⟩" in html and "<b>" not in html  # still never markup
+    assert "<code>&lt;!-- page 9 --&gt;\n</code>" in html  # fenced code is left alone
+
+
+def test_a_marker_inside_a_paragraph_splits_it_without_repeating_text(api):
+    html = api._renderer().render("Before **it**\n<!-- figure 2.1 -->\nAfter it\n<!-- page 3 -->\nLast\n")
+    assert html == (
+        "<p>Before <strong>it</strong></p>\n"
+        '<p class="mdc">⟨figure 2.1⟩</p>\n'
+        "<p>After it</p>\n"
+        '<p class="mdc">⟨page 3⟩</p>\n'
+        "<p>Last</p>\n"
+    )
+
+
+def test_confirmations_are_owned_by_the_window(api, monkeypatch):
+    # pywebview's own box has no owner, which leaves the window live behind it.
+    class Form:
+        class Handle:
+            ToInt64 = staticmethod(lambda: 4242)
+
+    asked = []
+    monkeypatch.setattr(bridge, "_ok_cancel_box", lambda owner, title, text: asked.append((owner, text)) or True)
+    api._window.native = Form()
+    assert api._confirm("Sure?") is True
+    assert asked == [(4242, "Sure?")] and api._window.prompts == []
+
+
+def test_no_window_handle_still_asks(api, monkeypatch):
+    # A silent Cancel would make Clear all do nothing, with no error to see.
+    class Broken:
+        @property
+        def Handle(self):
+            raise RuntimeError("pywebview changed")
+
+    asked = []
+    monkeypatch.setattr(bridge, "_ok_cancel_box", lambda *a: asked.append(a) or True)
+    api._window.native = Broken()
+    assert api._confirm("Discard?") is True
+    assert asked == [] and api._window.prompts == ["Discard?"]
+
+
+def test_only_one_confirmation_at_a_time(api, tmp_path):
+    src = tmp_path / "notes.md"
+    src.write_text("# Notes\n", encoding="utf-8")
+    _convert(api, src)
+    with api._prompt:  # a box is up: a second click counts as Cancel
+        assert api._confirm("Again?") is False
+        assert api.clear() is False
+    assert api._window.prompts == [] and len(api._items) == 1
+    assert api._confirm("Now?") is True and api._window.prompts == ["Now?"]
+
+
+def test_preview_is_capped_but_says_so(api, tmp_path):
+    src = tmp_path / "big.md"
+    para = "word " * 60
+    src.write_text("\n\n".join(f"{para} {n}" for n in range(1600)), encoding="utf-8")  # ~490k chars
+    item = _convert(api, src)
+    page = api.preview(item.id, "raw")
+    assert page["truncated"] is True
+    assert len(page["raw"]) <= bridge.PREVIEW_MAX_CHARS
+
+
+def test_front_matter_previews_as_yaml_not_a_heading(api, tmp_path):
+    src = tmp_path / "exported.md"
+    src.write_text("---\r\ntitle: A Book\r\nest_tokens: 12\r\n---\r\n\r\n# Chapter 1\r\n\r\nText.\r\n", encoding="utf-8")
+    html = api.preview(_convert(api, src).id)["html"]
+    assert "<h2" not in html and "<hr" not in html
+    assert '<code class="language-yaml">title: A Book' in html and "<h1>Chapter 1</h1>" in html
+    assert api.preview(_convert(api, src).id, "raw")["raw"].startswith("---")  # Raw is untouched
+
+
+@pytest.mark.parametrize("text", [
+    "---\n\nA rule, then text.\n\n---\n",  # a thematic break, not front matter
+    "Intro\n---\nkey: value\n---\n",  # not at the very top
+    "---\ntitle: never closed\n\n# Heading\n",
+])
+def test_only_real_front_matter_becomes_yaml(text):
+    assert bridge._front_matter_as_code(text) == text
+
+
+def test_front_matter_with_backticks_keeps_its_fence():
+    out = bridge._front_matter_as_code("---\nnote: uses ``` inside\n---\nBody\n")
+    assert out.startswith("````yaml\nnote: uses ``` inside\n````\n")
+
+
+def test_going_back_to_a_file_reuses_its_rendered_preview(api, tmp_path, monkeypatch):
+    files = []
+    for n in range(6):
+        f = tmp_path / f"f{n}.md"
+        f.write_text(f"# File {n}\n\nSome **text** {n}.\n", encoding="utf-8")
+        files.append(f)
+    _convert_all(api, files)
+    ids = list(api._items)
+    md = api._renderer()
+    rendered = []
+    real = md.render
+    monkeypatch.setattr(md, "render", lambda text, *a: rendered.append(text) or real(text, *a))
+
+    first = api.preview(ids[0])["html"]
+    assert api.preview(ids[0])["html"] == first and len(rendered) == 1  # cached
+    assert api.preview(ids[0], "raw")["raw"] and len(rendered) == 1  # raw needs no render
+    api.set_option("clean", False)
+    api.preview(ids[0])
+    assert len(rendered) == 2  # the other Clean state is its own entry
+    api.set_option("clean", True)
+    for i in ids[1:5]:  # four more files push the first one out
+        api.preview(i)
+    api.preview(ids[0])
+    assert len(rendered) == 7 and len(api._html_cache) == bridge._HTML_CACHE_SIZE
+
+    api.retry(ids[0])  # a new result is rendered afresh, never the old HTML
+    _convert_all(api, [])
+    item = api._items[ids[0]]
+    item.result.markdown = "# Changed\n"
+    item.evict()
+    assert "Changed" in api.preview(ids[0])["html"] and len(rendered) == 8
+
+
+def test_failed_file_gets_its_code_and_next_step(api, tmp_path):
+    src = tmp_path / "broken.docx"
+    src.write_bytes(b"PK\x03\x04 not really a zip " * 50)
+    item = _convert(api, src)
+    page = api.preview(item.id)
+    assert page["state"] == "error"
+    assert page["code"] == "MS-107" and page["title"] and page["next"]
+    assert "Markdown Sidekick" in page["details"]
+    row = api._snapshot()["files"][0]
+    assert row["status"] == "error" and row["errCode"] == page["code"]
+
+
+def test_options_persist_and_junk_is_refused(api):
+    assert api.set_option("clean", False) == {"ok": True}
+    assert api.set_option("aiTarget", "ChatGPT") == {"ok": True}
+    assert api.set_option("aiTarget", "Nonsense") == {"ok": False}
+    assert api.set_option("export_style", "ai") == {"ok": False}  # not a page option
+    saved = Settings.load()
+    assert saved.clean_output is False and saved.ai_target == "ChatGPT"
+
+
+def test_only_web_links_leave_the_window(api, monkeypatch):
+    opened = []
+    monkeypatch.setattr(bridge.webbrowser, "open", opened.append)
+    for url in ("https://example.com/a", "javascript:alert(1)", "file:///C:/Windows", "", None):
+        api.open_url(url)
+    assert opened == ["https://example.com/a"]
+
+
+def test_folders_and_duplicates_are_not_added(api, tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_convert_pending", lambda: None)
+    f = tmp_path / "a.txt"
+    f.write_text("hello", encoding="utf-8")
+    api._add([str(f), str(f), str(tmp_path), str(tmp_path / "missing.txt")])
+    assert [r["name"] for r in api._snapshot()["files"]] == ["a.txt"]
+
+
+def test_a_folder_note_is_not_hidden_by_the_added_note(api, tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "_convert_pending", lambda: None)
+    f = tmp_path / "a.txt"
+    f.write_text("hello", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    api._add([str(f), str(tmp_path / "sub")])
+    status = api._snapshot()["status"]
+    assert "Added 1 file(s)." in status and "Skipped 1 folder(s)" in status and "MS-104" in status
+
+
+def test_a_fix_that_turns_ocr_on_redraws_the_switch(api):
+    assert api._snapshot()["ocr"] is False
+    api.fix("enable_ocr")
+    assert api._snapshot()["ocr"] is True and Settings.load().enable_ocr is True
+    _wait(lambda: '"ocr": true' in api._window.scripts[-1])  # the page was told
+    api._window.scripts.clear()
+    api.set_option("ocr", False)
+    _wait(lambda: api._window.scripts and '"ocr": false' in api._window.scripts[-1])
+
+
+def test_a_copy_that_fails_says_so_with_a_code(api, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    item = _convert(api, src)
+
+    def boom(*args):
+        raise RuntimeError("cleanup broke")
+
+    monkeypatch.setattr(api, "_text_and_report", boom)
+    assert api.copy(item.id) is False
+    assert "MS-903" in api._snapshot()["status"]
+
+
+def test_a_double_click_opens_one_file_dialog(api):
+    seconds = []
+    # The second click's call arrives while the first dialog is up.
+    api._window.on_dialog = lambda: seconds.append((api.pick_files(), api.browse_folder()))
+    api.pick_files()
+    assert len(api._window.dialogs) == 1 and seconds == [(None, "")]
+    assert api.browse_folder() == "" and len(api._window.dialogs) == 2  # free again afterwards
+
+
+def test_pushing_a_snapshot_never_waits_on_the_page(api):
+    """run_js returns only once the page has run the script; the conversion
+    worker must not wait on that (it did, twice per file)."""
+    import threading
+
+    gate = threading.Event()
+    sent = []
+
+    def slow_run_js(script):
+        gate.wait(5)  # the page is busy drawing
+        sent.append(script)
+
+    api._window.run_js = slow_run_js
+    started = time.monotonic()
+    for _ in range(50):
+        api._push(force=True)
+    assert time.monotonic() - started < 0.5
+    gate.set()
+    _wait(lambda: sent)
+    time.sleep(0.3)
+    assert len(sent) <= 3  # the burst coalesced
+    assert f'"seq": {api._seq}' in sent[-1]  # and the newest state went out last
+
+
+def test_the_probe_hook_is_not_part_of_the_page_api(api):
+    public = {n for n in dir(api) if not n.startswith("_") and callable(getattr(api, n))}
+    assert "probe_add" not in public and "preview" in public
+
+
+def test_snapshots_are_numbered_so_the_page_can_drop_stale_ones(api):
+    first, second = api._snapshot()["seq"], api._snapshot()["seq"]
+    assert second > first
+
+
+def test_clear_all_mid_conversion_says_what_is_still_running(api, tmp_path):
+    # The batch's file was cleared from the list; it can't be stopped part way.
+    api._busy, api._current, api._current_name = True, "f99", "talk.mp3"
+    snap = api._snapshot()
+    assert snap["status"].startswith("Finishing talk.mp3, which you removed") and snap["busy"] is True
+    assert "Converting" not in snap["status"]
+    # A file dropped meanwhile waits for it, and the status says why.
+    with api._lock:
+        api._items["f1"] = bridge._Item(id="f1", path=tmp_path / "next.md", size=1)
+    assert api._snapshot()["status"].endswith("1 file(s) wait for it.")
+    with api._lock:
+        api._items.clear()
+    api._busy, api._current = False, None  # it finished
+    assert api._snapshot()["status"].startswith("Ready") and api._snapshot()["busy"] is False
+
+
+def test_copy_survives_a_retry_mid_copy(api, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    item = _convert(api, src)
+    result = item.result
+    item.result = None  # a Retry lands between copy() reading the result and cleaning it
+    item.evict()
+    text, report, _ = api._text_and_report(item, result, True)
+    assert text.startswith("# A") and report.score >= 0
+
+
+def test_without_webview2_the_new_window_says_so(monkeypatch):
+    import types
+
+    import webview.platforms
+
+    from markdown_sidekick import webui
+
+    shown = []
+    fake = types.SimpleNamespace(renderer="mshtml")  # what pywebview picks with no WebView2 runtime
+    monkeypatch.setattr(webui, "_message_box", shown.append)
+    monkeypatch.setattr(webui.errors, "install_crash_hooks", lambda: None)
+    monkeypatch.setitem(sys.modules, "webview.platforms.winforms", fake)
+    monkeypatch.setattr(webview.platforms, "winforms", fake, raising=False)
+    with pytest.raises(SystemExit) as stop:
+        webui.run()
+    assert stop.value.code == 1
+    assert "MS-605" in shown[0] and "WebView2" in shown[0]
+
+
+def test_the_new_window_knows_what_this_pc_lacks(monkeypatch):
+    import types
+
+    import webview.platforms
+
+    from markdown_sidekick import webui
+
+    for renderer, lacks in (("edgechromium", False), ("mshtml", True)):
+        fake = types.SimpleNamespace(renderer=renderer)
+        monkeypatch.setitem(sys.modules, "webview.platforms.winforms", fake)
+        monkeypatch.setattr(webview.platforms, "winforms", fake, raising=False)
+        lack = webui.missing()
+        assert (lack is not None) is lacks
+        if lack:
+            assert "WebView2" in lack[0] and "mshtml" in lack[0]
+
+
+def test_a_missing_preview_renderer_is_named(monkeypatch):
+    import importlib.util
+
+    from markdown_sidekick import webui
+
+    real = importlib.util.find_spec
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name, *a: None if name == "markdown_it" else real(name, *a))
+    lack = webui.missing()
+    assert lack is not None and "markdown-it-py" in lack[0] and isinstance(lack[1], ImportError)
+
+
+def test_the_window_opens_before_the_heavy_libraries_load():
+    """Everything imported before the first paint stays light. numpy alone
+    took 1.3 s on a cold start; markitdown loads once the page is up."""
+    import subprocess
+
+    code = (
+        "import sys\n"
+        "from markdown_sidekick import start, webui\n"
+        "from markdown_sidekick.webui import bridge\n"
+        "assert webui.missing() is None, webui.missing()\n"
+        "heavy = ('numpy', 'pypdfium2', 'markitdown', 'markdown_it', 'onnxruntime', 'rapidocr', 'faster_whisper')\n"
+        "print(sorted(m for m in heavy if m in sys.modules))\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "[]"
+
+
+def test_the_engine_warms_up_once_the_page_is_ready(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "appdata"))
+    started = []
+
+    class Thread:
+        def __init__(self, target=None, name="", **kwargs):
+            self.name = name
+
+        def start(self):
+            started.append(self.name)
+
+    monkeypatch.setattr(bridge.threading, "Thread", Thread)
+    api = bridge.Api(Settings(enable_ocr=False, enable_audio=False))
+    api._window = FakeWindow()
+    assert "engine-warmup" not in started
+    api.ready()
+    api.ready()  # the page reloaded
+    assert started.count("engine-warmup") == 1
+
+
+def test_the_window_choice_is_saved_without_a_reconvert(api, tmp_path):
+    from markdown_sidekick.settings import preferred_window
+
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(api, [src])
+    api._window.confirm = False
+    assert api.settings_get()["values"]["window"] == "new"
+    assert api.settings_save({"window": "classic"})["ok"] is True
+    assert api._window.prompts == []  # it changes the next start, not a conversion
+    assert Settings.load().window == "classic" and preferred_window() == "classic"
+    api.settings_save({"window": "old"})
+    assert Settings.load().window == "new"
+
+
+@pytest.fixture
+def saving(api, monkeypatch):
+    """The api with Open-the-folder declined and startfile stubbed: a test
+    must never open Explorer."""
+    import os
+
+    opened = []
+    monkeypatch.setattr(os, "startfile", opened.append, raising=False)
+    api._window.confirm = False
+    api.opened = opened
+    return api
+
+
+def _convert_all(api, paths, timeout=60.0):
+    api._add([str(p) for p in paths])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with api._lock:
+            if not api._busy and all(i.result is not None and not i.preparing for i in api._items.values()):
+                return
+        time.sleep(0.05)
+    raise AssertionError("conversion did not finish")
+
+
+def test_save_one_file_through_a_save_dialog(saving, tmp_path):
+    import webview
+
+    src = tmp_path / "notes.md"
+    src.write_text("# Field Notes\n\nThe notes have a sentence of their own.\n", encoding="utf-8")
+    _convert_all(saving, [src])
+    dest = tmp_path / "out" / "Saved.md"
+    saving._window.picked = (str(dest),)
+    saving.save()
+    kind, kwargs = saving._window.dialogs[0]
+    assert kind == webview.FileDialog.SAVE and kwargs["save_filename"] == "notes.md"
+    text = dest.read_text(encoding="utf-8")
+    assert text.startswith("---\ntitle: Field Notes\n") and "source: notes.md" in text
+    assert saving._snapshot()["status"] == "Saved Saved.md." and not saving._window.prompts
+
+
+def test_saving_several_files_to_a_folder_never_collides(saving, tmp_path):
+    import webview
+
+    sources = []
+    for folder in ("a", "b"):
+        (tmp_path / folder).mkdir()
+        src = tmp_path / folder / "notes.md"
+        src.write_text(f"# Notes {folder}\n\nFolder {folder} has its own sentence.\n", encoding="utf-8")
+        sources.append(src)
+    _convert_all(saving, sources)
+    out = tmp_path / "out"
+    saving._window.picked = (str(out),)
+    saving.save()
+    assert saving._window.dialogs[0][0] == webview.FileDialog.FOLDER
+    assert sorted(p.name for p in out.iterdir()) == ["notes-2.md", "notes.md"]
+    assert "title: Notes b" in (out / "notes-2.md").read_text(encoding="utf-8")
+    assert "Saved 2 file(s)" in saving._snapshot()["status"]
+    assert saving._window.prompts and not saving.opened  # asked, declined, nothing opened
+
+
+def test_a_folder_save_asks_before_replacing_and_names_an_original(saving, tmp_path):
+    src = tmp_path / "meeting.md"  # saved beside itself, its output IS the source
+    src.write_text("# Meeting\n\nThe original notes.\n", encoding="utf-8")
+    other = tmp_path / "agenda.md"
+    other.write_text("# Agenda\n\nItems.\n", encoding="utf-8")
+    _convert_all(saving, [src, other])
+    saving._window.picked = (str(tmp_path),)
+    saving.save()  # confirm is False: Cancel
+    question = saving._window.prompts[0]
+    assert "2 of these already exist" in question and "meeting.md" in question and "agenda.md" in question
+    assert "replacing loses the original" in question
+    assert src.read_text(encoding="utf-8") == "# Meeting\n\nThe original notes.\n"  # untouched
+    assert saving._snapshot()["status"] == "Nothing saved."
+    saving._window.confirm = True
+    saving._window.prompts.clear()
+    saving.save()
+    assert src.read_text(encoding="utf-8").startswith("---\ntitle: Meeting")
+    assert "Saved 2 file(s)" in saving._snapshot()["status"] or saving.opened
+
+
+def test_a_folder_save_into_an_empty_folder_asks_nothing_first(saving, tmp_path):
+    src = tmp_path / "in" / "a.md"
+    src.parent.mkdir()
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    other = tmp_path / "in" / "b.md"
+    other.write_text("# B\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src, other])
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    assert len(saving._window.prompts) == 1 and "Open the folder?" in saving._window.prompts[0]
+
+
+def test_chapter_style_saves_a_book_folder(saving, tmp_path):
+    src = tmp_path / "book.md"
+    src.write_text("".join(f"# Chapter {n}\n\nChapter {n} says something new.\n\n" for n in range(1, 4)),
+                   encoding="utf-8")
+    _convert_all(saving, [src])
+    saving.set_option("exportStyle", "chapters")
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    book = tmp_path / "out" / "book"
+    assert (book / "index.md").exists() and (book / "manifest.json").exists()
+    assert len(list(book.glob("0*.md"))) == 3
+
+
+def test_save_greys_out_while_its_dialog_is_open_and_cancel_writes_nothing(saving, tmp_path):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src])
+    seen = []
+    saving._window.on_dialog = lambda: seen.append(saving._snapshot()["canSave"])
+    saving.save()  # picked is None: the dialog was cancelled
+    assert seen == [False]
+    assert saving._snapshot()["canSave"] is True
+    assert [p.name for p in tmp_path.rglob("*.md")] == ["a.md"]
+
+
+def test_a_failed_save_names_the_code_and_next_step(saving, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src])
+
+    def denied(*args, **kwargs):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(bridge.export, "save", denied)
+    saving._window.picked = (str(tmp_path / "out" / "a.md"),)
+    saving.save()
+    status = saving._snapshot()["status"]
+    assert "couldn't be saved (a.md)" in status and "MS-201" in status
+
+
+def test_nothing_to_save_says_so(saving):
+    saving.save()
+    assert not saving._window.dialogs and "Nothing to save yet" in saving._snapshot()["status"]
+
+
+def test_settings_dialog_gets_every_field_it_edits(api):
+    got = api.settings_get()
+    assert set(got["values"]) == set(bridge._SETTING_KEYS)
+    assert got["whisperModels"] and got["logDir"] and got["runtimes"]
+
+
+def test_settings_wait_for_a_running_conversion(api):
+    api._busy = True
+    assert api.settings_get() is None
+    assert "Finish the current conversion" in api._snapshot()["status"]
+    res = api.settings_save({"theme": "dark"})
+    assert res["ok"] is False and "your changes are still here" in res["message"]
+    assert api._settings.theme == "system"
+
+
+def test_settings_save_validates_persists_and_reaches_the_engine(api):
+    class Engine:
+        pass
+
+    api._engine_obj = Engine()
+    res = api.settings_save({"whisper_model": "huge", "ocr_device": "tpu", "theme": "dark", "pdf_layout": False,
+                             "extract_images": False, "export_style": "ai", "not_a_setting": 1})
+    assert res == {"ok": True, "clean": True, "rendered": True, "theme": "dark"}
+    saved = Settings.load()
+    assert saved.whisper_model == "base" and saved.ocr_device == "auto"  # junk became the default
+    assert saved.theme == "dark" and saved.pdf_layout is False
+    assert saved.export_style == "single"  # the export bar's, not the dialog's
+    assert api._engine_obj.pdf_layout is False and api._engine_obj.figure_markers is False
+
+
+def test_a_failed_settings_save_keeps_nothing(api, monkeypatch):
+    def denied(self):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(Settings, "save", denied)
+    res = api.settings_save({"theme": "dark"})
+    assert res["ok"] is False and "MS-502" in res["message"]
+    assert api._settings.theme == "system"
+
+
+def test_reconvert_is_offered_only_when_results_would_change(api, tmp_path, monkeypatch):
+    src = tmp_path / "a.md"
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(api, [src])
+    api._window.confirm = False
+    api.settings_save({"theme": "dark", "summary_model": "llama3.2", "clean_output": False})
+    assert api._window.prompts == []  # nothing a conversion produces changed
+    api.settings_save({"pdf_layout": False})
+    assert api._window.prompts == ["Re-convert the 1 loaded file(s) with the new settings?"]
+    monkeypatch.setattr(api, "_convert_pending", lambda: None)
+    api._window.confirm = True
+    api.settings_save({"pdf_layout": True})
+    assert next(iter(api._items.values())).result is None  # queued to convert again
+
+
+def test_debug_mode_follows_the_setting(api):
+    from markdown_sidekick import debuglog
+
+    api.settings_save({"debug_mode": True})
+    try:
+        assert debuglog.enabled()
+    finally:
+        api.settings_save({"debug_mode": False})
+    assert not debuglog.enabled()
+
+
+def test_detect_ai_says_what_it_found(api, monkeypatch):
+    from markdown_sidekick import polish
+
+    monkeypatch.setattr(polish, "detect_local_ai",
+                        lambda ep: ("ok", ["llama3.2", "llava"], "ollama", "http://localhost:11434"))
+    found = api.detect_ai("")
+    assert found["status"] == "ok" and found["models"] == ["llama3.2", "llava"]
+    assert found["endpoint"] == "http://localhost:11434" and "2 model(s)" in found["message"]
+    monkeypatch.setattr(polish, "detect_local_ai", lambda ep: ("unreachable", [], "", ""))
+    assert api.detect_ai("http://127.0.0.1:9")["message"] == "Nothing answered at that endpoint."
+    assert api.detect_ai("")["message"].startswith("No local AI found")
+
+
+def test_theme_is_remembered(api):
+    assert api.ready()["theme"] == "system"
+    assert api.set_option("theme", "dark") == {"ok": True}
+    assert api.set_option("theme", "purple") == {"ok": False}
+    assert Settings.load().theme == "dark"
+    junk = Settings(theme="purple")
+    junk.normalize()
+    assert junk.theme == "system"
+
+
+def test_copy_ai_prompt(api, monkeypatch):
+    copied = []
+    monkeypatch.setattr(bridge, "_set_clipboard", lambda text: copied.append(text) or True)
+    assert api.copy_ai_prompt() is True
+    assert "mcp" in copied[0].lower() and "AI setup prompt copied" in api._snapshot()["status"]
+
+
+def test_diagnostic_report(saving, tmp_path, monkeypatch):
+    from markdown_sidekick import diagnostics
+
+    made = []
+    monkeypatch.setattr(diagnostics, "build_report", lambda dest, include_snapshots=True: made.append(dest) or dest)
+    saving._window.picked = (str(tmp_path / "report.zip"),)
+    saving.create_report()
+    assert made == [tmp_path / "report.zip"] and "Diagnostic report saved" in saving._snapshot()["status"]
+    assert saving._window.prompts and not saving.opened  # asked, declined
+
+
+def test_dialogs_open_in_a_real_folder(saving, tmp_path):
+    src = tmp_path / "books" / "a.md"
+    src.parent.mkdir()
+    src.write_text("# A\n\ntext\n", encoding="utf-8")
+    _convert_all(saving, [src])
+    saving.save()  # cancelled: nothing picked
+    assert saving._window.dialogs[-1][1]["directory"] == str(src.parent)  # beside the source
+    saving.browse_folder()
+    assert saving._window.dialogs[-1][1]["directory"] == str(Path.home())
+
+
+def test_the_same_problem_is_one_note_not_one_per_file():
+    from markdown_sidekick import errors
+
+    no_ai = errors.report("MS-301", where="test")
+    figs = errors.report("MS-401", where="test")
+    lines = bridge._note_lines([("No summary for ", "a.pdf", no_ai), ("", "a.pdf", figs),
+                                ("No summary for ", "b.pdf", no_ai), ("No summary for ", "c.pdf", no_ai)])
+    assert lines == [f"No summary for 3 files: {no_ai.title} (MS-301)", f"a.pdf: {figs.title} (MS-401)"]
+
+
+def test_a_partial_failure_keeps_the_other_notes(saving, tmp_path, monkeypatch):
+    from markdown_sidekick import errors, polish
+
+    sources = []
+    for name in ("a.md", "b.md"):
+        (tmp_path / name).write_text(f"# {name}\n\nIts own sentence about {name}.\n", encoding="utf-8")
+        sources.append(tmp_path / name)
+    _convert_all(saving, sources)
+    saving._settings.ollama_endpoint, saving._settings.summary_model = "http://127.0.0.1:9", "m"
+    no_ai = errors.report("MS-301", where="test")
+    monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: None)
+    monkeypatch.setattr(polish, "take_last_failure", lambda: no_ai)
+    real_save, calls = bridge.export.save, []
+
+    def first_fails(*args, **kwargs):
+        calls.append(1)
+        if len(calls) == 1:
+            raise PermissionError(13, "Access is denied")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(bridge.export, "save", first_fails)
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    status = saving._snapshot()["status"]
+    assert "1 couldn't be saved (a.md)" in status and "MS-201" in status
+    assert "No summary for 2 files" in status
+
+
+def test_a_local_ai_that_didnt_answer_is_asked_once_per_save(saving, tmp_path, monkeypatch):
+    from markdown_sidekick import errors, polish
+
+    sources = []
+    for name in ("a.md", "b.md", "c.md"):
+        (tmp_path / name).write_text(f"# {name}\n\nIts own sentence about {name}.\n", encoding="utf-8")
+        sources.append(tmp_path / name)
+    _convert_all(saving, sources)
+    saving._settings.ollama_endpoint, saving._settings.summary_model = "http://127.0.0.1:9", "m"
+    asked, no_ai = [], errors.report("MS-301", where="test")
+    monkeypatch.setattr(polish, "summarize_markdown", lambda *a, **k: asked.append(1))
+    monkeypatch.setattr(polish, "take_last_failure", lambda: no_ai)
+    saving._window.picked = (str(tmp_path / "out"),)
+    saving.save()
+    assert asked == [1]  # one try, not three
+    status = saving._snapshot()["status"]
+    assert "No summary for 3 files" in status and "Saving" not in status
+
+
+def test_files_removed_while_waiting_are_not_converted(api, tmp_path, monkeypatch):
+    from markdown_sidekick.converter import ConversionResult
+
+    class Engine:
+        enable_ocr = False
+
+        def __init__(self):
+            self.calls = []
+
+        def convert_file(self, path, on_subprogress=None):
+            self.calls.append(Path(path).name)
+            return ConversionResult(source=Path(path), markdown=f"# {Path(path).stem}\n\ntext\n")
+
+    engine = api._engine_obj = Engine()
+    monkeypatch.setattr(api, "_convert_pending", lambda: None)
+    paths = []
+    for name in ("a.md", "b.md", "c.md"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+        paths.append(tmp_path / name)
+    api._add([str(p) for p in paths])
+    targets = list(api._items.values())
+    api.remove(targets[1].id)  # removed while it waited
+    api._busy = True
+    api._worker(targets, False)
+    assert engine.calls == ["a.md", "c.md"]
+    assert targets[1].result is None and not api._busy
+
+
+def test_the_title_says_when_debug_mode_is_on():
+    from markdown_sidekick import debuglog
+
+    assert "DEBUG" not in bridge.window_title()
+    debuglog.enable("webui", snapshots=False)
+    try:
+        assert bridge.window_title().endswith("·  DEBUG MODE")
+    finally:
+        debuglog.disable()
+
+
+def _flow(api):
+    from markdown_sidekick import updates
+
+    api._updates = updates.UpdateFlow(api._settings, api._save_quietly, on_change=lambda: api._push(force=True),
+                                      on_message=lambda text: api._flash(text, 8))
+    return api._updates
+
+
+def _wait(pred, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while not pred():
+        assert time.monotonic() < deadline, "timed out"
+        time.sleep(0.02)
+
+
+def test_the_first_run_question_and_its_answer(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    checked = []
+    monkeypatch.setattr(updates, "check", lambda *a, **k: checked.append(1))
+    _flow(api)
+    assert api.ready()["updateAsk"] is True
+    api.update_choice(False)
+    assert Settings.load().update_check == "off" and api.ready()["updateAsk"] is False
+    assert checked == []  # "Don't check" fetches nothing
+    api.update_choice(True)
+    _wait(lambda: checked)
+    assert Settings.load().update_check == "weekly"
+
+
+def test_an_update_is_offered_then_skipped(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    rel = updates.Release("9.9.9", "Faster OCR.", True, "u.exe", "https://example.invalid/u.exe", 1, "0" * 64)
+    monkeypatch.setattr(updates, "check", lambda *a, **k: rel)
+    flow = _flow(api)
+    api.check_updates()
+    _wait(lambda: flow.state == "available")
+    shown = api._snapshot()["update"]
+    assert shown["version"] == "9.9.9" and shown["important"] and shown["canUpdate"] is False  # not an installed copy
+    api.update_skip()
+    assert api._snapshot()["update"] is None and Settings.load().update_skip_version == "9.9.9"
+    flow.check(manual=False)  # the weekly check stays quiet about a skipped version
+    _wait(lambda: flow.state != "checking")
+    assert api._snapshot()["update"] is None
+
+
+def test_a_manual_check_says_up_to_date_or_why_not(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    monkeypatch.setattr(updates, "check", lambda *a, **k: None)
+    flow = _flow(api)
+    api.check_updates()
+    _wait(lambda: "latest version" in api._snapshot()["status"])
+
+    def offline(*a, **k):
+        raise updates.UpdateError("MS-701", "URLError")
+
+    monkeypatch.setattr(updates, "check", offline)
+    api.check_updates()
+    _wait(lambda: "MS-701" in api._snapshot()["status"])
+    assert flow.state == "idle"
+
+
+def test_closing_with_nothing_downloaded_installs_nothing(api, monkeypatch):
+    from markdown_sidekick import updates
+
+    started = []
+    monkeypatch.setattr(updates, "start_install", lambda *a: started.append(a))
+    _flow(api)
+    api._on_closing()
+    assert started == []
+
+
+def test_an_update_reopens_this_window_not_the_classic_one(api, monkeypatch):
+    from markdown_sidekick import errors, updates
+
+    made = []
+
+    class Flow:
+        def __init__(self, *args, **kwargs):
+            made.append(kwargs)
+
+    class NoThread:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(updates, "UpdateFlow", Flow)
+    monkeypatch.setattr(bridge.threading, "Thread", NoThread)
+    monkeypatch.setattr(errors, "add_listener", lambda listener: None)
+    api._attach(object())
+    assert made[0]["new_window"] is True
+
+
+def test_help_has_the_guide_sections(api):
+    titles = [s["title"] for s in api.help()]
+    assert any("Error codes" in t for t in titles)
+    assert all(s["html"].strip() for s in api.help())
