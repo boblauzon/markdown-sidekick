@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import random
 
+import pytest
+
 from markdown_sidekick.converter import ConversionEngine, explain_error
+from markdown_sidekick.quality import assess_markdown
 
 
 class TestExplainError:
@@ -123,6 +126,105 @@ class TestEmptyOutputGuard:
         res = self._engine().convert_file(p)
         assert not res.ok
         assert "produced no text" in (res.error or "")
+
+    @pytest.mark.parametrize("seed", [42, 7, 1234])
+    @pytest.mark.parametrize("ext", [".txt", ".csv", ".docx", ".xlsx", ".epub", ".bin", ".pdf"])
+    def test_garbage_with_no_ascii_bytes_reports_error(self, tmp_path, ext, seed):
+        # No byte below 0x80 means no spaces in the decoded text, so too few
+        # words for the word-based noise signals to run at all.
+        rng = random.Random(seed)
+        p = tmp_path / f"garbage{ext}"
+        p.write_bytes(bytes(rng.randrange(0x80, 0x100) for _ in range(16_384)))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+
+    @pytest.mark.parametrize("ext", [".txt", ".csv", ".docx", ".epub", ".pdf"])
+    def test_real_start_then_zeros_reports_error(self, tmp_path, ext):
+        # What a crash or a failed sync leaves. NUL is valid UTF-8, so only the
+        # output gives this away: asking whether the bytes decode would pass it.
+        p = tmp_path / f"partial{ext}"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 45 + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+
+    @pytest.mark.parametrize("ext", [".txt", ".csv", ".md", ".json", ".xml", ".html"])
+    def test_few_words_then_zeros_reports_error(self, tmp_path, ext):
+        # The same with too few words for the word-based noise signals.
+        p = tmp_path / f"partial{ext}"
+        p.write_bytes(b"Chapter one. A short start.\n" + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert not res.ok
+        assert "produced no text" in (res.error or "")
+
+    @pytest.mark.parametrize("ext", [".txt", ".md", ".json", ".csv"])
+    def test_long_text_then_zeros_converts_with_warning(self, tmp_path, ext):
+        # Too much real text to refuse: keep it, and say the end is missing.
+        p = tmp_path / f"cut{ext}"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 4_500 + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert [w.code for w in res.warnings] == ["MS-127"]
+
+    def test_long_text_then_zeros_drops_the_zeros(self, tmp_path):
+        p = tmp_path / "cut.txt"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 4_500 + bytes(100_000))
+        res = self._engine().convert_file(p)
+        assert "\x00" not in res.markdown
+        assert res.markdown.endswith("lazy dog.\n")
+
+    @pytest.mark.parametrize(
+        "tail", [b"", b"\n" * 100_000, b" The end, at last. " * 9_000], ids=["none", "newlines", "prose"]
+    )
+    def test_long_real_text_has_no_warning(self, tmp_path, tail):
+        p = tmp_path / "whole.txt"
+        p.write_bytes(b"The quick brown fox jumps over the lazy dog. " * 4_500 + tail)
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert res.warnings == []
+
+    def test_real_text_with_no_spaces_stays_ok(self, tmp_path):
+        # One long line has few words at any length, and that alone proves nothing.
+        p = tmp_path / "one-line.txt"
+        p.write_bytes(("これはテストの文章です。漢字とカタカナを混ぜて書きます。" * 1000).encode("shift_jis"))
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert not assess_markdown(res.markdown).binary_noise
+
+    @pytest.mark.parametrize(
+        "text, encoding",
+        [
+            ("Le coeur de l'été déjà passé, où êtes-vous allé à Noël ? ", "latin-1"),
+            ("Это пример текста на русском языке для проверки детектора. ", "cp1251"),
+            ("これはテストの文章です。日本語のカタカナとひらがな、漢字を混ぜます。\n", "shift_jis"),
+            ("这是一段用于测试编码检测器的中文文本，内容没有特别的意义。\n", "gb18030"),
+            ("A perfectly ordinary paragraph of plain English text. ", "utf-16"),
+        ],
+    )
+    def test_real_text_in_legacy_encodings_stays_ok(self, tmp_path, text, encoding):
+        # Not UTF-8, so these are the guard's likeliest false errors. Only the
+        # verdict is checked: charset detection can still pick a neighbouring
+        # code page, which isn't this guard's concern.
+        p = tmp_path / "legacy.txt"
+        p.write_bytes((text * 800).encode(encoding))
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert not assess_markdown(res.markdown).binary_noise
+
+    @pytest.mark.parametrize("ext", [".txt", ".md", ".html"])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Pythonでデータベースを操作する。HTTPリクエストはJSON形式で送信されます。\n応答時間は100μs以下です。\n",
+            "使用Python语言编写API接口。\n通过HTTP协议传输JSON数据。\n响应时间小于100μs。\n",
+        ],
+    )
+    def test_technical_text_mixing_scripts_stays_ok(self, tmp_path, text, ext):
+        # Big enough to be refused, not just warned about, if it rated as noise.
+        p = tmp_path / f"manual{ext}"
+        p.write_text(text * 400, encoding="utf-8")
+        res = self._engine().convert_file(p)
+        assert res.ok
+        assert not assess_markdown(res.markdown).binary_noise
 
     def test_small_empty_file_stays_ok(self, tmp_path):
         # Below the size floor an empty conversion is not evidence of
