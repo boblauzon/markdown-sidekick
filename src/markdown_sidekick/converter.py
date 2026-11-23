@@ -14,9 +14,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Iterable
 
-# markitdown's audio converter imports pydub, which warns on import when no
-# ffmpeg is on PATH. Audio goes through faster-whisper and PyAV's bundled
-# FFmpeg instead, so the warning is noise on every CLI run and MCP start.
+# Where pydub is installed (our requirements no longer pull it in), markitdown's
+# audio converter imports it and it warns when no ffmpeg is on PATH. Audio goes
+# through faster-whisper and PyAV's bundled FFmpeg, so the warning is noise.
 warnings.filterwarnings("ignore", message=r"Couldn't find ff(?:mpeg|probe)", category=RuntimeWarning)
 
 try:
@@ -25,10 +25,10 @@ try:
 except ImportError as exc:  # pragma: no cover - surfaced to the user in the UI
     raise ImportError(
         "The 'markitdown' package is not installed. Activate the project "
-        "virtual environment or run: pip install \"markitdown[all]\""
+        "virtual environment or run: pip install -r requirements.txt -c constraints.txt"
     ) from exc
 
-from . import audio, debuglog, errors, metadata, mineru, ocr, pdflayout
+from . import audio, debuglog, ebookdrm, errors, metadata, mineru, ocr, pdflayout
 
 
 # File extensions some route (markitdown, OCR, Whisper) can meaningfully
@@ -49,6 +49,9 @@ SUPPORTED_EXTENSIONS: tuple[str, ...] = (
     ".txt",
     ".md",
     ".epub",
+    # A store's download ticket: never converted, but accepted so the user
+    # learns what it is (MS-117) instead of the picker hiding it.
+    ".acsm",
     ".zip",
     ".png",
     ".jpg",
@@ -111,6 +114,18 @@ class ConversionResult:
     @property
     def title(self) -> str:
         return self.source.name
+
+    @property
+    def details(self) -> dict:
+        """The book's details as ``export.save`` takes them — plain data, so
+        a batch worker can return it and the MCP server can cache it."""
+        return {
+            "engine": self.engine,
+            "title": self.doc_title,
+            "author": self.doc_author,
+            "title_source": self.title_source,
+            "meta": dict(self.doc_meta),
+        }
 
 
 def _attach_metadata(result: ConversionResult) -> None:
@@ -275,6 +290,9 @@ class ConversionEngine:
         if source.is_dir():
             return ConversionResult(source=source, error="Path is a directory, not a file.")
         ext = source.suffix.lower()
+        locked = self._unconvertible_ebook(source, ext)
+        if locked is not None:
+            return locked
         try:
             # Specialised routes are attempted defensively: on any failure
             # (corrupt/encrypted file, render error, missing/undownloadable model)
@@ -470,6 +488,38 @@ class ConversionEngine:
         except Exception as exc:  # markitdown raises a variety of types
             failures.append(("markitdown", exc))
             return ConversionResult(source=source, error=f"{type(exc).__name__}: {exc}")
+
+    @staticmethod
+    def _unconvertible_ebook(source: Path, ext: str) -> ConversionResult | None:
+        """A store download ticket or a DRM-locked epub: no route can read
+        either, and each deserves its own explanation rather than "no text"
+        (a ticket) or "corrupt" (the encrypted book)."""
+        if ext in ebookdrm.TICKET_EXTENSIONS or (ext == ".xml" and ebookdrm.is_ticket(source)):
+            ticket = ebookdrm.read_ticket(source) or {}
+            what = f" for {ticket['title']!r}" if ticket.get("title") else ""
+            if ticket.get("author"):
+                what += f" by {ticket['author']}"
+            if ticket.get("store"):
+                what += f" from {ticket['store']}"
+            if debuglog.enabled():
+                debuglog.event("convert.download_ticket", **ticket)
+            return ConversionResult(
+                source=source,
+                error=f"DownloadTicketError: an Adobe download ticket{what}, not the book itself",
+                doc_title=ticket.get("title", ""),
+                doc_author=ticket.get("author", ""),
+            )
+        if ext in ebookdrm.DRM_EXTENSIONS:
+            scheme = ebookdrm.drm_scheme(source)
+            if scheme:
+                if debuglog.enabled():
+                    debuglog.event("convert.drm", scheme=scheme)
+                label = "an unrecognised scheme" if scheme == "unknown" else scheme
+                return ConversionResult(
+                    source=source,
+                    error=f"DrmProtectedError: the book is copy-protected ({label} DRM)",
+                )
+        return None
 
     # The warning a failed route leaves when a later route still produced
     # the document.

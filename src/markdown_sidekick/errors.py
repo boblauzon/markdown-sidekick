@@ -8,7 +8,8 @@ a one-click trigger the GUI renders as a button ("Turn on OCR & retry").
 message on screen leads straight to the traceback on disk.
 
 Areas: 1xx conversion · 2xx saving · 3xx local AI · 4xx figures ·
-5xx settings · 6xx system (clipboard, folders, reports) · 9xx unexpected.
+5xx settings · 6xx system (clipboard, folders, reports) · 7xx install and
+updates · 9xx unexpected.
 
 Stdlib only — settings.py imports this module.
 """
@@ -60,7 +61,10 @@ ACTIONS: dict[str, str] = {
     "copy_again": "Copy again",
     "raw_preview": "Show raw Markdown",
     "open_logs": "Open log folder",
+    "webview2": "Get WebView2…",
 }
+# Where "webview2" sends the user (Setup's finish page links here too).
+WEBVIEW2_URL = "https://developer.microsoft.com/microsoft-edge/webview2/"
 
 _SPECS: tuple[ErrorSpec, ...] = (
     # -- 1xx conversion -------------------------------------------------------
@@ -163,6 +167,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "retry",
     ),
     ErrorSpec(
+        "MS-117",
+        "This is a store's download ticket (.acsm), not the book itself.",
+        "Open it in Adobe Digital Editions or your store's reading app to download the book — "
+        "tickets expire a few hours after purchase. Books sold with DRM can't be converted; "
+        "if the store offers a DRM-free download, convert that file instead.",
+        "remove",
+    ),
+    ErrorSpec(
+        "MS-118",
+        "This e-book is copy-protected (DRM), so its text can't be read.",
+        "Markdown Sidekick doesn't remove DRM. If the store or publisher offers a DRM-free "
+        "edition (EPUB or PDF), download and convert that instead.",
+        "remove",
+    ),
+    ErrorSpec(
         "MS-120",
         "The column-aware PDF reader failed, so the basic reader was used — "
         "columns and tables may be out of order.",
@@ -222,6 +241,17 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "There is no section with that number.",
         "Get the section list from convert_outline and use one of its indexes "
         "(with the same max_tokens).",
+    ),
+    ErrorSpec(
+        "MS-133",
+        "That address is on this computer or a private network, so it wasn't downloaded.",
+        "If you meant that address, download the file yourself and convert the local copy.",
+    ),
+    ErrorSpec(
+        "MS-134",
+        "That site's security certificate couldn't be verified, so it wasn't downloaded.",
+        "The site's certificate may be faulty, or something on your network may be intercepting the "
+        "connection. If you trust the site, download the file in your browser and convert the local copy.",
     ),
     ErrorSpec(
         "MS-199",
@@ -371,6 +401,57 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "The built-in user guide couldn't be loaded — a file is missing from this installation.",
         "Reinstall Markdown Sidekick to restore it.",
     ),
+    ErrorSpec(
+        "MS-605",
+        "The new window can't start — a part it needs isn't on this PC.",
+        "Start Markdown Sidekick with --classic to use the classic window. To use the new one, "
+        "install Microsoft's Edge WebView2 Runtime; the details say what was missing.",
+    ),
+    ErrorSpec(
+        "MS-606",
+        "The new window can't run on this PC yet, so the classic window opened.",
+        "Install Microsoft's free Edge WebView2 Runtime, then start Markdown Sidekick again; the "
+        "details say what was missing. To keep the classic window, choose it in Settings → Output.",
+        "webview2",
+        "warning",
+    ),
+    ErrorSpec(
+        "MS-607",
+        "The new window didn't start, so the classic window opened.",
+        "Microsoft's Edge WebView2 Runtime is installed but didn't start; the details say why. Repair "
+        "or reinstall it from Microsoft's page, then start Markdown Sidekick again. To keep the "
+        "classic window, choose it in Settings → Output.",
+        "webview2",
+        "warning",
+    ),
+    # -- 7xx install and updates --------------------------------------------------
+    ErrorSpec(
+        "MS-701",
+        "Couldn't check for updates — GitHub didn't answer.",
+        "Check your internet connection and try again later, or see the latest release at "
+        "github.com/boblauzon/markdown-sidekick/releases.",
+        severity="warning",
+    ),
+    ErrorSpec(
+        "MS-702",
+        "The update didn't pass its safety check, so it wasn't used.",
+        "Nothing was installed. Try again later, or download the latest release from "
+        "github.com/boblauzon/markdown-sidekick/releases. If it keeps happening, report it with this reference.",
+    ),
+    ErrorSpec(
+        "MS-703",
+        "The update couldn't be downloaded.",
+        "Check your internet connection and free disk space, then choose Update again; "
+        "the download resumes where it stopped.",
+        severity="warning",
+    ),
+    ErrorSpec(
+        "MS-704",
+        "The update didn't install, so you're still on the previous version.",
+        "Choose Update to try again, or run the installer from the latest release yourself. "
+        "The installer's log is in the details.",
+        "open_logs",
+    ),
     # -- 9xx unexpected ---------------------------------------------------------
     ErrorSpec(
         "MS-900",
@@ -408,6 +489,7 @@ _AREAS = (
     ("4", "Figures"),
     ("5", "Settings"),
     ("6", "Clipboard, folders, reports, help"),
+    ("7", "Installing and updating"),
     ("9", "Unexpected errors"),
 )
 
@@ -569,6 +651,10 @@ def report(
 _CONVERSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), code)
     for pattern, code in (
+        # Raised by the converter itself (ebookdrm); before MS-101, whose
+        # "encrypt" would otherwise claim a DRM-locked book.
+        (r"DownloadTicketError", "MS-117"),
+        (r"DrmProtectedError", "MS-118"),
         (r"password|encrypt|decrypt", "MS-101"),
         # ERROR_CLOUD_FILE_* (WinError 358-404): the sync provider couldn't
         # deliver a placeholder's contents. Before MS-102, whose "Permission

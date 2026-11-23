@@ -1,7 +1,10 @@
 """Convenience launcher so the app can run from the project root.
 
 Usage:
-    python app.py             # launch the GUI
+    python app.py             # open the app: the window chosen in Settings
+                              # (the new one unless the user picked classic)
+    python app.py --new-ui    # the new window for this run
+    python app.py --classic   # the classic (Tk) window for this run
     python app.py --cli ...   # headless CLI (convert, capabilities, diagnostics)
     python app.py --mcp       # run the MCP server over stdio (for AI clients)
     python app.py --selftest  # verify the conversion pipeline, write a JSON
@@ -177,6 +180,14 @@ def _selftest() -> int:
 
         report["checks"]["user_guide"] = len(load_user_guide()) > 2000
 
+        # Updates verify a signature offline: the crypto must be in the build.
+        from markdown_sidekick import netguard, updates
+
+        report["checks"]["update_signature"] = updates.selftest()
+
+        # Downloads trust Mozilla's certificate roots: their file must be in it too.
+        report["checks"]["url_certificates"] = netguard.selftest()
+
         # The MCP server (and fastmcp) must be present so `--mcp` works.
         try:
             import markdown_sidekick.mcp_server  # noqa: F401
@@ -234,6 +245,8 @@ Usage:
   MarkdownSidekick.exe --cli <command>    the same CLI from the windowed exe
   MarkdownSidekick.exe --mcp              MCP server over stdio, for AI clients
   MarkdownSidekick.exe --selftest         check the conversion pipeline (exit 0/1)
+  MarkdownSidekick.exe --new-ui           open the new window this time
+  MarkdownSidekick.exe --classic          open the classic window this time
   --debug                                 add to any of the above to record a trace
   --help, --version                       print this or the version, and exit
 """
@@ -299,7 +312,20 @@ if __name__ == "__main__":
 
         args = sys.argv[sys.argv.index("--cli") + 1 :] if "--cli" in sys.argv else sys.argv[1:]
         sys.exit(cli_main(args))
-    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in _HELP_FLAGS]
+    from markdown_sidekick.start import WINDOW_FLAGS, open_window
+
+    window_flag = next((a for a in sys.argv[1:] if a in WINDOW_FLAGS), None)
+    if window_flag and not any(a in _HELP_FLAGS for a in sys.argv[1:]):
+        # One window for this run, whatever Settings say.
+        extra = [a for a in sys.argv[1:] if a != window_flag]
+        if extra:
+            _ensure_stdout()
+            print(f"{window_flag} takes no other arguments (got: {' '.join(extra)})\n", file=sys.stderr)
+            print(USAGE.format(version=_version()))
+            sys.exit(2)
+        open_window(window_flag)
+        sys.exit(0)
+    unknown = [a for a in sys.argv[1:] if a.startswith("-") and a not in _HELP_FLAGS + tuple(WINDOW_FLAGS)]
     if any(a in _HELP_FLAGS for a in sys.argv[1:]) or unknown:
         # Never fall through to the GUI on a flag we don't know: a script or
         # an agent asking for --help must get text back, not a window.
@@ -308,6 +334,4 @@ if __name__ == "__main__":
             print(f"Unknown option: {' '.join(unknown)}\n", file=sys.stderr)
         print(USAGE.format(version=_version()))
         sys.exit(2 if unknown else 0)
-    from markdown_sidekick.ui import run
-
-    run()
+    open_window(None)

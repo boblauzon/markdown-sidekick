@@ -9,7 +9,8 @@ parallel agents and three post-processing scripts; this is all of it.
 Guarantees:
 
 - Every input in scope ends in exactly one row: ``converted``, ``skipped``
-  (``unchanged`` since the last run, ``unsupported_format``, ``cancelled``)
+  (``unchanged`` since the last run, ``unsupported_format``, ``download_ticket``,
+  ``drm_protected``, ``duplicate``, ``cancelled``)
   or ``failed`` (with its MS-… error code). converted + skipped + failed =
   total.
 - "Converted" means the output was read back (export.write_text_verified).
@@ -44,13 +45,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Iterable
 
-from . import debuglog, errors, export
+from . import debuglog, errors, export, metadata
 from .dedupe import DEFAULT_PREFERENCE
+from .ebookdrm import TICKET_EXTENSIONS, drm_scheme, read_ticket
 
 MANIFEST_NAME = "_manifest.json"
 MANIFEST_CSV = "_manifest.csv"
 NAMING_MODES = ("source", "title", "title_author")
-STYLES = ("single", "chapters", "ai")
+STYLES = export.STYLES
 
 # What a folder walk picks up by default: documents and ebooks. Images,
 # audio, .md/.txt and data files in a library are usually screenshots,
@@ -59,6 +61,10 @@ LIBRARY_EXTENSIONS = frozenset({".pdf", ".epub", ".docx", ".pptx", ".xlsx", ".xl
 # Ebook formats a library holds that no engine here reads (their usual
 # readers are GPL); listed in the manifest as skipped so they are not lost.
 UNSUPPORTED_EBOOK_EXTENSIONS = frozenset({".mobi", ".azw", ".azw3", ".prc", ".djvu", ".kfx"})
+# Store download tickets (ebookdrm.TICKET_EXTENSIONS) are listed as skipped,
+# naming the book they are for, so a library walk shows which purchases were
+# never downloaded.
+_LISTED_ONLY = UNSUPPORTED_EBOOK_EXTENSIONS | TICKET_EXTENSIONS
 # Folders never walked into: tool environments and caches hold thousands of
 # files that are not the user's documents. Hidden (.x) and system ($x)
 # folders are skipped too, as is the output root itself.
@@ -126,7 +132,7 @@ class BatchOptions:
 class BatchRow:
     source: str
     status: str = ""  # converted | skipped | failed
-    reason: str = ""  # unchanged | unsupported_format | cancelled | conversion_failed | save_failed
+    reason: str = ""  # unchanged | unsupported_format | download_ticket | drm_protected | duplicate | cancelled | conversion_failed | save_failed
     code: str = ""  # MS-… for a failure (or a warning on a converted file)
     message: str = ""
     output: str = ""  # the .md file, or the book folder
@@ -222,7 +228,7 @@ def discover(inputs: Iterable[str | os.PathLike[str]], options: BatchOptions) ->
         root = Path(raw)
         if root.is_file():
             ext = root.suffix.lower()
-            if ext in SUPPORTED_EXTENSIONS or ext in UNSUPPORTED_EBOOK_EXTENSIONS:
+            if ext in SUPPORTED_EXTENSIONS or ext in _LISTED_ONLY:
                 jobs.setdefault(os.path.normcase(str(root.resolve())), _Job(root, Path()))
             continue
         if not root.is_dir():
@@ -244,10 +250,10 @@ def discover(inputs: Iterable[str | os.PathLike[str]], options: BatchOptions) ->
                 ext = path.suffix.lower()
                 if options.include:
                     wanted = _matches(name, rel, options.include) and (
-                        ext in SUPPORTED_EXTENSIONS or ext in UNSUPPORTED_EBOOK_EXTENSIONS
+                        ext in SUPPORTED_EXTENSIONS or ext in _LISTED_ONLY
                     )
                 else:
-                    wanted = ext in LIBRARY_EXTENSIONS or ext in UNSUPPORTED_EBOOK_EXTENSIONS
+                    wanted = ext in LIBRARY_EXTENSIONS or ext in _LISTED_ONLY
                 if wanted:
                     key = os.path.normcase(str(path.resolve()))
                     jobs.setdefault(key, _Job(path, here.relative_to(root)))
@@ -485,10 +491,7 @@ def _convert_job(source: str, clean: bool) -> dict:
         report = assess_markdown(markdown)
         out.update(
             markdown=markdown,
-            title=result.doc_title,
-            author=result.doc_author,
-            title_source=result.title_source,
-            meta=dict(result.doc_meta),
+            details=result.details,
             quality=report.score,
             issues=list(report.issues),
             est_tokens=report.est_tokens,
@@ -518,7 +521,10 @@ def _plan(jobs: list[_Job], options: BatchOptions, previous: dict[str, BatchRow]
         from .dedupe import find_duplicates
 
         converted_before = {k for k, r in previous.items() if r.status == "converted" or r.reason == "unchanged"}
-        dupes = find_duplicates([j.source for j in jobs], options.prefer, keep_hint=converted_before)
+        # A ticket is not a copy of its book: grouped with the locked epub it
+        # downloaded, it would be "kept" and the book called its duplicate.
+        books = [j.source for j in jobs if j.source.suffix.lower() not in TICKET_EXTENSIONS]
+        dupes = find_duplicates(books, options.prefer, keep_hint=converted_before)
     decided: list[BatchRow] = []
     to_convert: list[_Job] = []
     for job in jobs:
@@ -535,11 +541,32 @@ def _plan(jobs: list[_Job], options: BatchOptions, previous: dict[str, BatchRow]
             row.message = errors.CATALOG["MS-105"].title
             decided.append(row)
             continue
+        if job.source.suffix.lower() in TICKET_EXTENSIONS:
+            ticket = read_ticket(job.source) or {}
+            row.status, row.reason = "skipped", "download_ticket"
+            row.code = "MS-117"
+            row.title = ticket.get("title", "")
+            row.authors = [ticket["author"]] if ticket.get("author") else []
+            row.message = errors.CATALOG["MS-117"].title
+            decided.append(row)
+            continue
         prev = previous.get(_key(job.source))
         if options.skip_existing and _unchanged(prev, row, fingerprint):
             kept = BatchRow(**asdict(prev))
             kept.status, kept.reason, kept.code, kept.message, kept.duration_s = "skipped", "unchanged", "", "", 0.0
             decided.append(kept)
+            continue
+        # Checked only for files about to convert (an unchanged source is
+        # never opened); a few KB read, against a conversion. A locked book
+        # is a store purchase, not a failure to retry on every run.
+        if drm_scheme(job.source):
+            meta = metadata.read_metadata(job.source)
+            row.status, row.reason = "skipped", "drm_protected"
+            row.code = "MS-118"
+            row.title = meta.get("title", "")
+            row.authors = list(meta.get("authors", []))
+            row.message = errors.CATALOG["MS-118"].title
+            decided.append(row)
             continue
         to_convert.append(job)
     return decided, to_convert
@@ -726,11 +753,12 @@ def _finish_job(job: _Job, data: dict | None, exc: BaseException | None, options
         row.message, row.error_ref = f"{spec.title} {spec.next_step}", data.get("error_ref", "")
         return row
 
-    meta = data.get("meta") or {}
+    details = data["details"]
+    meta = details.get("meta") or {}
     markdown = data["markdown"]
-    row.title, row.title_source = export.resolve_title(markdown, job.source.name, data.get("title", ""),
-                                                       data.get("title_source", ""))
-    row.authors = list(meta.get("authors") or ([data["author"]] if data.get("author") else []))
+    row.title, row.title_source = export.resolve_title(markdown, job.source.name, details.get("title", ""),
+                                                       details.get("title_source", ""))
+    row.authors = list(meta.get("authors") or ([details["author"]] if details.get("author") else []))
     row.identifier = meta.get("identifier", "")
     row.quality, row.issues, row.est_tokens = data.get("quality"), data.get("issues", []), data.get("est_tokens", 0)
     if data.get("warnings"):
@@ -748,7 +776,7 @@ def _finish_job(job: _Job, data: dict | None, exc: BaseException | None, options
             out_dir, _base_name(row, job.source, options.naming), suffix="" if book else ".md",
             source=row.source, owned=owned, edition=edition, author=row.authors[0] if row.authors else "",
         )
-        files = _export(job.source, markdown, target, book, data, options, row)
+        files = _export(job.source, markdown, target, data, options, row)
     except Exception as exc:
         code = errors.classify_os_error(exc) if isinstance(exc, OSError) else "MS-901"
         incident = errors.report(code, exc=exc, where="batch save", file=str(job.source))
@@ -762,14 +790,13 @@ def _finish_job(job: _Job, data: dict | None, exc: BaseException | None, options
     return row
 
 
-def _export(source: Path, markdown: str, target: Path, book: bool, data: dict,
+def _export(source: Path, markdown: str, target: Path, data: dict,
             options: BatchOptions, row: BatchRow) -> list[Path]:
     from . import figures
 
     figs: list = []
     if options.images and source.suffix.lower() == ".pdf":
-        images_dir = target / "images" if book else target.parent / "images" / target.stem
-        rel_dir = "images" if book else f"images/{target.stem}"
+        images_dir, rel_dir = export.figure_dirs(target, options.style)
         try:
             figs = figures.extract_pdf_figures(source, images_dir)
         except Exception as exc:  # the Markdown is still worth saving
@@ -778,25 +805,8 @@ def _export(source: Path, markdown: str, target: Path, book: bool, data: dict,
         markdown = figures.insert_figure_links(markdown, figs, rel_dir)
     else:
         markdown = figures.strip_figure_markers(markdown)
-    common = dict(
-        source=source.name,
-        engine=data.get("engine", ""),
-        front_matter=options.front_matter,
-        title=row.title,
-        author=", ".join(row.authors),
-        title_source=row.title_source,
-        meta=data.get("meta") or {},
-    )
-    if book:
-        notebook = options.style == "ai" and options.ai_target in export.NOTEBOOK_TARGETS
-        res = export.export_book(
-            markdown, target,
-            max_tokens=export.AI_TARGETS[options.ai_target] if options.style == "ai" else export.DEFAULT_MAX_TOKENS,
-            ai_sections=options.style == "ai",
-            notebook=notebook,
-            **common,
-        )
-        written = list(res.paths) + [p for p in (res.index_path, res.manifest_path) if p]
-    else:
-        written = export.export_single(markdown, target, **common).paths
-    return written + [f.path for f in figs]
+    # The title as resolved before figure links went in (the manifest row's).
+    details = {**data["details"], "title": row.title, "title_source": row.title_source}
+    res = export.save(markdown, target, source=source.name, style=options.style, ai_target=options.ai_target,
+                      details=details, front_matter=options.front_matter)
+    return res.files + [f.path for f in figs]
