@@ -17,7 +17,7 @@
 ; window and says why, and Setup's last page offers the download page.
 
 #define MyAppName "Markdown Sidekick"
-#define MyAppVersion "1.3.0"
+#define MyAppVersion "1.4.0"
 #define MyAppPublisher "VibeProSoft"
 #define MyAppURL "https://github.com/boblauzon/markdown-sidekick"
 #define MyAppExeName "MarkdownSidekick.exe"
