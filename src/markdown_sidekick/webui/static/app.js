@@ -272,7 +272,8 @@ function drawConverting(sel) {
 }
 
 function errorHtml(p) {
-  const fix = p.action && p.action !== 'retry' ? `<button class="btn btn-secondary" data-fix="${esc(p.action)}">${esc(p.actionLabel)}</button>` : '';
+  // Retry and Remove are always on the page: never a second copy as the fix.
+  const fix = p.action && p.action !== 'retry' && p.action !== 'remove' ? `<button class="btn btn-secondary" data-fix="${esc(p.action)}">${esc(p.actionLabel)}</button>` : '';
   return `<div class="errpage">
     <div class="head"><span class="mark">${icon('x', 20, 2.6)}</span><span class="code">${esc(p.code)}</span><span class="muted" style="font-size:13px">This file didn’t convert</span></div>
     <h2>${esc(p.title)}</h2>

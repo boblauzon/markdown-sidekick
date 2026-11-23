@@ -47,6 +47,7 @@ The output shape is chosen in the GUI's export bar and persisted as `Settings.ex
 
 **Conversion routing** (`converter.py::ConversionEngine.convert_file`) — tries specialised engines in order, each wrapped in try/except that falls through to the next; `convert_file` never raises, errors land on `ConversionResult.error`:
 
+0. before any route (`_unconvertible_ebook`, `ebookdrm.py`): a store's `.acsm` download ticket → MS-117 naming the book; a DRM-protected epub/PDF → MS-118 (never fetched, never decrypted, never handed to MinerU/pdfium). Detection needs positive evidence of encrypted content (font obfuscation and a bare `/Standard` password are not DRM) and `drm_scheme` never raises. Batches list both as skipped (`download_ticket` / `drm_protected`); dedupe ranks locked books with `.mobi` and leaves tickets out.
 1. image file + OCR enabled → RapidOCR (`engine="ocr"`)
 2. PDF + MinerU endpoint configured → remote MinerU (`"mineru"`)
 3. PDF that triages as scanned (`ocr.analyze_pdf`: low text layer + page-dominating image **or** ≥12 vector paths) → `pdflayout` with OCR as the per-page text provider for the scanned pages (`"ocr+text"`, always anchored)

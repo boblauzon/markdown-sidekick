@@ -441,7 +441,8 @@ def convert_batch(
     site-packages, .git), hidden folders and output_root itself; the folder
     structure is mirrored. Every input ends in one manifest row
     (output_root/_manifest.json and .csv): converted, skipped (unchanged
-    since the last run, unsupported_format such as .mobi, or cancelled) or
+    since the last run, unsupported_format such as .mobi, download_ticket
+    for a store's .acsm, drm_protected, duplicate, or cancelled) or
     failed with its MS-… code. A saved file is read back before it counts
     as converted. Re-running converts only new or changed sources.
 

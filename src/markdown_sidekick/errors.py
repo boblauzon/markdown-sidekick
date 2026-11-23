@@ -167,6 +167,21 @@ _SPECS: tuple[ErrorSpec, ...] = (
         "retry",
     ),
     ErrorSpec(
+        "MS-117",
+        "This is a store's download ticket (.acsm), not the book itself.",
+        "Open it in Adobe Digital Editions or your store's reading app to download the book — "
+        "tickets expire a few hours after purchase. Books sold with DRM can't be converted; "
+        "if the store offers a DRM-free download, convert that file instead.",
+        "remove",
+    ),
+    ErrorSpec(
+        "MS-118",
+        "This e-book is copy-protected (DRM), so its text can't be read.",
+        "Markdown Sidekick doesn't remove DRM. If the store or publisher offers a DRM-free "
+        "edition (EPUB or PDF), download and convert that instead.",
+        "remove",
+    ),
+    ErrorSpec(
         "MS-120",
         "The column-aware PDF reader failed, so the basic reader was used — "
         "columns and tables may be out of order.",
@@ -636,6 +651,10 @@ def report(
 _CONVERSION_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(pattern, re.IGNORECASE), code)
     for pattern, code in (
+        # Raised by the converter itself (ebookdrm); before MS-101, whose
+        # "encrypt" would otherwise claim a DRM-locked book.
+        (r"DownloadTicketError", "MS-117"),
+        (r"DrmProtectedError", "MS-118"),
         (r"password|encrypt|decrypt", "MS-101"),
         # ERROR_CLOUD_FILE_* (WinError 358-404): the sync provider couldn't
         # deliver a placeholder's contents. Before MS-102, whose "Permission

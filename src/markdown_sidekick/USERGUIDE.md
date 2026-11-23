@@ -111,6 +111,10 @@ results always match the current configuration.
 | Audio | MP3, WAV, M4A, FLAC, OGG |
 | Archives | ZIP (contents converted recursively) |
 
+E-books must be DRM-free. A copy-protected epub or PDF (MS-118) and a store's
+`.acsm` download ticket (MS-117) are recognised and explained, but not
+converted — see *Troubleshooting*.
+
 ---
 
 ## Clean Output — what it actually does
@@ -393,7 +397,9 @@ MarkdownSidekick-cli.exe batch "D:\eBooks" --out "D:\eBooks-md" --naming title
   added (`--overwrite` turns this off).
 - **Every input gets one row** in `_manifest.json` and `_manifest.csv` in the
   output folder: converted, skipped (unchanged since the last run, an
-  unsupported format such as `.mobi`, or cancelled) or failed with its
+  unsupported format such as `.mobi`, a store's `.acsm` download ticket
+  — listed with the book it is for — a copy-protected (DRM) epub or PDF,
+  or cancelled) or failed with its
   error code. A file only counts as converted once it has been read back.
 - **Re-runs are quick:** sources that haven't changed since the last run
   (same size, date and settings, outputs still there) are skipped without
@@ -496,6 +502,22 @@ A false positive common to PyInstaller apps. The app makes no network
 connections except the one-time Whisper model download and your optional
 MinerU endpoint. Build from source if your policy requires it.
 
+**An .acsm file from Kobo, Google Play or a library won't convert**
+An `.acsm` file is not the book: it is a few lines of text that let Adobe
+Digital Editions (or the store's own app) download it once, and it expires
+a few hours after purchase. Books delivered this way are copy-protected
+(DRM), and Markdown Sidekick does not remove DRM. Look in your store
+account for a DRM-free download (some publishers sell DRM-free epubs), or
+use a PDF or epub you are free to convert.
+
+**An epub or PDF says it is copy-protected (MS-118)**
+The book is encrypted for one reader app (Adobe, Readium LCP, Apple or
+FileOpen). Embedded-font obfuscation, which many DRM-free epubs use, is
+not DRM and converts normally; a PDF that only asks for a password is
+MS-101, not DRM. In a library batch, protected books are listed as skipped
+(`drm_protected`) rather than failing on every run, and a DRM-free copy of
+the same book (another epub, a PDF) is always preferred over a protected one.
+
 **Audio file won't transcribe**
 Check Settings → *Transcribe audio files* is on. A silent file produces
 "(No speech detected.)" rather than an error.
@@ -556,6 +578,8 @@ your documents' text (file names and paths, yes).
 | MS-114 | The MinerU server didn't return a result, so the PDF was converted locally. *(warning)* | Check the server is running at the endpoint in Settings → Conversion, or clear the endpoint to stop using it. | Open Conversion settings |
 | MS-115 | Audio/video transcription is turned off. | Turn on transcription to convert this file. | Turn on transcription & retry |
 | MS-116 | This file is online-only (OneDrive, Dropbox, iCloud…) and couldn't be downloaded. | Make sure the sync app is running and signed in, or mark the file "Always keep on this device" in File Explorer, then convert it again. | Retry |
+| MS-117 | This is a store's download ticket (.acsm), not the book itself. | Open it in Adobe Digital Editions or your store's reading app to download the book — tickets expire a few hours after purchase. Books sold with DRM can't be converted; if the store offers a DRM-free download, convert that file instead. | Remove from list |
+| MS-118 | This e-book is copy-protected (DRM), so its text can't be read. | Markdown Sidekick doesn't remove DRM. If the store or publisher offers a DRM-free edition (EPUB or PDF), download and convert that instead. | Remove from list |
 | MS-120 | The column-aware PDF reader failed, so the basic reader was used — columns and tables may be out of order. *(warning)* | Retry. If it happens again, report it with this error's reference. | Retry |
 | MS-121 | OCR failed on this PDF's scanned pages, so only its text layer was kept. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |
 | MS-122 | OCR failed on this image, so only basic image information was extracted. *(warning)* | Switch OCR to the CPU — the graphics driver is the usual cause — and retry. | Use CPU for OCR & retry |

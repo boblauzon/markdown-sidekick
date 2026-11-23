@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import debuglog, metadata
+from .ebookdrm import drm_scheme
 
 # Keep this format when a book is held in several. Formats nothing here can
 # read rank after every readable one whatever their place in this order.
@@ -63,6 +64,7 @@ class BookInfo:
     edition: str = ""
     surnames: frozenset[str] = frozenset()
     fname_key: str = ""
+    locked: bool = False  # a DRM-protected epub or PDF: as unreadable as a .mobi
 
 
 def _norm(text: str) -> str:
@@ -132,13 +134,16 @@ def identify(path: Path) -> BookInfo:
     except OSError:
         return info
     title, subtitle, authors = "", "", []
+    # Before any reader opens it: pdfium handed a DRM security handler it
+    # doesn't know is no source of metadata, and not a risk worth taking.
+    info.locked = bool(drm_scheme(path))  # "" for formats it doesn't check
     if ext == ".epub":
         meta = metadata.epub_metadata(path)
         title, subtitle = meta.get("title", ""), meta.get("subtitle", "")
         authors = meta.get("authors", [])
         if meta.get("identifier", "").startswith("isbn:"):
             info.isbn = meta["identifier"]
-    elif ext == ".pdf":
+    elif ext == ".pdf" and not info.locked:
         raw_title, raw_author = _pdf_meta(path)
         title, subtitle = metadata.split_subtitle(metadata.tidy_title(metadata.clean_value(raw_title)))
         authors = metadata.split_authors([metadata.clean_value(raw_author)])
@@ -253,7 +258,7 @@ def find_duplicates(
     def rank(i: int) -> tuple:
         info = infos[i]
         hinted = os.path.normcase(os.path.abspath(str(info.path))) in keep_hint
-        return (info.ext in UNREADABLE, rank_of.get(info.ext, len(prefer)), not hinted, len(str(info.path)), str(info.path))
+        return (info.ext in UNREADABLE or info.locked, rank_of.get(info.ext, len(prefer)), not hinted, len(str(info.path)), str(info.path))
 
     dupes: dict[Path, Path] = {}
     for root in {find(i) for i in range(len(infos))}:
