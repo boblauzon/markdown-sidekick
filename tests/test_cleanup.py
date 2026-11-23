@@ -720,3 +720,25 @@ class TestJoinScaling:
         longest = max(len(ln) for ln in out.split("\n"))
         # _JOIN_MAX_LEN (4000) + one more joined line of slack
         assert longest < 4200
+
+
+class TestUnderlineTags:
+    """markitdown 0.1.8 wraps underlined runs in <u>; 0.1.6 didn't."""
+
+    def test_unwrapped_in_prose_and_tables(self):
+        from markdown_sidekick.cleanup import clean_markdown
+
+        md = "Intro\n\n<u>POP - Post Office Protocol</u>\n\n| 0 <u><</u> *t* <u><</u> 1 | Between |\n|---|---|\n"
+        out, stats = clean_markdown(md)
+        assert "<u>" not in out and "</u>" not in out
+        assert "POP - Post Office Protocol" in out
+        assert "| 0 < *t* < 1 | Between |" in out
+        assert stats.chars_normalized >= 6
+
+    def test_code_keeps_its_tags(self):
+        from markdown_sidekick.cleanup import clean_markdown
+
+        md = "Use `<u>` for underline.\n\n```html\n<p><u>underlined</u></p>\n```\n"
+        out, _ = clean_markdown(md)
+        assert "`<u>`" in out
+        assert "<p><u>underlined</u></p>" in out

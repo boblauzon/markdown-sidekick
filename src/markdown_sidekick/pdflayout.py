@@ -136,6 +136,9 @@ class LayoutResult:
     markdown: str
     title: str = ""
     author: str = ""
+    # Where the title came from, in front-matter terms (metadata.py):
+    # "pdf_info" or "title_page"; "" when there is no title.
+    title_source: str = ""
     stats: LayoutStats = field(default_factory=LayoutStats)
 
 
@@ -1621,7 +1624,22 @@ def extract_markdown(
             author=author,
             pages=page_summary,
         )
-    return LayoutResult(text.strip() + "\n", title=title, author=author, stats=stats)
+    return LayoutResult(
+        text.strip() + "\n",
+        title=title,
+        author=author,
+        title_source=_FRONT_MATTER_SOURCE.get(title_source, "") if title else "",
+        stats=stats,
+    )
+
+
+# pdflayout's own (debug-trace) title sources -> the front-matter vocabulary.
+_FRONT_MATTER_SOURCE = {
+    "metadata": "pdf_info",
+    "title_bookmark": "title_page",
+    "copyright_page": "title_page",
+    "first_page": "title_page",
+}
 
 
 def _page_summary(raw_pages: list, pages: list[list[_Block]]) -> list[list]:

@@ -1557,6 +1557,8 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                     summary=summary,
                     title=result.doc_title if result else "",
                     author=result.doc_author if result else "",
+                    title_source=result.title_source if result else "",
+                    meta=result.doc_meta if result else None,
                 )
         except Exception as exc:
             self._show_error(self._save_incident(exc, dest_path))
@@ -1714,6 +1716,10 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
         engine = result.engine if result else ""
         title = result.doc_title if result else ""
         author = result.doc_author if result else ""
+        meta_kw = {
+            "title_source": result.title_source if result else "",
+            "meta": result.doc_meta if result else None,
+        }
         if split:
             # Disambiguate same-stem sources so one book folder can never
             # silently overwrite another's chapters/index/manifest.
@@ -1741,6 +1747,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
                 title=title,
                 author=author,
                 notebook=notebook,
+                **meta_kw,
             )
             return len(res.paths)
         dest = default_output_path(path, out)
@@ -1765,6 +1772,7 @@ class MarkdownSidekickApp(_root_class()):  # type: ignore[misc]
             summary=summary,
             title=title,
             author=author,
+            **meta_kw,
         )
         return 1
 

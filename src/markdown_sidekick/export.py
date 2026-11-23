@@ -25,8 +25,13 @@ index.md / manifest.json (see :func:`split_for_notebook`).
 
 from __future__ import annotations
 
+import contextlib
+import errno
+import hashlib
 import json
+import os
 import re
+import time
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
@@ -95,20 +100,199 @@ def _one_line(value: str) -> str:
     return re.sub(r"\s*[\r\n]+\s*", " ", _YAML_HOSTILE_RE.sub("", value)).strip()
 
 
+# A plain scalar that YAML would read as something other than the string:
+# a number, a boolean/null (YAML 1.1 and 1.2 spellings), or one that starts
+# with an indicator character ("*NIX" is an alias, "- x" a sequence, "!" a tag).
+_YAML_NON_STRING_RE = re.compile(
+    r"^(?:[-+]?(?:\d[\d_]*)?\.?\d+(?:[eE][-+]?\d+)?|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)"
+    r"|0x[0-9a-fA-F]+|0o[0-7]+|~|null|Null|NULL|true|True|TRUE|false|False|FALSE"
+    r"|yes|Yes|YES|no|No|NO|on|On|ON|off|Off|OFF|y|Y|n|N)$"
+)
+_YAML_LEADING_RE = re.compile(r"^[-?:,\[\]{}#&*!|>'\"%@`\s]")
+_YAML_INNER_RE = re.compile(r"[:#\[\]{}\"'|>&%@`,]|\s$")
+
+
+def _yaml_scalar(value: str) -> str:
+    if _YAML_INNER_RE.search(value) or _YAML_LEADING_RE.match(value) or _YAML_NON_STRING_RE.match(value):
+        return '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+    return value
+
+
 def build_front_matter(fields: dict[str, object]) -> str:
-    """Minimal YAML front matter. Values are scalars; strings are quoted only
-    when they contain YAML-significant characters."""
+    """Minimal YAML front matter. Values are scalars or lists of strings;
+    strings are quoted only when YAML would otherwise misread them."""
     lines = ["---"]
     for key, value in fields.items():
+        if isinstance(value, (list, tuple)):
+            items = [_one_line(str(v)) for v in value]
+            items = [v for v in items if v]
+            if items:
+                lines.append(f"{key}:")
+                lines.extend(f"  - {_yaml_scalar(v)}" for v in items)
+            continue
         if isinstance(value, str):
             value = _one_line(value)
         if value is None or value == "":
             continue
-        if isinstance(value, str) and re.search(r"[:#\[\]{}\"'|>&%@`,]", value):
-            value = '"' + value.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        if isinstance(value, str):
+            value = _yaml_scalar(value)
         lines.append(f"{key}: {value}")
     lines.append("---")
     return "\n".join(lines) + "\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Verified, atomic writes
+# ---------------------------------------------------------------------------
+class SaveVerificationError(OSError):
+    """A file was written but could not be confirmed on disk afterwards.
+
+    ``ms_code`` is the error code to show (errors.classify_os_error reads
+    it): MS-205 when Windows reports antivirus interference, else MS-206.
+    """
+
+    def __init__(self, path: Path, ms_code: str, detail: str) -> None:
+        super().__init__(errno.EIO, detail, str(path))
+        self.ms_code = ms_code
+
+
+# Seconds to wait between attempts at a transient failure (a sync client or
+# scanner briefly holding the file): about 15 s in all before giving up.
+_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0, 8.0)
+_VIRUS_WINERRORS = frozenset({225, 226})  # ERROR_VIRUS_INFECTED / _DELETED
+# Sharing/lock violations, a user-mapped section, cloud-file provider states.
+_TRANSIENT_WINERRORS = frozenset({32, 33, 1224, 362, 383, 388, 390, 395})
+
+
+def _is_transient(exc: OSError, *, replacing: bool = False) -> bool:
+    winerror = getattr(exc, "winerror", None)
+    if winerror in _VIRUS_WINERRORS:
+        return False
+    if winerror in _TRANSIENT_WINERRORS or exc.errno == 22:  # EINVAL: OneDrive mid-sync
+        return True
+    # A scanner or indexer opening the new file makes a rename briefly fail
+    # with "access denied"; a folder we really can't write to fails earlier,
+    # when the temporary file is created.
+    return replacing and isinstance(exc, PermissionError)
+
+
+def _virus_error(exc: OSError) -> bool:
+    return getattr(exc, "winerror", None) in _VIRUS_WINERRORS
+
+
+def write_text_verified(path: Path, content: str) -> None:
+    """Write ``content`` (UTF-8, platform line endings — what ``write_text``
+    wrote before) atomically, then read it back and compare.
+
+    The text goes to a temporary file in the same folder, which replaces the
+    target in one step, so a reader never sees half a file. Reading the
+    result back is what surfaces antivirus quarantine (opening a flagged
+    file fails) and cloud-sync placeholders; transient failures are retried
+    with backoff. Raises an ``OSError`` — :class:`SaveVerificationError` when
+    the write itself succeeded but the file can't be confirmed — so
+    "saved" is only ever reported for a file that is really there.
+    """
+    data = content.replace("\n", os.linesep).encode("utf-8")
+    digest = hashlib.sha256(data).digest()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    try:
+        with open(tmp, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        try:
+            _retrying(lambda: os.replace(tmp, path), path, replacing=True)
+        except PermissionError:
+            # An editor holding the old file open blocks the rename with
+            # "access denied". Writing in place either works (most editors
+            # share the file) or fails with the error that names the cause —
+            # "in use by another program" rather than "not allowed".
+            with open(path, "wb") as fh:
+                fh.write(data)
+    finally:
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+    _verify(path, len(data), digest)
+
+
+def _retrying(op, path: Path, *, replacing: bool = False) -> None:
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        try:
+            op()
+            return
+        except FileNotFoundError as exc:
+            # Our own temporary file vanished between write and rename.
+            raise SaveVerificationError(path, "MS-206", "the file disappeared right after it was written") from exc
+        except OSError as exc:
+            if _virus_error(exc):
+                raise SaveVerificationError(path, "MS-205", "antivirus blocked the file") from exc
+            if delay is None or not _is_transient(exc, replacing=replacing):
+                raise
+            debuglog.event("export.retry", level="warning", path=str(path), attempt=attempt + 1,
+                           error=f"{type(exc).__name__}: {exc}")
+            time.sleep(delay)
+
+
+# Asks Windows Defender whether it flagged the file in the last few minutes.
+# The path arrives through the environment, never inside the command text.
+_DEFENDER_QUERY = (
+    "$p = $env:MS_SIDEKICK_SAVED.ToLower(); "
+    "$since = (Get-Date).AddMinutes(-10); "
+    "$hit = Get-MpThreatDetection -ErrorAction Stop | Where-Object { "
+    "$_.InitialDetectionTime -gt $since -and "
+    "($_.Resources | Where-Object { $_ -and $_.ToLower().Contains($p) }) }; "
+    "if ($hit) { 'flagged' } else { 'clean' }"
+)
+
+
+def _defender_flagged(path: Path) -> bool:
+    """Did Windows Defender just quarantine this file? Defender removes a
+    flagged file moments after it is written, so the read-back finds it
+    *missing* rather than failing with ERROR_VIRUS_INFECTED; its detection
+    history is the only way to tell that from a sync client or a disk.
+    Asked only when a just-written file has vanished (rare), never for a
+    normal save. Any failure (not Windows, no Defender, no rights) -> False."""
+    if os.name != "nt":
+        return False
+    import subprocess
+
+    try:
+        proc = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _DEFENDER_QUERY],
+            env={**os.environ, "MS_SIDEKICK_SAVED": str(path.resolve())},
+            capture_output=True, text=True, timeout=30,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        debuglog.exception("export.defender_query", exc, path=str(path))
+        return False
+    flagged = proc.stdout.strip().endswith("flagged")
+    debuglog.event("export.defender_query", path=str(path), flagged=flagged, rc=proc.returncode)
+    return flagged
+
+
+def _verify(path: Path, size: int, digest: bytes) -> None:
+    last = "the saved file doesn't match what was written"
+    for attempt, delay in enumerate((*_RETRY_DELAYS, None)):
+        try:
+            with open(path, "rb") as fh:
+                back = fh.read()
+            if len(back) == size and hashlib.sha256(back).digest() == digest:
+                return
+        except FileNotFoundError:
+            last = "the saved file is missing"
+        except OSError as exc:
+            if _virus_error(exc):
+                raise SaveVerificationError(path, "MS-205", "antivirus blocked the file") from exc
+            last = f"the saved file can't be read ({type(exc).__name__}: {exc})"
+        if delay is None:
+            break
+        debuglog.event("export.verify_retry", level="warning", path=str(path), attempt=attempt + 1, problem=last)
+        time.sleep(delay)
+    if last == "the saved file is missing" and _defender_flagged(path):
+        raise SaveVerificationError(path, "MS-205", "antivirus removed the file right after it was written")
+    raise SaveVerificationError(path, "MS-206", last)
 
 
 @dataclass
@@ -397,14 +581,70 @@ def _hard_split(lines: list[str], max_chars: int) -> list[str]:
     return [chunk for chunk in chunks if chunk]
 
 
+# First headings that name a section of the book, not the book: a title
+# guessed from the first heading must never be one of these.
+_SECTION_HEADING_RE = re.compile(
+    r"^(?:(?:table\s+of\s+)?contents|preface|foreword|introduction|acknowledge?ments?|"
+    r"contributors|about\s+the\s+(?:authors?|reviewers?|book)|dedication|copyright(?:\s+.*)?|"
+    r"credits|title\s+page|cover|half[\s-]title|epigraph|other\s+books\s+.*|"
+    r"(?:also\s+)?by\s+the\s+same\s+author.*|praise\s+for\s+.*|index|glossary)$",
+    re.IGNORECASE,
+)
+# Copy suffixes on downloaded files: "name (1)", "name_V2", "name - Copy".
+_COPY_SUFFIX_RE = re.compile(r"(?:\s*\(\d+\)|[_\s-]+v\d+|\s+-\s+copy(?:\s*\(\d+\))?)$", re.IGNORECASE)
+
+
 def document_title(markdown: str, fallback: str) -> str:
     for line in markdown.split("\n"):
         m = _H1_RE.match(line)
         if m:
-            return m.group(1)
+            heading = m.group(1).strip("*_ ").strip()
+            return fallback if _SECTION_HEADING_RE.match(heading) else m.group(1)
         if line.strip():
             break
     return fallback
+
+
+def tidy_filename_title(stem: str) -> str:
+    """A readable title from a filename: ``Grokking_Algorithms (1)`` ->
+    ``Grokking Algorithms``. Run-together names stay as they are — there is
+    no safe way to re-space ``ccnacertificationstudyguide``."""
+    text = stem
+    while (shorter := _COPY_SUFFIX_RE.sub("", text)) != text and shorter.strip():
+        text = shorter
+    text = re.sub(r"[_]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip(" .-")
+    return text or stem
+
+
+def resolve_title(markdown: str, source: str, title: str = "", title_source: str = "") -> tuple[str, str]:
+    """The document's title and where it came from (metadata.py's
+    ``title_source`` vocabulary): the converter's own (source metadata or
+    title page), else the first heading unless it names a section such as
+    "Preface", else the filename, tidied."""
+    if title:
+        return title, title_source or "metadata"
+    stem = Path(source).stem
+    heading = document_title(markdown, "")
+    if heading:
+        return heading, "heading"
+    return tidy_filename_title(stem), "filename"
+
+
+def _meta_fields(meta: dict | None, author: str) -> dict[str, object]:
+    """Front-matter fields from the source's metadata, in display order.
+    ``author`` stays a single line (its meaning since 1.0); ``authors`` is
+    the list form, written when there is more than one name."""
+    meta = meta or {}
+    authors = [a for a in meta.get("authors") or [] if a]
+    return {
+        "author": author or ", ".join(authors),
+        "authors": authors if len(authors) > 1 else None,
+        "publisher": meta.get("publisher", ""),
+        "date": meta.get("date", ""),
+        "language": meta.get("language", ""),
+        "identifier": meta.get("identifier", ""),
+    }
 
 
 _IMAGE_ALT_RE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")
@@ -502,26 +742,35 @@ def export_single(
     title: str = "",
     author: str = "",
     notebook: bool = False,
+    title_source: str = "",
+    meta: dict | None = None,
 ) -> ExportResult:
     """Write one decorated Markdown file.
 
     ``summary`` (optional, from the local-AI pass) becomes a ``summary:``
     front-matter field; blank means the field is simply absent. ``title`` /
-    ``author`` come from the source's own metadata when the converter could
-    vouch for them; a blank title falls back to the document's first heading.
+    ``author`` / ``meta`` come from the source's own metadata when the
+    converter could vouch for them (``ConversionResult.doc_title``,
+    ``doc_author``, ``doc_meta``, with ``title_source`` saying where the
+    title came from); a blank title falls back to the document's first
+    heading, then the filename (see :func:`resolve_title`).
     ``notebook`` writes a Gemini Notebook source (see :func:`export_book`).
+    The file is written atomically and read back (:func:`write_text_verified`).
     """
     content = markdown
+    title, title_source = resolve_title(markdown, source, title, title_source)
+    meta = meta or {}
     if notebook:
         content = notebook_figures(markdown)
         if front_matter:
-            book = title or document_title(markdown, Path(source).stem)
-            content = _notebook_header(book, author, summary=summary) + content
+            content = _notebook_header(title, author or ", ".join(meta.get("authors") or []), summary=summary) + content
     elif front_matter:
         content = build_front_matter(
             {
-                "title": title or document_title(markdown, Path(source).stem),
-                "author": author,
+                "title": title,
+                "subtitle": meta.get("subtitle", ""),
+                "title_source": title_source,
+                **_meta_fields(meta, author),
                 "summary": summary,
                 "source": source,
                 "converted": date.today().isoformat(),
@@ -530,8 +779,7 @@ def export_single(
                 "image_count": count_images(markdown) or None,
             }
         ) + markdown
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(content, encoding="utf-8")
+    write_text_verified(out_path, content)
     debuglog.event(
         "export.single",
         path=str(out_path),
@@ -556,6 +804,8 @@ def export_book(
     title: str = "",
     author: str = "",
     notebook: bool = False,
+    title_source: str = "",
+    meta: dict | None = None,
 ) -> ExportResult:
     """Write a book folder (split parts + index.md + manifest.json).
 
@@ -576,9 +826,14 @@ def export_book(
     YAML (summary and list of parts on the first part only), image links
     reduced to their captions, and no index.md or manifest.json — every file
     in the folder is a source to upload.
+
+    ``title`` / ``author`` / ``title_source`` / ``meta`` are as for
+    :func:`export_single`; every file is written atomically and read back.
     """
     stem = Path(source).stem
-    title = title or document_title(markdown, stem)
+    title, title_source = resolve_title(markdown, source, title, title_source)
+    meta = meta or {}
+    author = author or ", ".join(meta.get("authors") or [])
     if notebook:
         markdown = notebook_figures(markdown)
         sections = split_for_notebook(markdown, max_tokens)
@@ -598,6 +853,8 @@ def export_book(
             title=title,
             author=author,
             notebook=notebook,
+            title_source=title_source,
+            meta=meta,
         )
 
     result = ExportResult()
@@ -633,6 +890,8 @@ def export_book(
                     "title": sec.title or title,
                     "book": title,
                     "author": author,
+                    "authors": _meta_fields(meta, author)["authors"],
+                    "identifier": meta.get("identifier", ""),
                     "book_summary": summary,
                     "part": f"{n} of {total}",
                     "source": source,
@@ -642,7 +901,7 @@ def export_book(
                     "image_count": images or None,
                 }
             ) + sec.markdown
-        path.write_text(content, encoding="utf-8")
+        write_text_verified(path, content)
         result.paths.append(path)
         manifest_files.append(
             {
@@ -673,11 +932,18 @@ def export_book(
     for entry in manifest_files:
         index_lines.append(f"- [{entry['title'] or 'Front matter'}]({entry['file']})")
     result.index_path = out_dir / "index.md"
-    result.index_path.write_text("\n".join(index_lines) + "\n", encoding="utf-8")
+    write_text_verified(result.index_path, "\n".join(index_lines) + "\n")
 
     manifest = {
         "title": title,
+        "subtitle": meta.get("subtitle", ""),
+        "title_source": title_source,
         "author": author,
+        "authors": list(meta.get("authors") or ([author] if author else [])),
+        "publisher": meta.get("publisher", ""),
+        "date": meta.get("date", ""),
+        "language": meta.get("language", ""),
+        "identifier": meta.get("identifier", ""),
         "summary": summary,
         "source": source,
         "engine": engine,
@@ -687,7 +953,5 @@ def export_book(
         "files": manifest_files,
     }
     result.manifest_path = out_dir / "manifest.json"
-    result.manifest_path.write_text(
-        json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8"
-    )
+    write_text_verified(result.manifest_path, json.dumps(manifest, indent=2, ensure_ascii=False))
     return result

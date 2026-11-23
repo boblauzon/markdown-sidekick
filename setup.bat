@@ -17,7 +17,14 @@ if not exist "%ROOT%.venv\Scripts\python.exe" (
 
 echo Installing dependencies ^(this can take a few minutes^)...
 "%ROOT%.venv\Scripts\python.exe" -m pip install --upgrade pip
-"%ROOT%.venv\Scripts\python.exe" -m pip install -r "%ROOT%requirements.txt"
+"%ROOT%.venv\Scripts\python.exe" -m pip install -r "%ROOT%requirements.txt" -c "%ROOT%constraints.txt"
+if errorlevel 1 exit /b 1
+
+REM magika depends on the CPU-only "onnxruntime", which installs into the same
+REM folder as "onnxruntime-directml" and silently disables GPU OCR (~5x slower).
+REM Remove it and restore the DirectML build.
+"%ROOT%.venv\Scripts\python.exe" -m pip uninstall -y onnxruntime >nul 2>nul
+"%ROOT%.venv\Scripts\python.exe" -m pip install --force-reinstall --no-deps onnxruntime-directml -c "%ROOT%constraints.txt"
 if errorlevel 1 exit /b 1
 
 echo.

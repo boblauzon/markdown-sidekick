@@ -499,7 +499,7 @@ class TestSummaryInExport:
         export_single("# T\n\nbody\n", out, source="doc.pdf", summary="What it is: a test.")
         text = out.read_text(encoding="utf-8")
         assert 'summary: "What it is: a test."' in text  # colon forces quoting
-        assert text.index("summary:") < text.index("source:")
+        assert text.index("\nsummary:") < text.index("\nsource:")
 
     def test_blank_summary_leaves_no_field(self, tmp_path):
         out = tmp_path / "doc.md"

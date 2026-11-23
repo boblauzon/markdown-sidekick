@@ -1,4 +1,4 @@
-# PyInstaller spec for Markdown Sidekick (one-folder, windowed).
+# PyInstaller spec for Markdown Sidekick (one-folder: windowed app + console CLI exe).
 # Build:  .venv\Scripts\pyinstaller.exe MarkdownSidekick.spec --noconfirm
 #
 # collect_all is used for every package that ships non-Python assets the import
@@ -55,8 +55,23 @@ exe = EXE(
     icon="assets/MarkdownSidekick.ico",  # multi-size; also used by the installer
 )
 
+# The same launcher as a console program, for terminals, scripts and agents:
+# app.py sees the "-cli" name and hands every argument to the CLI. A console
+# exe makes the shell wait for it and receive its output and exit code — the
+# windowed exe can do neither. It shares the one _internal folder.
+exe_cli = EXE(
+    pyz,
+    a.scripts,
+    exclude_binaries=True,
+    name="MarkdownSidekick-cli",
+    console=True,
+    upx=False,
+    icon="assets/MarkdownSidekick.ico",
+)
+
 coll = COLLECT(
     exe,
+    exe_cli,
     a.binaries,
     a.datas,
     name="MarkdownSidekick",
